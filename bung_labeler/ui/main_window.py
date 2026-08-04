@@ -10,9 +10,12 @@ from pathlib import Path
 # Allow this file to be launched directly during troubleshooting, e.g.
 # python bung_labeler/ui/main_window.py, without losing access to the
 # bundled bung_labeler package.
-_PROJECT_ROOT = Path(__file__).resolve().parents[2]
-if str(_PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(_PROJECT_ROOT))
+# Skipped when frozen: PyInstaller already resolves the bundled package, and
+# parents[2] would point inside the bundle rather than at a real source tree.
+if not getattr(sys, "frozen", False):
+    _PROJECT_ROOT = Path(__file__).resolve().parents[2]
+    if str(_PROJECT_ROOT) not in sys.path:
+        sys.path.insert(0, str(_PROJECT_ROOT))
 
 import numpy as np
 

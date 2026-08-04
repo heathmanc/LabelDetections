@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import time
 from dataclasses import dataclass, asdict
 from pathlib import Path
@@ -9,7 +10,22 @@ from typing import Any
 import cv2
 import numpy as np
 
-ROOT = Path(__file__).resolve().parents[2]
+def _app_root() -> Path:
+    """Directory that holds the user-writable ``data`` folder.
+
+    When running from source this is the repo root. When frozen by PyInstaller
+    the package lives inside the bundle (``_internal/bung_labeler/core``), so
+    ``__file__``-relative paths would point *inside* the app — which is wiped on
+    upgrade and is read-only under ``C:\\Program Files``. Anchor to the folder
+    containing the executable instead, so captures/labels/exports sit beside the
+    .exe and survive reinstalls.
+    """
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parents[2]
+
+
+ROOT = _app_root()
 DATA_DIR = ROOT / "data"
 CAPTURE_DIR = DATA_DIR / "captures"
 LABEL_DIR = DATA_DIR / "labels"
