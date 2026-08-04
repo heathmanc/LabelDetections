@@ -549,7 +549,10 @@ class MainWindow(QMainWindow):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        # AsNeeded, not AlwaysOff: the pane is capped at a maximum width, so
+        # any row wider than the cap was silently clipped with no way to reach
+        # it. A bar now appears only when something genuinely does not fit.
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         scroll.setMinimumWidth(min_width)
         scroll.resize(preferred_width, scroll.height())
         widget.setMinimumWidth(min_width - 22)
@@ -722,7 +725,7 @@ class MainWindow(QMainWindow):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         outer_layout.addWidget(scroll)
 
         w = QWidget()
@@ -753,7 +756,10 @@ class MainWindow(QMainWindow):
         self.train_model_edit.setPlaceholderText("yolo11s-obb.pt or path to a .pt checkpoint")
         model_browse = QPushButton("Model...")
         model_browse.clicked.connect(self.browse_train_model)
-        r = QHBoxLayout(); r.addWidget(self.train_model_edit); r.addWidget(model_browse)
+        # The edit takes the slack; a long checkpoint path must not push the
+        # browse button off the edge of the pane.
+        self.train_model_edit.setMinimumWidth(120)
+        r = QHBoxLayout(); r.addWidget(self.train_model_edit, 1); r.addWidget(model_browse)
         files.addWidget(QLabel("Base model")); files.addLayout(r)
 
         self.train_data_edit = QLineEdit(str(params["data"]))
@@ -763,8 +769,15 @@ class MainWindow(QMainWindow):
         data_latest = QPushButton("Latest export")
         data_latest.setToolTip("Fill in the most recently created export's data.yaml.")
         data_latest.clicked.connect(self.use_latest_export_for_training)
-        r = QHBoxLayout(); r.addWidget(self.train_data_edit); r.addWidget(data_browse); r.addWidget(data_latest)
-        files.addWidget(QLabel("Data YAML")); files.addLayout(r)
+        # Buttons on their own row: a long path plus two buttons on one line
+        # forced the group wider than the left pane's maximum width.
+        files.addWidget(QLabel("Data YAML"))
+        files.addWidget(self.train_data_edit)
+        r = QHBoxLayout()
+        for b in (data_browse, data_latest):
+            b.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            r.addWidget(b)
+        files.addLayout(r)
         layout.addWidget(files_box)
 
         params_box = QGroupBox("Training parameters")
@@ -808,7 +821,9 @@ class MainWindow(QMainWindow):
         grid.addWidget(_lbl("Device"), 0, 2); grid.addWidget(self.train_device_edit, 0, 3)
         # Row 1: Image size | Batch
         grid.addWidget(_lbl("Image size"), 1, 0); grid.addWidget(self.train_imgsz_spin, 1, 1)
-        grid.addWidget(_lbl("Batch (-1=auto)"), 1, 2); grid.addWidget(self.train_batch_spin, 1, 3)
+        _batch_lbl = _lbl("Batch")
+        _batch_lbl.setToolTip("-1 lets Ultralytics auto-pick the batch size for your GPU.")
+        grid.addWidget(_batch_lbl, 1, 2); grid.addWidget(self.train_batch_spin, 1, 3)
         # Row 2: Epochs | Patience
         grid.addWidget(_lbl("Epochs"), 2, 0); grid.addWidget(self.train_epochs_spin, 2, 1)
         grid.addWidget(_lbl("Patience"), 2, 2); grid.addWidget(self.train_patience_spin, 2, 3)
@@ -824,10 +839,27 @@ class MainWindow(QMainWindow):
         grid.addWidget(project_browse, 4, 3)
         # Row 5: Run name | Resume
         self.train_name_edit = QLineEdit(str(params["name"]))
-        self.train_resume_check = QCheckBox("Resume from checkpoint")
+        # Text lives in the row label; repeating it here only widened the grid.
+        self.train_resume_check = QCheckBox()
+        self.train_resume_check.setToolTip("Resume an interrupted run from its last checkpoint.")
         self.train_resume_check.setChecked(bool(params.get("resume", False)))
         grid.addWidget(_lbl("Run name"), 5, 0); grid.addWidget(self.train_name_edit, 5, 1)
         grid.addWidget(_lbl("Resume"), 5, 2); grid.addWidget(self.train_resume_check, 5, 3)
+
+        # The four-column grid is the widest thing in the left pane. Without an
+        # explicit small minimum, each field demands its content width and the
+        # row overflows the pane's maximum width -- which is what clipped
+        # Device / Batch / Patience / yolo exe off the right edge.
+        for _w in (self.train_task_combo, self.train_device_edit,
+                   self.train_imgsz_spin, self.train_batch_spin,
+                   self.train_epochs_spin, self.train_patience_spin,
+                   self.train_workers_spin, self.train_yolo_exe_edit,
+                   self.train_project_edit, self.train_name_edit):
+            _w.setMinimumWidth(72)
+            _w.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        # The checkbox label is long; let it elide rather than widen the grid.
+        self.train_resume_check.setMinimumWidth(0)
+        self.train_resume_check.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
 
         grid.setColumnStretch(1, 1); grid.setColumnStretch(3, 1)
         layout.addWidget(params_box)
@@ -1536,7 +1568,7 @@ class MainWindow(QMainWindow):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         outer_layout.addWidget(scroll)
 
         w = QWidget()
@@ -2265,22 +2297,23 @@ class MainWindow(QMainWindow):
                 padding-right: 22px;   /* reserve the button column */
                 min-height: 28px;      /* two 14px halves stay clickable */
             }
+            /* height is required, not optional: without it both buttons claim
+               the full widget height and overlap, so the lower one swallows the
+               upper one's clicks and stepping up appears dead. */
             QSpinBox::up-button, QDoubleSpinBox::up-button {
                 subcontrol-origin: border;
                 subcontrol-position: top right;
                 width: 20px;
-                margin: 1px 1px 0 0;
+                height: 13px;
                 border-left: 1px solid #334155;
-                border-top-right-radius: 5px;
                 background: #1e293b;
             }
             QSpinBox::down-button, QDoubleSpinBox::down-button {
                 subcontrol-origin: border;
                 subcontrol-position: bottom right;
                 width: 20px;
-                margin: 0 1px 1px 0;
+                height: 13px;
                 border-left: 1px solid #334155;
-                border-bottom-right-radius: 5px;
                 background: #1e293b;
             }
             QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover,
