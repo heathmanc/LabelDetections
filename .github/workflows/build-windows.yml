@@ -60,24 +60,22 @@ jobs:
         shell: pwsh
         run: pyinstaller BungVisionLabelStudio.spec --noconfirm
 
-      - name: Stage seed data next to the exe
+      - name: Stage support files
         shell: pwsh
         run: |
-          # storage._app_root() resolves user data beside the .exe when frozen,
-          # so the starter recipes/class config must ship there -- not inside _internal.
+          # Starter recipes/class config are bundled inside the exe (see the
+          # spec's "seed" datas) and copied out on first run by
+          # storage._seed_user_data(), so they are NOT staged here -- an
+          # installed build writes to LOCALAPPDATA, not next to the exe.
           $dest = "dist/BungVisionLabelStudio"
-          New-Item -ItemType Directory -Force -Path "$dest/data/recipes" | Out-Null
-          Copy-Item "data/class_config.json" "$dest/data/" -Force
-          Copy-Item "data/recipes/*.json" "$dest/data/recipes/" -Force
           Copy-Item "README.md" "$dest/" -Force
 
           # GPU setup tooling: deployment machines are RTX 50-series and need
-          # cu128 torch for the yolo CLI that training/evaluation shell out to.
+          # cu128 torch for the yolo CLI that Training/Evaluate shell out to.
           New-Item -ItemType Directory -Force -Path "$dest/scripts" | Out-Null
           Copy-Item "setup_gpu.bat" "$dest/" -Force
           Copy-Item "scripts/setup_gpu.py" "$dest/scripts/" -Force
           Copy-Item "scripts/__init__.py" "$dest/scripts/" -Force
-          Copy-Item "requirements.txt" "$dest/" -Force
 
       - name: Smoke test (exe launches and exits cleanly)
         shell: pwsh
@@ -93,6 +91,17 @@ jobs:
           Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
           Write-Host "Smoke test passed: app started without crashing."
 
+      - name: Build installer (Inno Setup)
+        shell: pwsh
+        run: |
+          # windows-latest ships Inno Setup 6 preinstalled.
+          & "$env:ProgramFiles(x86)\Inno Setup 6\ISCC.exe" `
+            installer\BungVisionLabelStudio.iss `
+            /DAppVersion=${{ steps.ver.outputs.version }} /DEdition=full
+          Get-ChildItem installer\*.exe | ForEach-Object {
+            "{0}  ({1:N0} MB)" -f $_.Name, ($_.Length / 1MB)
+          }
+
       - name: Zip release
         shell: pwsh
         run: |
@@ -101,29 +110,43 @@ jobs:
           "zip=$name.zip" >> $env:GITHUB_OUTPUT
         id: zip
 
-      - name: Upload build artifact
+      - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: BungVisionLabelStudio-windows-x64
-          path: ${{ steps.zip.outputs.zip }}
+          path: |
+            ${{ steps.zip.outputs.zip }}
+            installer/*.exe
           retention-days: 30
 
       - name: Publish GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{ steps.zip.outputs.zip }}
+          files: |
+            ${{ steps.zip.outputs.zip }}
+            installer/*.exe
           generate_release_notes: true
           body: |
             ## BungVision Label Studio v${{ steps.ver.outputs.version }} — Windows x64
 
-            **Install:** download the zip, extract it anywhere you have write access
-            (Desktop, Documents — *not* `C:\Program Files`), and run
-            `BungVisionLabelStudio.exe`.
+            Two ways to install — pick one.
 
-            Your captures, labels, and exports are written to the `data\` folder
-            beside the exe, so they survive upgrades — copy that folder forward
-            when you update.
+            **Installer (recommended for deployment)** — run
+            `BungVisionLabelStudio-*-full-setup.exe`. Installs to Program Files,
+            creates Start Menu and desktop shortcuts, and registers an
+            uninstaller. Your work is stored in
+            `%LOCALAPPDATA%\BungVisionLabelStudio\data` and is **kept** across
+            upgrades and uninstalls.
+
+            For unattended rollout across machines:
+            ```
+            BungVisionLabelStudio-<ver>-full-setup.exe /VERYSILENT /NORESTART
+            ```
+
+            **Portable zip** — extract anywhere you have write access and run
+            `BungVisionLabelStudio.exe`. Here the `data\` folder lives beside the
+            exe, so the whole folder can be copied between machines as one unit.
 
             ### Works with no further setup
             Everything GPU-side is bundled, including PyTorch built with CUDA

@@ -34,6 +34,11 @@ BUNDLE_ML = not LEAN
 # resolved next to the .exe at runtime by storage._app_root().
 datas = [
     ("bung_labeler/ui/assets", "bung_labeler/ui/assets"),
+    # Starter recipes/class config. storage._seed_user_data() copies these into
+    # the user data folder on first run, filling in only what is missing. An
+    # installed build writes to LOCALAPPDATA, which starts out empty.
+    ("data/recipes", "seed/recipes"),
+    ("data/class_config.json", "seed"),
 ]
 
 ICON = "bung_labeler/ui/assets/app.ico"
