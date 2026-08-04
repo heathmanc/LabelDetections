@@ -48,7 +48,9 @@ jobs:
         id: ver
         shell: pwsh
         run: |
-          $v = (Select-String -Path bung_labeler/version.py -Pattern 'APP_VERSION\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
+          # Same helper the local build scripts use, so the two cannot drift.
+          $v = (python scripts/print_version.py).Trim()
+          if (-not $v) { Write-Error "could not read APP_VERSION"; exit 1 }
           "version=$v" >> $env:GITHUB_OUTPUT
           Write-Host "App version: $v"
 
