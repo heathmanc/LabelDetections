@@ -10,8 +10,15 @@ with a different working directory.
 """
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
+
+# Ultralytics pulls in matplotlib. Force the headless Agg backend before any
+# import can pick a GUI one: packaged builds exclude tkinter, so a TkAgg
+# default would fail at import time. Harmless when running from source -- this
+# app never renders matplotlib figures itself.
+os.environ.setdefault("MPLBACKEND", "Agg")
 
 APP_DIR = Path(__file__).resolve().parent
 if str(APP_DIR) not in sys.path:
