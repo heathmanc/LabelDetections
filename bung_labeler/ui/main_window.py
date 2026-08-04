@@ -838,7 +838,9 @@ class MainWindow(QMainWindow):
         self.train_stop_btn = QPushButton("Stop")
         self.train_stop_btn.setEnabled(False)
         self.train_stop_btn.clicked.connect(self.stop_training)
-        btn_row.addWidget(self.train_start_btn); btn_row.addWidget(self.train_stop_btn)
+        # Start takes the extra room; Stop only needs its own label width.
+        self.train_start_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        btn_row.addWidget(self.train_start_btn, 1); btn_row.addWidget(self.train_stop_btn)
         layout.addLayout(btn_row)
 
         self.train_log = QTextEdit()
@@ -877,22 +879,34 @@ class MainWindow(QMainWindow):
         eval_use_trained = QPushButton("Use trained")
         eval_use_trained.setToolTip("Fill in <output folder>/<run name>/weights/best.pt from the training settings above.")
         eval_use_trained.clicked.connect(self.use_trained_weights_for_eval)
-        r = QHBoxLayout(); r.addWidget(self.eval_model_edit); r.addWidget(eval_model_browse); r.addWidget(eval_use_trained)
+        # The line edit takes the slack so the two buttons keep their full width.
+        r = QHBoxLayout()
+        r.addWidget(self.eval_model_edit, 1)
+        r.addWidget(eval_model_browse)
+        r.addWidget(eval_use_trained)
         eval_layout.addWidget(QLabel("Model to evaluate")); eval_layout.addLayout(r)
 
+        # Split selector and the action buttons get their own rows: packing a
+        # label, a combo and two buttons onto one line clipped the wider labels
+        # in the narrow left pane.
         split_row = QHBoxLayout()
         split_row.addWidget(QLabel("Split"))
         self.eval_split_combo = QComboBox()
         self.eval_split_combo.addItems(list(evaluation_logic.VALID_SPLITS))
-        split_row.addWidget(self.eval_split_combo)
+        split_row.addWidget(self.eval_split_combo, 1)
+        eval_layout.addLayout(split_row)
+
+        eval_btn_row = QHBoxLayout()
         self.eval_start_btn = QPushButton("Evaluate")
         self.eval_start_btn.clicked.connect(self.start_evaluation)
         self.promote_btn = QPushButton("Promote model")
         self.promote_btn.setEnabled(False)
         self.promote_btn.setToolTip("Copy this model into data/models and set it as the active model for Test / Auto-label / Count / review queue.")
         self.promote_btn.clicked.connect(self.promote_model)
-        split_row.addWidget(self.eval_start_btn); split_row.addWidget(self.promote_btn)
-        eval_layout.addLayout(split_row)
+        for b in (self.eval_start_btn, self.promote_btn):
+            b.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            eval_btn_row.addWidget(b)
+        eval_layout.addLayout(eval_btn_row)
 
         self.eval_metrics_text = QTextEdit()
         self.eval_metrics_text.setReadOnly(True)
@@ -2159,7 +2173,10 @@ class MainWindow(QMainWindow):
                 return
 
     def _apply_theme(self) -> None:
-        checkbox_check = (Path(__file__).resolve().parent / "assets" / "checkbox_check.svg").as_posix()
+        _assets = Path(__file__).resolve().parent / "assets"
+        checkbox_check = (_assets / "checkbox_check.svg").as_posix()
+        spin_up = (_assets / "spin_up.svg").as_posix()
+        spin_down = (_assets / "spin_down.svg").as_posix()
         self.setStyleSheet("""
             QMainWindow, QWidget {
                 background: #0f172a;
@@ -2240,6 +2257,57 @@ class MainWindow(QMainWindow):
                 min-height: 24px;
                 max-width: 48px;
             }
+            /* Styling a QSpinBox at all replaces the native step buttons with
+               unstyled subcontrols that are tiny and nearly unclickable. Once
+               the widget is themed, the buttons and arrows must be sized and
+               positioned explicitly or they do not usably work. */
+            QSpinBox, QDoubleSpinBox {
+                padding-right: 22px;   /* reserve the button column */
+                min-height: 28px;      /* two 14px halves stay clickable */
+            }
+            QSpinBox::up-button, QDoubleSpinBox::up-button {
+                subcontrol-origin: border;
+                subcontrol-position: top right;
+                width: 20px;
+                margin: 1px 1px 0 0;
+                border-left: 1px solid #334155;
+                border-top-right-radius: 5px;
+                background: #1e293b;
+            }
+            QSpinBox::down-button, QDoubleSpinBox::down-button {
+                subcontrol-origin: border;
+                subcontrol-position: bottom right;
+                width: 20px;
+                margin: 0 1px 1px 0;
+                border-left: 1px solid #334155;
+                border-bottom-right-radius: 5px;
+                background: #1e293b;
+            }
+            QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover,
+            QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover {
+                background: #334155;
+            }
+            QSpinBox::up-button:pressed, QDoubleSpinBox::up-button:pressed,
+            QSpinBox::down-button:pressed, QDoubleSpinBox::down-button:pressed {
+                background: #1d4ed8;
+            }
+            /* SVG chevrons rather than CSS border-triangles: the image: form is
+               the reliably supported way to set a subcontrol glyph in Qt, and
+               it is already proven by the checkbox above. */
+            QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {
+                image: url("__SPIN_UP__");
+                width: 10px;
+                height: 7px;
+            }
+            QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {
+                image: url("__SPIN_DOWN__");
+                width: 10px;
+                height: 7px;
+            }
+            QSpinBox::up-arrow:disabled, QDoubleSpinBox::up-arrow:disabled,
+            QSpinBox::down-arrow:disabled, QDoubleSpinBox::down-arrow:disabled {
+                opacity: 80;
+            }
             QComboBox QAbstractItemView {
                 min-height: 120px;
                 selection-background-color: #1d4ed8;
@@ -2266,7 +2334,9 @@ class MainWindow(QMainWindow):
             QSlider::groove:horizontal { height: 6px; background: #334155; border-radius: 3px; }
             QSlider::handle:horizontal { width: 18px; background: #60a5fa; margin: -6px 0; border-radius: 9px; }
             QScrollArea { border: 0; }
-        """.replace("__CHECKBOX_CHECK__", checkbox_check))
+        """.replace("__CHECKBOX_CHECK__", checkbox_check)
+           .replace("__SPIN_UP__", spin_up)
+           .replace("__SPIN_DOWN__", spin_down))
 
         for widget in self.findChildren(QWidget):
             layout = widget.layout()
@@ -4473,6 +4543,7 @@ class MainWindow(QMainWindow):
 
     def polish_buttons(self) -> None:
         """Prevent clipped button text on Linux/Qt themes without breaking compact panels."""
+        # Recomputed on demand so a button whose text changes later still fits.
         for btn in self.findChildren(QPushButton):
             if btn.property("compactCaptureButton"):
                 btn.setMinimumHeight(24)
@@ -4489,15 +4560,32 @@ class MainWindow(QMainWindow):
                 btn.setMinimumWidth(0)
                 btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
                 continue
-            text_len = max(6, len(btn.text()))
+            # Measure the actual rendered text rather than guessing 6px/char.
+            # The old estimate under-measured wide glyphs and Windows DPI
+            # scaling, and its 118px ceiling then capped the minimum *below*
+            # what the label needed -- so "Promote model" / "Start Training"
+            # were clipped. No ceiling: a button must never be narrower than
+            # its own text.
             btn.setMinimumHeight(28)
-            btn.setMinimumWidth(min(118, max(54, text_len * 6 + 16)))
+            btn.setMinimumWidth(self._button_text_width(btn))
             btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         for combo in self.findChildren(QComboBox):
             combo.setMaxVisibleItems(12)
             combo.view().setMinimumHeight(120)
             combo.setSizeAdjustPolicy(QComboBox.AdjustToContentsOnFirstShow)
             combo.setMinimumHeight(26)
+
+    @staticmethod
+    def _button_text_width(btn: QPushButton) -> int:
+        """Minimum width that fits a button's text, from real font metrics.
+
+        Uses QFontMetrics rather than a character count so it stays correct
+        across fonts, locales, and Windows DPI scaling. The padding allowance
+        covers the stylesheet's horizontal padding plus the border.
+        """
+        text = btn.text().replace("&&", "&")
+        advance = btn.fontMetrics().horizontalAdvance(text)
+        return max(54, advance + 26)
 
     def _simple_label_from_text(self, label: str, class_id: int = -1) -> tuple[str, int]:
         return review_logic.simple_label(label, class_id)
