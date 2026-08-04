@@ -10,15 +10,18 @@ from pathlib import Path
 # Allow this file to be launched directly during troubleshooting, e.g.
 # python bung_labeler/ui/main_window.py, without losing access to the
 # bundled bung_labeler package.
-_PROJECT_ROOT = Path(__file__).resolve().parents[2]
-if str(_PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(_PROJECT_ROOT))
+# Skipped when frozen: PyInstaller already resolves the bundled package, and
+# parents[2] would point inside the bundle rather than at a real source tree.
+if not getattr(sys, "frozen", False):
+    _PROJECT_ROOT = Path(__file__).resolve().parents[2]
+    if str(_PROJECT_ROOT) not in sys.path:
+        sys.path.insert(0, str(_PROJECT_ROOT))
 
 import numpy as np
 
 import cv2
 from PySide6.QtCore import QTimer, Qt, QProcess, QRectF, QPointF
-from PySide6.QtGui import QAction, QKeySequence, QIntValidator, QTextCursor, QColor, QPainter, QPen
+from PySide6.QtGui import QAction, QKeySequence, QIntValidator, QTextCursor, QColor, QPainter, QPen, QIcon
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -283,6 +286,9 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle(APP_TITLE)
+        _icon = Path(__file__).resolve().parent / "assets" / "app.ico"
+        if _icon.exists():
+            self.setWindowIcon(QIcon(str(_icon)))
         self.resize(1450, 850)
         self.setMinimumSize(1000, 650)
         self.setWindowFlags(self.windowFlags() | Qt.WindowMinMaxButtonsHint | Qt.WindowCloseButtonHint)
@@ -925,6 +931,19 @@ class MainWindow(QMainWindow):
         if not best.exists():
             self.status.showMessage("Trained best.pt not found yet; train first or browse to a checkpoint.", 6000)
 
+    def _python_for_subprocess(self) -> str:
+        """Interpreter to use for `python -m ...` child processes.
+
+        sys.executable is the right answer when running from source, but in a
+        PyInstaller build it is the .exe itself, which ignores -m and would just
+        launch a second copy of the GUI. Frozen builds therefore fall back to
+        the `python` on PATH -- the same interpreter that provides the `yolo`
+        CLI used for training.
+        """
+        if getattr(sys, "frozen", False):
+            return "python"
+        return sys.executable
+
     def start_evaluation(self) -> None:
         if self._eval_process is not None:
             QMessageBox.information(self, "Evaluate", "An evaluation is already in progress.")
@@ -934,7 +953,7 @@ class MainWindow(QMainWindow):
         if errors:
             QMessageBox.warning(self, "Evaluate", "Cannot evaluate:\n\n" + "\n".join(f"• {e}" for e in errors))
             return
-        cmd = evaluation_logic.build_eval_command(sys.executable, params)
+        cmd = evaluation_logic.build_eval_command(self._python_for_subprocess(), params)
 
         proc = QProcess(self)
         proc.setProcessChannelMode(QProcess.MergedChannels)

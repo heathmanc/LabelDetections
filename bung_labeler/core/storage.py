@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import sys
 import time
 from dataclasses import dataclass, asdict
 from pathlib import Path
@@ -9,7 +11,61 @@ from typing import Any
 import cv2
 import numpy as np
 
-ROOT = Path(__file__).resolve().parents[2]
+APP_FOLDER_NAME = "BungVisionLabelStudio"
+
+
+def _is_writable(path: Path) -> bool:
+    """True if we can actually create files in ``path``.
+
+    Checked by writing, not by os.access() -- on Windows os.access() reports
+    success for directories that Explorer/UAC will still refuse, and
+    Program Files is exactly that case.
+    """
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        probe = path / ".write_probe"
+        probe.touch()
+        probe.unlink()
+        return True
+    except Exception:
+        return False
+
+
+def _app_root() -> Path:
+    """Directory that holds the user-writable ``data`` folder.
+
+    From source this is the repo root.
+
+    When frozen there are two deployment shapes and we must support both:
+      * portable (zip extracted to Desktop/Documents) -- keep data beside the
+        .exe so the whole folder can be copied around as one unit.
+      * installed (Inno Setup, typically ``C:\\Program Files``) -- that folder is
+        read-only for standard users, so writing there raises PermissionError at
+        import. Fall back to ``%LOCALAPPDATA%\\BungVisionLabelStudio``.
+
+    Never anchored to ``__file__`` when frozen: that points inside the bundle,
+    which is wiped on upgrade.
+    """
+    if not getattr(sys, "frozen", False):
+        return Path(__file__).resolve().parents[2]
+
+    exe_dir = Path(sys.executable).resolve().parent
+    if _is_writable(exe_dir / "data"):
+        return exe_dir
+
+    base = os.environ.get("LOCALAPPDATA") or os.environ.get("XDG_DATA_HOME")
+    return (Path(base) if base else Path.home()) / APP_FOLDER_NAME
+
+
+def _bundled_seed_dir() -> Path | None:
+    """Starter recipes/class config shipped inside the frozen bundle, if any."""
+    if not getattr(sys, "frozen", False):
+        return None
+    seed = Path(getattr(sys, "_MEIPASS", "")) / "seed"
+    return seed if seed.is_dir() else None
+
+
+ROOT = _app_root()
 DATA_DIR = ROOT / "data"
 CAPTURE_DIR = DATA_DIR / "captures"
 LABEL_DIR = DATA_DIR / "labels"
@@ -21,6 +77,34 @@ TRAINING_SETTINGS_PATH = DATA_DIR / "training_settings.json"
 
 for d in (CAPTURE_DIR, LABEL_DIR, RECIPE_DIR, EXPORT_DIR):
     d.mkdir(parents=True, exist_ok=True)
+
+
+def _seed_user_data() -> None:
+    """Copy starter recipes/class config out of the bundle on first run.
+
+    Only fills in files that are missing, so an operator's edits are never
+    overwritten on upgrade. Needed because an installed build writes its data to
+    LOCALAPPDATA, which starts empty.
+    """
+    seed = _bundled_seed_dir()
+    if seed is None:
+        return
+    try:
+        src_cfg = seed / "class_config.json"
+        if src_cfg.is_file() and not CLASS_CONFIG_PATH.exists():
+            CLASS_CONFIG_PATH.write_bytes(src_cfg.read_bytes())
+        src_recipes = seed / "recipes"
+        if src_recipes.is_dir():
+            for item in src_recipes.glob("*.json"):
+                dest = RECIPE_DIR / item.name
+                if not dest.exists():
+                    dest.write_bytes(item.read_bytes())
+    except Exception:
+        # Seeding is a convenience; a failure must not stop the app launching.
+        pass
+
+
+_seed_user_data()
 
 # Broad equipment category recipes fall under by default. The default category
 # is special-cased so legacy recipes keep their original on-disk safe_name.

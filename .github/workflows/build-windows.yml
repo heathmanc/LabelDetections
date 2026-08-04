@@ -1,0 +1,179 @@
+name: Build Windows Release
+
+# Produces a zipped, self-contained Windows build.
+#  - push a tag like v0.9.65  -> builds and publishes a GitHub Release
+#  - run manually             -> builds and uploads an artifact you can download
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          # opencv-python-headless conflicts with the GUI build; install the
+          # normal wheel. pypylon ships Windows wheels for the Basler SDK.
+          pip install PySide6>=6.6 opencv-python>=4.8 numpy>=1.24 PyYAML>=6.0 pypylon>=3.0
+          pip install "pyinstaller~=6.6"
+
+      - name: Install ML stack
+        shell: pwsh
+        run: |
+          # cu128 wheels, NOT the default index. Deployment targets are RTX
+          # 50-series (Blackwell, sm_120); default-index torch is CPU-only, and
+          # cu124 has no sm_120 kernels -- either would bundle a torch that
+          # fails with "no kernel image is available" on the target machines.
+          pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+          pip install "ultralytics>=8.3.0"
+          python -c "import torch; print('bundling torch', torch.__version__, 'cuda', torch.version.cuda); print('archs', torch.cuda.get_arch_list())"
+
+      - name: Read version
+        id: ver
+        shell: pwsh
+        run: |
+          $v = (Select-String -Path bung_labeler/version.py -Pattern 'APP_VERSION\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
+          "version=$v" >> $env:GITHUB_OUTPUT
+          Write-Host "App version: $v"
+
+      - name: Regenerate app icon
+        shell: pwsh
+        run: python scripts/make_icon.py
+
+      - name: Build with PyInstaller
+        shell: pwsh
+        run: pyinstaller BungVisionLabelStudio.spec --noconfirm
+
+      - name: Stage support files
+        shell: pwsh
+        run: |
+          # Starter recipes/class config are bundled inside the exe (see the
+          # spec's "seed" datas) and copied out on first run by
+          # storage._seed_user_data(), so they are NOT staged here -- an
+          # installed build writes to LOCALAPPDATA, not next to the exe.
+          $dest = "dist/BungVisionLabelStudio"
+          Copy-Item "README.md" "$dest/" -Force
+
+          # GPU setup tooling: deployment machines are RTX 50-series and need
+          # cu128 torch for the yolo CLI that Training/Evaluate shell out to.
+          New-Item -ItemType Directory -Force -Path "$dest/scripts" | Out-Null
+          Copy-Item "setup_gpu.bat" "$dest/" -Force
+          Copy-Item "scripts/setup_gpu.py" "$dest/scripts/" -Force
+          Copy-Item "scripts/__init__.py" "$dest/scripts/" -Force
+
+      - name: Smoke test (exe launches and exits cleanly)
+        shell: pwsh
+        run: |
+          # Qt offscreen platform lets the GUI start headlessly on the runner.
+          $env:QT_QPA_PLATFORM = "offscreen"
+          $p = Start-Process -FilePath "dist/BungVisionLabelStudio/BungVisionLabelStudio.exe" -PassThru
+          Start-Sleep -Seconds 25
+          if ($p.HasExited -and $p.ExitCode -ne 0) {
+            Write-Error "App exited early with code $($p.ExitCode) -- build is broken."
+            exit 1
+          }
+          Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+          Write-Host "Smoke test passed: app started without crashing."
+
+      - name: Build installer (Inno Setup)
+        shell: pwsh
+        run: |
+          # windows-latest ships Inno Setup 6 preinstalled.
+          & "$env:ProgramFiles(x86)\Inno Setup 6\ISCC.exe" `
+            installer\BungVisionLabelStudio.iss `
+            /DAppVersion=${{ steps.ver.outputs.version }} /DEdition=full
+          Get-ChildItem installer\*.exe | ForEach-Object {
+            "{0}  ({1:N0} MB)" -f $_.Name, ($_.Length / 1MB)
+          }
+
+      - name: Zip release
+        shell: pwsh
+        run: |
+          $name = "BungVisionLabelStudio-v${{ steps.ver.outputs.version }}-windows-x64"
+          Compress-Archive -Path "dist/BungVisionLabelStudio/*" -DestinationPath "$name.zip"
+          "zip=$name.zip" >> $env:GITHUB_OUTPUT
+        id: zip
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: BungVisionLabelStudio-windows-x64
+          path: |
+            ${{ steps.zip.outputs.zip }}
+            installer/*.exe
+          retention-days: 30
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ steps.zip.outputs.zip }}
+            installer/*.exe
+          generate_release_notes: true
+          body: |
+            ## BungVision Label Studio v${{ steps.ver.outputs.version }} — Windows x64
+
+            Two ways to install — pick one.
+
+            **Installer (recommended for deployment)** — run
+            `BungVisionLabelStudio-*-full-setup.exe`. Installs to Program Files,
+            creates Start Menu and desktop shortcuts, and registers an
+            uninstaller. Your work is stored in
+            `%LOCALAPPDATA%\BungVisionLabelStudio\data` and is **kept** across
+            upgrades and uninstalls.
+
+            For unattended rollout across machines:
+            ```
+            BungVisionLabelStudio-<ver>-full-setup.exe /VERYSILENT /NORESTART
+            ```
+
+            **Portable zip** — extract anywhere you have write access and run
+            `BungVisionLabelStudio.exe`. Here the `data\` folder lives beside the
+            exe, so the whole folder can be copied between machines as one unit.
+
+            ### Works with no further setup
+            Everything GPU-side is bundled, including PyTorch built with CUDA
+            12.8 / Blackwell (sm_120) kernels for RTX 50-series cards:
+
+            - Labeling, capture, contrast/adjust, review queue, dataset health
+            - **Model Test**, **Auto-label**, **Pre-label & Review**
+            - YOLO dataset export, per-class counts, bulk relabel
+
+            You only need a recent NVIDIA driver. Nothing to pip install.
+
+            ### Training and Evaluate
+            These run as child processes against a Python on PATH, so they need
+            Ultralytics installed system-wide:
+
+            ```
+            winget install Python.Python.3.11
+            pip install ultralytics
+            setup_gpu.bat
+            ```
+
+            `setup_gpu.bat` ships in this zip. Run it **after** `pip install
+            ultralytics` — that installs CPU-only torch, and `setup_gpu.bat`
+            replaces it with the CUDA build matching the card. On RTX 50-series
+            this matters: cu124 torch reports `cuda.is_available() == True` then
+            fails at the first kernel launch with *"no kernel image is available
+            for execution on the device"*. Check any time with
+            `setup_gpu.bat --check`.
+
+            If `yolo` is not on PATH, set its full path in the Train tab.
