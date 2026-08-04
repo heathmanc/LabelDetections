@@ -8,11 +8,6 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
-    inputs:
-      bundle_ml:
-        description: "Bundle torch/ultralytics into the exe (much larger, ~2.5GB)"
-        type: boolean
-        default: false
 
 permissions:
   contents: write
@@ -38,8 +33,7 @@ jobs:
           pip install PySide6>=6.6 opencv-python>=4.8 numpy>=1.24 PyYAML>=6.0 pypylon>=3.0
           pip install "pyinstaller~=6.6"
 
-      - name: Install ML stack (full build only)
-        if: inputs.bundle_ml
+      - name: Install ML stack
         shell: pwsh
         run: |
           # cu128 wheels, NOT the default index. Deployment targets are RTX
@@ -58,10 +52,12 @@ jobs:
           "version=$v" >> $env:GITHUB_OUTPUT
           Write-Host "App version: $v"
 
+      - name: Regenerate app icon
+        shell: pwsh
+        run: python scripts/make_icon.py
+
       - name: Build with PyInstaller
         shell: pwsh
-        env:
-          BUNGVISION_BUNDLE_ML: ${{ inputs.bundle_ml && '1' || '' }}
         run: pyinstaller BungVisionLabelStudio.spec --noconfirm
 
       - name: Stage seed data next to the exe
@@ -130,12 +126,18 @@ jobs:
             when you update.
 
             ### Works with no further setup
-            Labeling, capture, contrast/adjust, review queue, dataset health,
-            per-class counts, bulk relabel, and YOLO dataset export.
+            Everything GPU-side is bundled, including PyTorch built with CUDA
+            12.8 / Blackwell (sm_120) kernels for RTX 50-series cards:
 
-            ### Needs Python + GPU setup
-            **Training** and **Evaluate** run as child processes against a
-            separately installed Python — they are not bundled. On each machine:
+            - Labeling, capture, contrast/adjust, review queue, dataset health
+            - **Model Test**, **Auto-label**, **Pre-label & Review**
+            - YOLO dataset export, per-class counts, bulk relabel
+
+            You only need a recent NVIDIA driver. Nothing to pip install.
+
+            ### Training and Evaluate
+            These run as child processes against a Python on PATH, so they need
+            Ultralytics installed system-wide:
 
             ```
             winget install Python.Python.3.11
@@ -144,18 +146,11 @@ jobs:
             ```
 
             `setup_gpu.bat` ships in this zip. Run it **after** `pip install
-            ultralytics` — that command installs CPU-only torch, and
-            `setup_gpu.bat` replaces it with the CUDA build matching the card.
-            On RTX 50-series (Blackwell / sm_120) this is required: cu124 torch
-            reports `cuda.is_available() == True` and then fails at the first
-            kernel launch with *"no kernel image is available for execution on
-            the device"*. Verify any time with `setup_gpu.bat --check`.
+            ultralytics` — that installs CPU-only torch, and `setup_gpu.bat`
+            replaces it with the CUDA build matching the card. On RTX 50-series
+            this matters: cu124 torch reports `cuda.is_available() == True` then
+            fails at the first kernel launch with *"no kernel image is available
+            for execution on the device"*. Check any time with
+            `setup_gpu.bat --check`.
 
             If `yolo` is not on PATH, set its full path in the Train tab.
-
-            ### Not available in this build
-            **Model Test, Auto-label, and Pre-label & Review** import Ultralytics
-            in-process. A frozen app cannot import from your system Python, so
-            installing Ultralytics does **not** enable them here — they need a
-            full build (`bundle_ml`), which bundles the ML stack with cu128
-            Blackwell kernels at the cost of a much larger download.

@@ -6,18 +6,27 @@ Targets PyInstaller 6.x.
 Build on a Windows machine or CI runner with the deps installed:
     pyinstaller BungVisionLabelStudio.spec --noconfirm
 
-By default this produces a LEAN build that excludes torch/ultralytics. Those
-pull in ~2.5 GB of tensor/CUDA libraries, and the app imports ultralytics
-lazily -- labeling, capture, review, and dataset export all work without it,
-and the app already shows an actionable "pip install ultralytics" message
-wherever a model is actually required. Set BUNGVISION_BUNDLE_ML=1 for a full
-build that bundles the ML stack (much larger, much slower to build).
+By default this produces a FULL build with torch/ultralytics bundled, so Model
+Test, Auto-label, and Pre-label & Review work with no per-machine setup. Those
+features import Ultralytics in-process, and a frozen app cannot import from the
+system Python -- a lean build loses them permanently, no matter what the user
+pip-installs.
+
+Install torch from the cu128 index before building (see build_windows.bat) so
+the bundled wheel carries Blackwell/sm_120 kernels for RTX 50-series cards.
+
+Set BUNGVISION_LEAN=1 for a labeling-only build without the ML stack.
 """
 import os
 
 from PyInstaller.utils.hooks import collect_submodules
 
-BUNDLE_ML = os.environ.get("BUNGVISION_BUNDLE_ML", "").strip().lower() in ("1", "true", "yes")
+# Full build is the default: Model Test, Auto-label, and Pre-label & Review
+# import Ultralytics in-process, and a frozen app cannot import from the system
+# Python -- so a lean build silently loses those features no matter what the
+# user pip-installs. Set BUNGVISION_LEAN=1 only for a labeling-only build.
+LEAN = os.environ.get("BUNGVISION_LEAN", "").strip().lower() in ("1", "true", "yes")
+BUNDLE_ML = not LEAN
 
 # UI assets that must live inside the bundle. The stylesheet resolves this via
 # Path(__file__).parent / "assets", which lands in <_internal>/bung_labeler/ui/assets.
@@ -26,6 +35,8 @@ BUNDLE_ML = os.environ.get("BUNGVISION_BUNDLE_ML", "").strip().lower() in ("1", 
 datas = [
     ("bung_labeler/ui/assets", "bung_labeler/ui/assets"),
 ]
+
+ICON = "bung_labeler/ui/assets/app.ico"
 
 hiddenimports = [
     "pypylon",
@@ -99,7 +110,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=None,
+    icon=ICON,
 )
 
 coll = COLLECT(

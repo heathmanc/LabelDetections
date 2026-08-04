@@ -21,7 +21,7 @@ import numpy as np
 
 import cv2
 from PySide6.QtCore import QTimer, Qt, QProcess, QRectF, QPointF
-from PySide6.QtGui import QAction, QKeySequence, QIntValidator, QTextCursor, QColor, QPainter, QPen
+from PySide6.QtGui import QAction, QKeySequence, QIntValidator, QTextCursor, QColor, QPainter, QPen, QIcon
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -286,6 +286,9 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle(APP_TITLE)
+        _icon = Path(__file__).resolve().parent / "assets" / "app.ico"
+        if _icon.exists():
+            self.setWindowIcon(QIcon(str(_icon)))
         self.resize(1450, 850)
         self.setMinimumSize(1000, 650)
         self.setWindowFlags(self.windowFlags() | Qt.WindowMinMaxButtonsHint | Qt.WindowCloseButtonHint)
