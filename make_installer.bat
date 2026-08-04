@@ -7,10 +7,10 @@ REM
 REM Requires Inno Setup 6:  winget install JRSoftware.InnoSetup
 REM Run build_windows.bat first -- this only packages, it does not build.
 
-setlocal enabledelayedexpansion
+setlocal
 
-set EDITION=%~1
-if "%EDITION%"=="" set EDITION=full
+set "EDITION=%~1"
+if not defined EDITION set "EDITION=full"
 
 if not exist "dist\BungVisionLabelStudio\BungVisionLabelStudio.exe" (
     echo ERROR: dist\BungVisionLabelStudio\BungVisionLabelStudio.exe not found.
@@ -20,19 +20,21 @@ if not exist "dist\BungVisionLabelStudio\BungVisionLabelStudio.exe" (
 
 REM Locate the Inno Setup compiler. winget may install per-machine or per-user,
 REM so check both plus PATH.
-set ISCC=
-for %%P in (
-    "%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe"
-    "%ProgramFiles%\Inno Setup 6\ISCC.exe"
-    "%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe"
-    "%ProgramFiles(x86)%\Inno Setup 5\ISCC.exe"
-) do (
-    if exist %%P set ISCC=%%P
-)
-if "%ISCC%"=="" (
-    where iscc >nul 2>nul && set ISCC=iscc
-)
-if "%ISCC%"=="" (
+REM
+REM Deliberately straight-line rather than a `for %%P in (...)` loop: the literal
+REM parentheses in %ProgramFiles(x86)% terminate a parenthesized block early,
+REM which produced "... was unexpected at this time" on accounts whose name
+REM contains a space. Quoting with set "VAR=..." also keeps the stored path free
+REM of quotes so it can be re-quoted exactly once at the call site.
+set "ISCC="
+if exist "%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe" set "ISCC=%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe"
+if not defined ISCC if exist "%ProgramFiles%\Inno Setup 6\ISCC.exe" set "ISCC=%ProgramFiles%\Inno Setup 6\ISCC.exe"
+if not defined ISCC if exist "%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe" set "ISCC=%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe"
+if not defined ISCC if exist "%ProgramFiles%\Inno Setup 5\ISCC.exe" set "ISCC=%ProgramFiles%\Inno Setup 5\ISCC.exe"
+if not defined ISCC if exist "%ProgramFiles(x86)%\Inno Setup 5\ISCC.exe" set "ISCC=%ProgramFiles(x86)%\Inno Setup 5\ISCC.exe"
+if not defined ISCC for /f "delims=" %%I in ('where iscc 2^>nul') do if not defined ISCC set "ISCC=%%I"
+
+if not defined ISCC (
     echo ERROR: Inno Setup 6 not found.
     echo.
     echo Install it with EITHER:
@@ -49,16 +51,19 @@ if "%ISCC%"=="" (
 echo Using Inno Setup: %ISCC%
 
 REM Read the version from the single source of truth.
-for /f "usebackq delims=" %%V in (`python -c "import re,pathlib;print(re.search(r'APP_VERSION\s*=\s*\"([^\"]+)\"',pathlib.Path('bung_labeler/version.py').read_text()).group(1))"`) do set APPVER=%%V
-if "%APPVER%"=="" (
+set "APPVER="
+for /f "usebackq delims=" %%V in (`python -c "import re,pathlib;print(re.search(r'APP_VERSION\s*=\s*\"([^\"]+)\"',pathlib.Path('bung_labeler/version.py').read_text()).group(1))"`) do set "APPVER=%%V"
+if not defined APPVER (
     echo ERROR: could not read APP_VERSION from bung_labeler\version.py
     exit /b 1
 )
 
-echo === Building installer: v%APPVER% (%EDITION%) ===
-echo     Compressing a full build takes a while.
+echo === Building installer: v%APPVER% ^(%EDITION%^) ===
+echo     Compressing a full build takes a while - 10-30 min with the CPU pegged.
 
-%ISCC% "installer\BungVisionLabelStudio.iss" /DAppVersion=%APPVER% /DEdition=%EDITION% || goto :error
+REM ISCC must be quoted: it commonly lives under "Program Files (x86)" or a
+REM user profile containing a space.
+"%ISCC%" "installer\BungVisionLabelStudio.iss" /DAppVersion=%APPVER% /DEdition=%EDITION% || goto :error
 
 echo.
 echo === INSTALLER READY ===
