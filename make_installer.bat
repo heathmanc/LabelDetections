@@ -18,11 +18,14 @@ if not exist "dist\BungVisionLabelStudio\BungVisionLabelStudio.exe" (
     exit /b 1
 )
 
-REM Locate the Inno Setup compiler.
+REM Locate the Inno Setup compiler. winget may install per-machine or per-user,
+REM so check both plus PATH.
 set ISCC=
 for %%P in (
     "%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe"
     "%ProgramFiles%\Inno Setup 6\ISCC.exe"
+    "%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe"
+    "%ProgramFiles(x86)%\Inno Setup 5\ISCC.exe"
 ) do (
     if exist %%P set ISCC=%%P
 )
@@ -31,9 +34,19 @@ if "%ISCC%"=="" (
 )
 if "%ISCC%"=="" (
     echo ERROR: Inno Setup 6 not found.
-    echo Install it with:  winget install JRSoftware.InnoSetup
+    echo.
+    echo Install it with EITHER:
+    echo     winget install JRSoftware.InnoSetup
+    echo         ^(note the spelling: JRSoftware, not JRSoftwre^)
+    echo     choco install innosetup
+    echo.
+    echo Or download the installer directly:
+    echo     https://jrsoftware.org/isdl.php
+    echo.
+    echo If it is already installed somewhere unusual, add its folder to PATH.
     exit /b 1
 )
+echo Using Inno Setup: %ISCC%
 
 REM Read the version from the single source of truth.
 for /f "usebackq delims=" %%V in (`python -c "import re,pathlib;print(re.search(r'APP_VERSION\s*=\s*\"([^\"]+)\"',pathlib.Path('bung_labeler/version.py').read_text()).group(1))"`) do set APPVER=%%V
