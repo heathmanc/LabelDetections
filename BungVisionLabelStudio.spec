@@ -51,8 +51,9 @@ hiddenimports = [
 # Trimming these keeps the build small and startup fast. Qt WebEngine alone is
 # several hundred MB and nothing in this app uses it.
 excludes = [
+    # tkinter stays excluded even in full builds: matplotlib only needs it for
+    # the TkAgg backend, and main.py forces MPLBACKEND=Agg.
     "tkinter",
-    "matplotlib",
     "gi",  # Linux-only GStreamer bindings; guarded by try/except in camera.py
     "PySide6.QtWebEngineCore",
     "PySide6.QtWebEngineWidgets",
@@ -74,11 +75,17 @@ excludes = [
 
 if BUNDLE_ML:
     hiddenimports += collect_submodules("ultralytics")
+    # Ultralytics imports matplotlib unconditionally (plotting/annotators), so
+    # excluding it makes `from ultralytics import YOLO` raise
+    # "No module named 'matplotlib'" -- which the app surfaces as its generic
+    # "Ultralytics is not installed" message. It must be present in full builds.
+    hiddenimports += ["matplotlib", "matplotlib.backends.backend_agg"]
 else:
     excludes += [
         "torch",
         "torchvision",
         "ultralytics",
+        "matplotlib",
         "scipy",
         "sympy",
         "networkx",

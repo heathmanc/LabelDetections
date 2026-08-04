@@ -3121,6 +3121,21 @@ class MainWindow(QMainWindow):
         try:
             from ultralytics import YOLO
         except Exception as e:
+            if getattr(sys, "frozen", False):
+                # pip cannot help here: a packaged build imports only from its
+                # own bundle. This means the build is missing a dependency
+                # (Ultralytics itself, or something it imports such as
+                # matplotlib), so say that instead of sending the user to pip.
+                raise RuntimeError(
+                    "This build cannot load the model backend.\n\n"
+                    "Ultralytics or one of its dependencies is missing from the "
+                    "packaged application. Installing it with pip will not help, "
+                    "because a packaged build only loads modules bundled inside "
+                    "it.\n\n"
+                    "This is a packaging defect -- please report it with the "
+                    "error below.\n\n"
+                    f"Original error: {e}"
+                )
             raise RuntimeError(
                 "Ultralytics is not installed in this Python environment.\n\n"
                 "Install it with:\n"
