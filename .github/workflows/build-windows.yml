@@ -41,7 +41,14 @@ jobs:
       - name: Install ML stack (full build only)
         if: inputs.bundle_ml
         shell: pwsh
-        run: pip install "ultralytics>=8.3.0"
+        run: |
+          # cu128 wheels, NOT the default index. Deployment targets are RTX
+          # 50-series (Blackwell, sm_120); default-index torch is CPU-only, and
+          # cu124 has no sm_120 kernels -- either would bundle a torch that
+          # fails with "no kernel image is available" on the target machines.
+          pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+          pip install "ultralytics>=8.3.0"
+          python -c "import torch; print('bundling torch', torch.__version__, 'cuda', torch.version.cuda); print('archs', torch.cuda.get_arch_list())"
 
       - name: Read version
         id: ver
@@ -67,6 +74,14 @@ jobs:
           Copy-Item "data/class_config.json" "$dest/data/" -Force
           Copy-Item "data/recipes/*.json" "$dest/data/recipes/" -Force
           Copy-Item "README.md" "$dest/" -Force
+
+          # GPU setup tooling: deployment machines are RTX 50-series and need
+          # cu128 torch for the yolo CLI that training/evaluation shell out to.
+          New-Item -ItemType Directory -Force -Path "$dest/scripts" | Out-Null
+          Copy-Item "setup_gpu.bat" "$dest/" -Force
+          Copy-Item "scripts/setup_gpu.py" "$dest/scripts/" -Force
+          Copy-Item "scripts/__init__.py" "$dest/scripts/" -Force
+          Copy-Item "requirements.txt" "$dest/" -Force
 
       - name: Smoke test (exe launches and exits cleanly)
         shell: pwsh
@@ -114,14 +129,33 @@ jobs:
             beside the exe, so they survive upgrades — copy that folder forward
             when you update.
 
-            ### Model features need one extra step
-            This build excludes the ~2.5 GB PyTorch stack. Labeling, capture,
-            review, dataset health, and YOLO export all work out of the box.
-            For **Auto-label, Pre-label & Review, Model Test, and Training**,
-            install Python 3.11 and run:
+            ### Works with no further setup
+            Labeling, capture, contrast/adjust, review queue, dataset health,
+            per-class counts, bulk relabel, and YOLO dataset export.
+
+            ### Needs Python + GPU setup
+            **Training** and **Evaluate** run as child processes against a
+            separately installed Python — they are not bundled. On each machine:
 
             ```
+            winget install Python.Python.3.11
             pip install ultralytics
+            setup_gpu.bat
             ```
 
-            Then set the `yolo` executable path in the Train tab if it is not on PATH.
+            `setup_gpu.bat` ships in this zip. Run it **after** `pip install
+            ultralytics` — that command installs CPU-only torch, and
+            `setup_gpu.bat` replaces it with the CUDA build matching the card.
+            On RTX 50-series (Blackwell / sm_120) this is required: cu124 torch
+            reports `cuda.is_available() == True` and then fails at the first
+            kernel launch with *"no kernel image is available for execution on
+            the device"*. Verify any time with `setup_gpu.bat --check`.
+
+            If `yolo` is not on PATH, set its full path in the Train tab.
+
+            ### Not available in this build
+            **Model Test, Auto-label, and Pre-label & Review** import Ultralytics
+            in-process. A frozen app cannot import from your system Python, so
+            installing Ultralytics does **not** enable them here — they need a
+            full build (`bundle_ml`), which bundles the ML stack with cu128
+            Blackwell kernels at the cost of a much larger download.

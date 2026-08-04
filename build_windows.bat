@@ -38,6 +38,14 @@ copy /y "data\class_config.json" "dist\BungVisionLabelStudio\data\" >nul
 copy /y "data\recipes\*.json" "dist\BungVisionLabelStudio\data\recipes\" >nul
 copy /y "README.md" "dist\BungVisionLabelStudio\" >nul
 
+REM GPU setup tooling, so deployment machines can install the cu128 torch that
+REM the yolo CLI needs on RTX 50-series cards.
+mkdir "dist\BungVisionLabelStudio\scripts" 2>nul
+copy /y "setup_gpu.bat" "dist\BungVisionLabelStudio\" >nul
+copy /y "scripts\setup_gpu.py" "dist\BungVisionLabelStudio\scripts\" >nul
+copy /y "scripts\__init__.py" "dist\BungVisionLabelStudio\scripts\" >nul
+copy /y "requirements.txt" "dist\BungVisionLabelStudio\" >nul
+
 echo.
 echo === BUILD COMPLETE ===
 echo Run: dist\BungVisionLabelStudio\BungVisionLabelStudio.exe
