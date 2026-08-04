@@ -51,8 +51,11 @@ if not defined ISCC (
 echo Using Inno Setup: %ISCC%
 
 REM Read the version from the single source of truth.
+REM Via a helper script, not an inline python -c: cmd counts parentheses inside
+REM a `for /f ... in (...)` block before expanding anything, so the parens and
+REM escaped quotes in a one-liner terminate the block early.
 set "APPVER="
-for /f "usebackq delims=" %%V in (`python -c "import re,pathlib;print(re.search(r'APP_VERSION\s*=\s*\"([^\"]+)\"',pathlib.Path('bung_labeler/version.py').read_text()).group(1))"`) do set "APPVER=%%V"
+for /f "delims=" %%V in ('python scripts\print_version.py') do set "APPVER=%%V"
 if not defined APPVER (
     echo ERROR: could not read APP_VERSION from bung_labeler\version.py
     exit /b 1
