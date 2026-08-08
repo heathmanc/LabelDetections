@@ -98,16 +98,58 @@ def read_configured_data_dir() -> Path | None:
     return Path(raw) if raw else None
 
 
+MAX_RECENT_DATA_DIRS = 8
+
+
+def _read_location_config() -> dict:
+    try:
+        path = data_location_file()
+        if path.is_file():
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return data
+    except Exception:
+        pass
+    return {}
+
+
+def read_recent_data_dirs() -> list[Path]:
+    """Previously used library locations, most recent first.
+
+    Lets an operator switch between site libraries from a list instead of
+    re-browsing to a network path every time.
+    """
+    raw = _read_location_config().get("recent", [])
+    out: list[Path] = []
+    seen: set[str] = set()
+    for item in raw if isinstance(raw, list) else []:
+        text = str(item).strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        out.append(Path(text))
+    return out
+
+
 def write_configured_data_dir(path: Path | str | None) -> None:
     """Persist the data folder choice. ``None`` clears it back to the default.
 
-    Takes effect on the next launch: DATA_DIR and the paths derived from it are
-    module-level constants that the whole app imports directly.
+    The chosen folder is also remembered in the recent list so it can be
+    switched back to without browsing again. Takes effect on the next launch:
+    DATA_DIR and the paths derived from it are module-level constants that the
+    whole app imports directly.
     """
+    config = _read_location_config()
+    value = "" if path is None else str(Path(path))
+    config["data_dir"] = value
+
+    if value:
+        recent = [str(p) for p in read_recent_data_dirs() if str(p) != value]
+        config["recent"] = [value] + recent[: MAX_RECENT_DATA_DIRS - 1]
+
     target = data_location_file()
     target.parent.mkdir(parents=True, exist_ok=True)
-    value = "" if path is None else str(Path(path))
-    target.write_text(json.dumps({"data_dir": value}, indent=2), encoding="utf-8")
+    target.write_text(json.dumps(config, indent=2), encoding="utf-8")
 
 
 def resolve_data_dir() -> Path:

@@ -20,7 +20,8 @@ _WANT = {
     "APP_FOLDER_NAME", "DATA_DIR_ENV", "SUBDIRS",
     "_is_writable", "_app_root", "config_dir", "data_location_file",
     "read_configured_data_dir", "write_configured_data_dir",
-    "resolve_data_dir", "_ensure_data_dirs",
+    "resolve_data_dir", "_ensure_data_dirs", "read_recent_data_dirs",
+    "_read_location_config", "MAX_RECENT_DATA_DIRS",
 }
 
 
@@ -132,6 +133,44 @@ def test_ensure_data_dirs_reports_unusable_location():
     blocked = Path(tempfile.mkdtemp()) / "notadir"
     blocked.write_text("x")
     assert ns["_ensure_data_dirs"](blocked / "library") is False
+
+def test_recent_list_records_choices_most_recent_first():
+    ns = _load()
+    cfg = tempfile.mkdtemp()
+    a, b = tempfile.mkdtemp(), tempfile.mkdtemp()
+    with _Env(cfg):
+        ns["write_configured_data_dir"](a)
+        ns["write_configured_data_dir"](b)
+        recent = [str(p) for p in ns["read_recent_data_dirs"]()]
+        assert recent[0] == str(Path(b)) and str(Path(a)) in recent
+
+
+def test_recent_list_deduplicates():
+    ns = _load()
+    cfg, a = tempfile.mkdtemp(), tempfile.mkdtemp()
+    with _Env(cfg):
+        ns["write_configured_data_dir"](a)
+        ns["write_configured_data_dir"](a)
+        assert [str(p) for p in ns["read_recent_data_dirs"]()].count(str(Path(a))) == 1
+
+
+def test_recent_list_is_capped():
+    ns = _load()
+    cfg = tempfile.mkdtemp()
+    with _Env(cfg):
+        for _ in range(ns["MAX_RECENT_DATA_DIRS"] + 4):
+            ns["write_configured_data_dir"](tempfile.mkdtemp())
+        assert len(ns["read_recent_data_dirs"]()) <= ns["MAX_RECENT_DATA_DIRS"]
+
+
+def test_reset_keeps_recent_list_for_switching_back():
+    ns = _load()
+    cfg, a = tempfile.mkdtemp(), tempfile.mkdtemp()
+    with _Env(cfg):
+        ns["write_configured_data_dir"](a)
+        ns["write_configured_data_dir"](None)
+        assert ns["read_configured_data_dir"]() is None
+        assert str(Path(a)) in [str(p) for p in ns["read_recent_data_dirs"]()]
 
 
 if __name__ == "__main__":
