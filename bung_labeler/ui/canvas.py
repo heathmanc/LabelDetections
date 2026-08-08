@@ -565,8 +565,10 @@ class ImageCanvas(QWidget):
             return
         for item in self.model_test_overlays:
             typ = str(item.get("type", "")).lower()
-            if typ in ("battery_obb", "battery_box", "bung_obb", "bung_box"):
+            if typ in ("battery_obb", "battery_box", "bung_obb", "bung_box",
+                       "other_obb", "other_box"):
                 is_battery = typ.startswith("battery")
+                is_other = typ.startswith("other")
                 status = str(item.get("status", "raw")).lower()
                 if status == "outside":
                     color = QColor(250, 204, 21)
@@ -574,6 +576,10 @@ class ImageCanvas(QWidget):
                     color = QColor(148, 163, 184)
                 elif is_battery:
                     color = QColor(96, 165, 250)
+                elif is_other:
+                    # Amber: distinct from battery blue and bung green, so any
+                    # class outside those two filters is obviously a third thing.
+                    color = QColor(251, 146, 60)
                 else:
                     color = QColor(34, 197, 94)
 
@@ -604,7 +610,8 @@ class ImageCanvas(QWidget):
                 p.setPen(QPen(color, 2))
                 p.drawEllipse(csp, 4, 4)
 
-                label = str(item.get("label", "battery" if is_battery else "bung"))
+                default_label = "battery" if is_battery else ("class" if is_other else "bung")
+                label = str(item.get("label", default_label))
                 if is_battery:
                     sp = self._image_to_screen_point(cx, cy)
                     p.fillRect(QRect(int(sp.x() - 125), int(sp.y() - 30), 250, 22), QColor(0, 0, 0, 175))

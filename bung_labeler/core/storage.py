@@ -213,6 +213,7 @@ EXPORT_DIR = DATA_DIR / "exports"
 CLASS_CONFIG_PATH = DATA_DIR / "class_config.json"
 CAMERA_SETTINGS_PATH = DATA_DIR / "camera_settings.json"
 TRAINING_SETTINGS_PATH = DATA_DIR / "training_settings.json"
+TEST_SETTINGS_PATH = DATA_DIR / "test_settings.json"
 
 
 def _seed_user_data() -> None:
@@ -387,6 +388,27 @@ def load_training_settings() -> dict[str, Any]:
 def save_training_settings(settings: dict[str, Any]) -> Path:
     TRAINING_SETTINGS_PATH.write_text(json.dumps(settings, indent=2), encoding="utf-8")
     return TRAINING_SETTINGS_PATH
+
+
+def load_test_settings() -> dict[str, Any]:
+    """Last-used Model Test settings, persisted between sessions.
+
+    Re-selecting a model path, image size, confidence and class filters on every
+    launch was pure friction, especially when iterating on a model.
+    """
+    if TEST_SETTINGS_PATH.exists():
+        try:
+            data = json.loads(TEST_SETTINGS_PATH.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return data
+        except Exception:
+            pass
+    return {}
+
+
+def save_test_settings(settings: dict[str, Any]) -> Path:
+    TEST_SETTINGS_PATH.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+    return TEST_SETTINGS_PATH
 
 
 @dataclass
