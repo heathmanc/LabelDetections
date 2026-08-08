@@ -3606,21 +3606,46 @@ class MainWindow(QMainWindow):
         t1 = time.perf_counter()
         return frame, results, t0, t1
 
+    def _label_for_overlay_item(self, item: dict) -> tuple[str, int]:
+        """Map a detection to an editable label and class id.
+
+        Driven by the model's own class name rather than the overlay type, so
+        every class the model predicts can be labelled -- not just battery and
+        bung. When the name matches a configured class its id is used; an
+        unknown class keeps its name and the model's id, so a newly trained
+        class is still usable before it is added to the class config.
+        """
+        name = str(item.get("name", "")).strip()
+        if not name:
+            # Older overlay items carry only a display label like "battery 0.94".
+            name = str(item.get("label", "")).strip().split()[0] if item.get("label") else ""
+        if not name:
+            typ = str(item.get("type", "")).lower()
+            name = typ.rsplit("_", 1)[0] if "_" in typ else typ
+        if not name or name == "other":
+            return "", -1
+
+        for idx, configured in enumerate(self.class_names or []):
+            if str(configured).strip().lower() == name.lower():
+                return str(configured), idx
+
+        try:
+            model_id = int(item.get("cls_id", -1))
+        except (TypeError, ValueError):
+            model_id = -1
+        return name, model_id
+
     def _overlay_items_to_box_dicts(self, items: list[dict]) -> list[dict]:
         """Convert model-test overlay items into editable canvas box dicts.
 
-        Battery/bung detections become OBB labels (or plain boxes when the model
-        is a detect model), so the operator corrects predictions instead of
-        drawing every box from scratch.
+        Every predicted class becomes an editable label (OBB, or a plain box for
+        detect models), so the operator corrects predictions instead of drawing
+        from scratch.
         """
         boxes: list[dict] = []
         for it in items:
-            typ = str(it.get("type", "")).lower()
-            if typ.startswith("battery"):
-                label, class_id = "battery", 0
-            elif typ.startswith("bung"):
-                label, class_id = "bung", 1
-            else:
+            label, class_id = self._label_for_overlay_item(it)
+            if not label:
                 continue
             pts = it.get("points") or []
             if len(pts) >= 4:
@@ -3683,11 +3708,16 @@ class MainWindow(QMainWindow):
         if battery_count == 0:
             battery_items, battery_count, _ = self._battery_box_overlay_items(results)
         bung_items, bung_count = self._bung_overlay_items(results)
-        box_dicts = self._overlay_items_to_box_dicts(battery_items + bung_items)
+        # Include every other predicted class, so a newly trained class can be
+        # auto-labelled without first being wired into the battery/bung filters.
+        other_items, other_counts = self._other_overlay_items(results)
+        box_dicts = self._overlay_items_to_box_dicts(
+            battery_items + bung_items + other_items
+        )
         if not box_dicts:
             QMessageBox.information(
                 self, "Auto-label",
-                "The model produced no battery/bung detections at the current confidence.\n"
+                "The model produced no detections at the current confidence.\n"
                 "Lower Confidence in the Model Test tab and try again.",
             )
             return
@@ -3700,8 +3730,10 @@ class MainWindow(QMainWindow):
         self._model_test_overlay_active = False
         self.canvas.push_undo_snapshot()
         self.canvas.set_boxes_from_dicts(box_dicts)
+        extra = "".join(f", {n} {nm}" for nm, n in sorted(other_counts.items()))
         self.status.showMessage(
-            f"Auto-labeled {battery_count} batteries, {bung_count} bungs. Correct as needed, then Save Labels.",
+            f"Auto-labeled {battery_count} batteries, {bung_count} bungs{extra}. "
+            "Correct as needed, then Save Labels.",
             8000,
         )
 
@@ -3861,7 +3893,10 @@ class MainWindow(QMainWindow):
             if battery_count == 0:
                 battery_items, battery_count, _ = self._battery_box_overlay_items(results)
             bung_items, _bung_count = self._bung_overlay_items(results)
-            box_dicts = self._overlay_items_to_box_dicts(battery_items + bung_items)
+            other_items, _ = self._other_overlay_items(results)
+            box_dicts = self._overlay_items_to_box_dicts(
+                battery_items + bung_items + other_items
+            )
 
             if box_dicts:
                 h, w = frame.shape[:2]
@@ -4389,6 +4424,11 @@ class MainWindow(QMainWindow):
                     "points": [[float(x), float(y)] for x, y in pts],
                     "cx": cx,
                     "cy": cy,
+                    # name/cls_id so downstream code can map to a real class
+                    # instead of inferring one from the overlay type.
+                    "name": name,
+                    "cls_id": cls_id,
+                    "conf": conf,
                     "label": label,
                 })
                 if edge_angle_deg is not None:
