@@ -45,7 +45,9 @@ def _build_metrics(metrics) -> dict:
     return out
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    # argv is accepted so the frozen build's worker can call this directly
+    # instead of spawning `python -m`; None keeps normal CLI behaviour.
     ap = argparse.ArgumentParser()
     ap.add_argument("--task", default="obb")
     ap.add_argument("--model", required=True)
@@ -53,7 +55,7 @@ def main() -> int:
     ap.add_argument("--imgsz", type=int, default=736)
     ap.add_argument("--split", default="val")
     ap.add_argument("--device", default=None)
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     try:
         from ultralytics import YOLO

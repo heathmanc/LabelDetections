@@ -73,6 +73,80 @@ def validate_train_params(params: dict) -> list[str]:
     return errors
 
 
+def train_kwargs(params: dict) -> dict:
+    """Params as keyword arguments for ``YOLO.train()``.
+
+    Mirrors build_train_command, but for driving Ultralytics in-process. A
+    packaged build bundles Ultralytics yet has no ``yolo`` CLI on PATH, so the
+    frozen app re-invokes itself as a worker and calls train() with these.
+    Empty device/project/name are omitted so Ultralytics keeps its own defaults.
+    """
+    kwargs: dict = {
+        "data": str(params.get("data", "")).strip(),
+        "imgsz": int(params.get("imgsz", 736)),
+        "batch": int(params.get("batch", 16)),
+        "epochs": int(params.get("epochs", 100)),
+        "patience": int(params.get("patience", 50)),
+        "workers": int(params.get("workers", 8)),
+    }
+    for key in ("device", "project", "name"):
+        value = str(params.get(key, "")).strip()
+        if value:
+            kwargs[key] = value
+    if params.get("resume"):
+        kwargs["resume"] = True
+    return kwargs
+
+
+# argv flags the frozen executable understands instead of launching the GUI.
+TRAIN_WORKER_FLAG = "--train-worker"
+EVAL_WORKER_FLAG = "--eval-worker"
+
+
+def build_worker_train_command(exe: str, params: dict) -> list[str]:
+    """argv for re-invoking the frozen app as a training worker.
+
+    Parameters travel as the same ``key=value`` strings the CLI uses, so the
+    worker and the CLI path stay in sync.
+    """
+    cmd = [exe, TRAIN_WORKER_FLAG,
+           f"task={str(params.get('task', 'obb')).strip().lower()}",
+           f"model={str(params.get('model', '')).strip()}"]
+    for key, value in train_kwargs(params).items():
+        cmd.append(f"{key}={value}")
+    return cmd
+
+
+# Keys whose values are integers; everything else stays a string. Typing these
+# explicitly rather than guessing from the text matters: a run name or project
+# path of "2024" would otherwise be coerced to an int and break path building,
+# and device="0" would stop being the string Ultralytics documents.
+_WORKER_INT_KEYS = frozenset({"imgsz", "batch", "epochs", "patience", "workers"})
+_WORKER_BOOL_KEYS = frozenset({"resume"})
+
+
+def parse_worker_args(argv: list[str]) -> dict:
+    """Parse ``key=value`` worker arguments back into a params dict."""
+    out: dict = {}
+    for item in argv:
+        if "=" not in item:
+            continue
+        key, _, raw = item.partition("=")
+        key, raw = key.strip(), raw.strip()
+        if not key:
+            continue
+        if key in _WORKER_BOOL_KEYS:
+            out[key] = raw.strip().lower() in ("1", "true", "yes")
+        elif key in _WORKER_INT_KEYS:
+            try:
+                out[key] = int(raw)
+            except ValueError:
+                continue  # drop rather than hand train() a bad type
+        else:
+            out[key] = raw
+    return out
+
+
 def build_train_command(yolo_exe: str, params: dict) -> list[str]:
     """Build the argv list for the Ultralytics CLI from validated params.
 

@@ -67,18 +67,26 @@ def validate_eval_params(params: dict) -> list[str]:
     return errors
 
 
-def build_eval_command(python_exe: str, params: dict, runner_module: str = RUNNER_MODULE) -> list[str]:
-    """Build the argv to run the metrics runner as `python -m <runner_module>`."""
-    cmd = [python_exe, "-m", runner_module,
-           "--task", str(params.get("task", "obb")).strip().lower(),
-           "--model", str(params.get("model", "")).strip(),
-           "--data", str(params.get("data", "")).strip(),
-           "--imgsz", str(int(params.get("imgsz", 736))),
-           "--split", str(params.get("split", "val")).strip().lower()]
+def build_eval_args(params: dict) -> list[str]:
+    """Just the runner's own arguments, with no interpreter/module prefix.
+
+    Split out so a frozen build can pass these to its in-process worker, which
+    has no `python -m` to call.
+    """
+    args = ["--task", str(params.get("task", "obb")).strip().lower(),
+            "--model", str(params.get("model", "")).strip(),
+            "--data", str(params.get("data", "")).strip(),
+            "--imgsz", str(int(params.get("imgsz", 736))),
+            "--split", str(params.get("split", "val")).strip().lower()]
     device = str(params.get("device", "")).strip()
     if device:
-        cmd += ["--device", device]
-    return cmd
+        args += ["--device", device]
+    return args
+
+
+def build_eval_command(python_exe: str, params: dict, runner_module: str = RUNNER_MODULE) -> list[str]:
+    """Build the argv to run the metrics runner as `python -m <runner_module>`."""
+    return [python_exe, "-m", runner_module] + build_eval_args(params)
 
 
 def parse_metrics_output(text: str) -> dict | None:
