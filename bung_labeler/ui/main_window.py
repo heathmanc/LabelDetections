@@ -21,7 +21,7 @@ if not getattr(sys, "frozen", False):
 import numpy as np
 
 import cv2
-from PySide6.QtCore import QTimer, Qt, QProcess, QRectF, QPointF
+from PySide6.QtCore import QTimer, Qt, QProcess, QRectF, QPointF, QEvent
 from PySide6.QtGui import QAction, QKeySequence, QIntValidator, QTextCursor, QColor, QPainter, QPen, QIcon
 from PySide6.QtWidgets import (
     QApplication,
@@ -45,6 +45,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSlider,
     QSpinBox,
+    QAbstractSpinBox,
     QSplitter,
     QStatusBar,
     QTableWidget,
@@ -85,6 +86,8 @@ from bung_labeler.core.storage import (
     infer_role_and_layout,
     load_training_settings,
     save_training_settings,
+    load_test_settings,
+    save_test_settings,
 )
 from bung_labeler.core.yolo_export import export_recipe_yolo, export_all_recipes_yolo, export_recipe_obb, export_all_recipes_obb
 from bung_labeler.core import review as review_logic
@@ -344,6 +347,7 @@ class MainWindow(QMainWindow):
 
         self._build_ui()
         self.polish_buttons()
+        self._install_wheel_guards()
         self._build_menu()
         self._refresh_recipes()
         self._refresh_images()
@@ -551,6 +555,68 @@ class MainWindow(QMainWindow):
             fn()
         return runner
 
+    def eventFilter(self, obj, event):
+        """Stop the mouse wheel from changing input values.
+
+        Qt lets a wheel event over a spinbox, combo or slider edit it even
+        without focus. Inside a scrolling panel that means scrolling past a
+        field silently alters a setting -- changing image size or confidence
+        while the operator only meant to scroll the page. Wheel events on these
+        widgets are redirected to the scroll area instead.
+        """
+        if event.type() == QEvent.Wheel and isinstance(
+            obj, (QAbstractSpinBox, QComboBox, QSlider)
+        ):
+            area = self._parent_scroll_area(obj)
+            if area is not None:
+                # Hand the scroll to the page so the wheel still does the thing
+                # the operator expects, just without editing the field.
+                QApplication.sendEvent(area.viewport(), event)
+            return True
+        return super().eventFilter(obj, event)
+
+    @staticmethod
+    def _parent_scroll_area(widget) -> QScrollArea | None:
+        node = widget.parentWidget()
+        while node is not None:
+            if isinstance(node, QScrollArea):
+                return node
+            node = node.parentWidget()
+        return None
+
+    def _install_wheel_guards(self) -> None:
+        """Apply the wheel guard to every value widget currently in the UI."""
+        for widget in self.findChildren((QAbstractSpinBox, QComboBox, QSlider)):
+            # NoFocus would break keyboard use; StrongFocus keeps click/tab focus
+            # while the event filter suppresses wheel edits.
+            widget.setFocusPolicy(Qt.StrongFocus)
+            widget.installEventFilter(self)
+
+    @staticmethod
+    def _scrollable_tab() -> tuple[QWidget, QWidget, QVBoxLayout]:
+        """Build a vertically scrolling tab body.
+
+        Returns (outer, inner, layout): add content to ``layout`` and return
+        ``outer`` from the tab factory. Tabs that skipped this simply clipped
+        their lower content on shorter windows with no way to reach it.
+        """
+        outer = QWidget()
+        outer_layout = QVBoxLayout(outer)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        outer_layout.addWidget(scroll)
+
+        inner = QWidget()
+        scroll.setWidget(inner)
+        layout = QVBoxLayout(inner)
+        layout.setContentsMargins(10, 10, 10, 10)
+        return outer, inner, layout
+
     def _scroll_panel(self, widget: QWidget, min_width: int, preferred_width: int) -> QScrollArea:
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -609,8 +675,7 @@ class MainWindow(QMainWindow):
         just a verification tool so the user can confirm battery and bung detections
         from the same model before using rotation-aware count testing.
         """
-        w = QWidget()
-        layout = QVBoxLayout(w)
+        outer, w, layout = self._scrollable_tab()
 
         title = QLabel("Test trained model / Count Test only")
         title.setStyleSheet("font-size: 10pt; font-weight: 700; color: #bfdbfe;")
@@ -626,14 +691,15 @@ class MainWindow(QMainWindow):
         form_box = QGroupBox("Model files")
         form = QVBoxLayout(form_box)
 
-        self.test_model_edit = QLineEdit()
+        _saved_test = load_test_settings()
+        self.test_model_edit = QLineEdit(str(_saved_test.get("model", "")))
         self.test_model_edit.setPlaceholderText("BungVision OBB best.pt or .engine")
         browse_model = QPushButton("Model...")
         browse_model.clicked.connect(self.browse_test_model)
         row = QHBoxLayout(); row.addWidget(self.test_model_edit); row.addWidget(browse_model)
         form.addWidget(QLabel("OBB model")); form.addLayout(row)
 
-        self.test_image_edit = QLineEdit()
+        self.test_image_edit = QLineEdit(str(_saved_test.get("image", "")))
         self.test_image_edit.setPlaceholderText("test image path")
         browse_img = QPushButton("Image...")
         browse_img.clicked.connect(self.browse_test_image)
@@ -647,15 +713,18 @@ class MainWindow(QMainWindow):
 
         settings_box = QGroupBox("Inference settings")
         settings = QFormLayout(settings_box)
-        self.test_imgsz_spin = QSpinBox(); self.test_imgsz_spin.setRange(320, 2048); self.test_imgsz_spin.setSingleStep(32); self.test_imgsz_spin.setValue(736)
-        self.test_conf_spin = QDoubleSpinBox(); self.test_conf_spin.setRange(0.01, 0.99); self.test_conf_spin.setSingleStep(0.05); self.test_conf_spin.setValue(0.45)
-        self.test_device_edit = QLineEdit("0")
+        _ts = _saved_test
+        self.test_imgsz_spin = QSpinBox(); self.test_imgsz_spin.setRange(320, 2048); self.test_imgsz_spin.setSingleStep(32)
+        self.test_imgsz_spin.setValue(int(_ts.get("imgsz", 736)))
+        self.test_conf_spin = QDoubleSpinBox(); self.test_conf_spin.setRange(0.01, 0.99); self.test_conf_spin.setSingleStep(0.05)
+        self.test_conf_spin.setValue(float(_ts.get("conf", 0.45)))
+        self.test_device_edit = QLineEdit(str(_ts.get("device", "0")))
         self.test_device_edit.setPlaceholderText("0, cpu, cuda:0")
         settings.addRow("Image size", self.test_imgsz_spin)
         settings.addRow("Confidence", self.test_conf_spin)
         settings.addRow("Device", self.test_device_edit)
         self.test_hide_saved_labels_check = QCheckBox("Hide saved labels while testing")
-        self.test_hide_saved_labels_check.setChecked(True)
+        self.test_hide_saved_labels_check.setChecked(bool(_ts.get("hide_saved_labels", True)))
         self.test_hide_saved_labels_check.setToolTip("Hides existing/manual labels on the canvas during model testing without deleting them.")
         settings.addRow("Display", self.test_hide_saved_labels_check)
 
@@ -666,14 +735,25 @@ class MainWindow(QMainWindow):
         self.count_required_spin.setFixedWidth(48)
         self.count_required_spin.setPlaceholderText("6")
         self.count_required_spin.editingFinished.connect(self._sync_required_count_from_text)
-        self.battery_class_filter_edit = QLineEdit("battery,0")
+        self.battery_class_filter_edit = QLineEdit(str(_ts.get("battery_classes", "battery,0")))
         self.battery_class_filter_edit.setToolTip("Comma-separated detection-model battery class names or IDs. Default assumes single OBB model class 0 is battery.")
-        self.count_class_filter_edit = QLineEdit("bung,1")
+        self.count_class_filter_edit = QLineEdit(str(_ts.get("count_classes", "bung,1")))
         self.count_class_filter_edit.setToolTip("Comma-separated detection-model bung class names or IDs. Partial names work, e.g. bung matches bungs/rubber_bung. Default assumes class 1 is bung.")
         settings.addRow("Required count", self.count_required_spin)
         settings.addRow("Battery class", self.battery_class_filter_edit)
         settings.addRow("Count class", self.count_class_filter_edit)
         layout.addWidget(settings_box)
+
+        # Persist as the operator edits, so nothing has to be re-entered next
+        # launch. editingFinished rather than textChanged keeps this to one
+        # write per edit instead of one per keystroke.
+        for _edit in (self.test_model_edit, self.test_image_edit,
+                      self.test_device_edit, self.battery_class_filter_edit,
+                      self.count_class_filter_edit):
+            _edit.editingFinished.connect(self._save_test_settings)
+        self.test_imgsz_spin.valueChanged.connect(lambda _v: self._save_test_settings())
+        self.test_conf_spin.valueChanged.connect(lambda _v: self._save_test_settings())
+        self.test_hide_saved_labels_check.stateChanged.connect(lambda _s: self._save_test_settings())
 
         run_btn = QPushButton("Run Model")
         run_btn.clicked.connect(self.run_model_test)
@@ -716,7 +796,7 @@ class MainWindow(QMainWindow):
         )
         layout.addWidget(self.test_results_text)
         layout.addStretch(1)
-        return w
+        return outer
 
     def _train_tab(self) -> QWidget:
         """Launch Ultralytics YOLO training on an exported dataset as a subprocess.
@@ -1500,8 +1580,7 @@ class MainWindow(QMainWindow):
         return w
 
     def _recipe_tab(self) -> QWidget:
-        w = QWidget()
-        layout = QVBoxLayout(w)
+        outer, w, layout = self._scrollable_tab()
 
         form_box = QGroupBox("Grouped Recipe")
         form = QFormLayout(form_box)
@@ -1600,7 +1679,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(library_box)
         self._reload_recipe_filter_combo()
         self._refresh_recipes()
-        return w
+        return outer
 
     def _refresh_library_label(self) -> None:
         """Show the active library path, how it was chosen, and any pending change."""
@@ -1945,8 +2024,7 @@ class MainWindow(QMainWindow):
         return s
 
     def _adjust_tab(self) -> QWidget:
-        w = QWidget()
-        layout = QVBoxLayout(w)
+        outer, w, layout = self._scrollable_tab()
         box = QGroupBox("Non-destructive Preview")
         form = QFormLayout(box)
         self.brightness_slider = self._slider(-100, 100, self.recipe.brightness, self._adjustment_changed)
@@ -1971,7 +2049,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(box)
         layout.addWidget(reset)
         layout.addStretch()
-        return w
+        return outer
 
 
     def _right_panel(self) -> QWidget:
@@ -3304,15 +3382,36 @@ class MainWindow(QMainWindow):
 
 
 
+    def _save_test_settings(self) -> None:
+        """Persist the Model Test tab so nothing is re-entered next launch."""
+        if not hasattr(self, "test_model_edit"):
+            return
+        try:
+            save_test_settings({
+                "model": self.test_model_edit.text().strip(),
+                "image": self.test_image_edit.text().strip(),
+                "imgsz": int(self.test_imgsz_spin.value()),
+                "conf": float(self.test_conf_spin.value()),
+                "device": self.test_device_edit.text().strip(),
+                "hide_saved_labels": bool(self.test_hide_saved_labels_check.isChecked()),
+                "battery_classes": self.battery_class_filter_edit.text().strip(),
+                "count_classes": self.count_class_filter_edit.text().strip(),
+            })
+        except Exception:
+            # Settings are a convenience; never let a write failure break testing.
+            pass
+
     def browse_test_model(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "Select BungVision OBB model", str(EXPORT_DIR), "YOLO Model (*.pt *.onnx *.engine);;All files (*.*)")
         if path:
             self.test_model_edit.setText(path)
+            self._save_test_settings()
 
     def browse_test_image(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "Select test image", str(capture_folder(self.recipe)), "Images (*.jpg *.jpeg *.png *.bmp)")
         if path:
             self.test_image_edit.setText(path)
+            self._save_test_settings()
             self._load_image_path(Path(path))
 
     def use_current_test_image(self) -> None:
@@ -3320,6 +3419,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Test Models", "Open or capture an image first, then click Use Current.")
             return
         self.test_image_edit.setText(str(self.current_image_path))
+        self._save_test_settings()
 
     def clear_model_test_overlay(self) -> None:
         """Remove visual test layers without deleting saved label data."""
@@ -3433,6 +3533,9 @@ class MainWindow(QMainWindow):
         if battery_count == 0:
             battery_items, battery_count, angle_lines = self._battery_box_overlay_items(results)
         bung_items, bung_count = self._bung_overlay_items(results)
+        # Everything the battery/bung filters do not claim, so custom classes
+        # are visible and validatable here instead of being silently dropped.
+        other_items, other_counts = self._other_overlay_items(results)
 
         # Keep model-test graphics in a separate canvas overlay layer. Do not bake
         # them into the image pixmap, and do not convert them into saved labels.
@@ -3454,7 +3557,7 @@ class MainWindow(QMainWindow):
         if hasattr(self.canvas, "set_annotation_visibility"):
             self.canvas.set_annotation_visibility(not hide_saved)
         if hasattr(self.canvas, "set_model_test_overlays"):
-            self.canvas.set_model_test_overlays(battery_items + bung_items)
+            self.canvas.set_model_test_overlays(battery_items + bung_items + other_items)
         self.current_image_path = image_path
         self._model_test_overlay_active = True
 
@@ -3463,6 +3566,8 @@ class MainWindow(QMainWindow):
         summary.append(f"Image size: {frame.shape[1]} x {frame.shape[0]}")
         summary.append(f"Battery detections: {battery_count}")
         summary.append(f"Bung detections: {bung_count}")
+        for _name, _n in sorted(other_counts.items()):
+            summary.append(f"{_name} detections: {_n}")
         summary.append(f"Model time: {(t1 - t0) * 1000:.1f} ms")
         if angle_lines:
             summary.append("")
@@ -3472,6 +3577,8 @@ class MainWindow(QMainWindow):
         summary.append("Overlay legend:")
         summary.append("Blue polygon/box = battery detection")
         summary.append("Green polygon/box + center = bung detection. No filled class shapes are used.")
+        if other_counts:
+            summary.append("Amber polygon/box = any other class the model predicted.")
         summary.append("")
         summary.append("This is preview-only. It does not save labels or affect live inspection.")
         self.test_results_text.setPlainText("\n".join(summary))
@@ -4286,6 +4393,92 @@ class MainWindow(QMainWindow):
                 else:
                     lines.append(f"{count}. {name} conf={conf:.2f}, center=({int(cx)}, {int(cy)})")
         return items, count, lines
+
+    def _other_overlay_items(self, results) -> tuple[list[dict], dict[str, int]]:
+        """Overlay items for every detection the battery/bung filters ignore.
+
+        Without this the test view silently drops any class outside those two
+        filters, so a custom class (a fallen battery, a retainer, anything added
+        later) could be trained but never seen or validated here.
+
+        Returns (items, {class_name: count}).
+        """
+        items: list[dict] = []
+        counts: dict[str, int] = {}
+        batt_names, batt_ids = self._battery_class_names(), self._battery_class_ids()
+        count_names, count_ids = self._count_class_names(), self._count_class_ids()
+
+        def claimed(name: str, cls_id: int) -> bool:
+            return (self._class_filter_match(name, cls_id, batt_names, batt_ids)
+                    or self._class_filter_match(name, cls_id, count_names, count_ids))
+
+        for r in results or []:
+            names = getattr(r, "names", {}) or {}
+
+            obb = getattr(r, "obb", None)
+            if obb is not None:
+                try:
+                    polys = obb.xyxyxyxy.cpu().numpy()
+                except Exception:
+                    polys = []
+                confs = self._safe_np(obb, "conf")
+                clss = self._safe_np(obb, "cls")
+                if len(polys):
+                    for i, poly in enumerate(polys):
+                        pts = np.array(poly, dtype=float).reshape(-1, 2)[:4]
+                        if len(pts) < 4:
+                            continue
+                        cls_id = int(clss[i]) if i < len(clss) else 0
+                        name = self._model_class_name(names, cls_id)
+                        if claimed(name, cls_id):
+                            continue
+                        conf = float(confs[i]) if i < len(confs) else 0.0
+                        items.append({
+                            "type": "other_obb",
+                            "points": [[float(x), float(y)] for x, y in pts],
+                            "cx": float(np.mean(pts[:, 0])),
+                            "cy": float(np.mean(pts[:, 1])),
+                            "conf": conf,
+                            "cls_id": cls_id,
+                            "name": name,
+                            "label": f"{name} {conf:.2f}",
+                        })
+                        counts[name] = counts.get(name, 0) + 1
+                    continue
+
+            boxes = getattr(r, "boxes", None)
+            if boxes is None:
+                continue
+            xyxy = self._safe_np(boxes, "xyxy")
+            confs = self._safe_np(boxes, "conf")
+            clss = self._safe_np(boxes, "cls")
+            for i, box in enumerate(xyxy):
+                cls_id = int(clss[i]) if i < len(clss) else 0
+                name = self._model_class_name(names, cls_id)
+                if claimed(name, cls_id):
+                    continue
+                x1, y1, x2, y2 = [float(v) for v in box[:4]]
+                conf = float(confs[i]) if i < len(confs) else 0.0
+                items.append({
+                    "type": "other_box",
+                    "xyxy": [x1, y1, x2, y2],
+                    "cx": (x1 + x2) / 2.0,
+                    "cy": (y1 + y2) / 2.0,
+                    "conf": conf,
+                    "cls_id": cls_id,
+                    "name": name,
+                    "label": f"{name} {conf:.2f}",
+                })
+                counts[name] = counts.get(name, 0) + 1
+        return items, counts
+
+    @staticmethod
+    def _safe_np(obj, attr):
+        """Ultralytics tensor attribute as numpy, or [] if absent/on another device."""
+        try:
+            return getattr(obj, attr).cpu().numpy()
+        except Exception:
+            return []
 
     def _bung_overlay_items(self, results) -> tuple[list[dict], int]:
         """Convert bung model results into temporary canvas overlay items.
