@@ -10,9 +10,22 @@ with a different working directory.
 """
 from __future__ import annotations
 
+import multiprocessing
 import os
 import sys
 from pathlib import Path
+
+# MUST be the first thing that runs, before any other import or argv handling.
+#
+# Ultralytics' DataLoader spawns worker processes (the `workers` training
+# parameter). On Windows multiprocessing uses the "spawn" start method, which
+# re-executes this executable to create each child. In a frozen build that
+# means every DataLoader worker would re-run this script and open another copy
+# of the GUI, while training stalls waiting for children that never report in.
+#
+# freeze_support() detects a spawned child, hands control to multiprocessing,
+# and never returns -- so the GUI below is only ever reached by a real launch.
+multiprocessing.freeze_support()
 
 # Ultralytics pulls in matplotlib. Force the headless Agg backend before any
 # import can pick a GUI one: packaged builds exclude tkinter, so a TkAgg
