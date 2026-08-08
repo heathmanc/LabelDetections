@@ -32,7 +32,7 @@ def _is_writable(path: Path) -> bool:
 
 
 def _app_root() -> Path:
-    """Directory that holds the user-writable ``data`` folder.
+    """Fallback directory holding the ``data`` folder, when none is configured.
 
     From source this is the repo root.
 
@@ -57,6 +57,70 @@ def _app_root() -> Path:
     return (Path(base) if base else Path.home()) / APP_FOLDER_NAME
 
 
+# --- Configurable image-library location -------------------------------------
+# The default locations above are per-machine or per-user, which is wrong for a
+# shared workstation or a team library on a network share. The data folder can
+# therefore be pointed anywhere, resolved in this order:
+#
+#   1. BUNGVISION_DATA_DIR environment variable  (per-launch override, scripting)
+#   2. the configured pointer file               (set from Tools > Data folder)
+#   3. the built-in default from _app_root()
+#
+# The pointer file deliberately lives in a per-user config directory rather than
+# in the data folder itself -- it has to be readable *before* the data location
+# is known, so it cannot be stored there.
+
+DATA_DIR_ENV = "BUNGVISION_DATA_DIR"
+
+
+def config_dir() -> Path:
+    """Per-user directory for settings that must be found before the data root."""
+    base = os.environ.get("LOCALAPPDATA") or os.environ.get("XDG_CONFIG_HOME")
+    if base:
+        return Path(base) / APP_FOLDER_NAME
+    return Path.home() / f".{APP_FOLDER_NAME.lower()}"
+
+
+def data_location_file() -> Path:
+    return config_dir() / "data_location.json"
+
+
+def read_configured_data_dir() -> Path | None:
+    """The data folder chosen by the operator, or None if unset."""
+    path = data_location_file()
+    try:
+        if not path.is_file():
+            return None
+        raw = json.loads(path.read_text(encoding="utf-8")).get("data_dir", "")
+    except Exception:
+        return None
+    raw = str(raw).strip()
+    return Path(raw) if raw else None
+
+
+def write_configured_data_dir(path: Path | str | None) -> None:
+    """Persist the data folder choice. ``None`` clears it back to the default.
+
+    Takes effect on the next launch: DATA_DIR and the paths derived from it are
+    module-level constants that the whole app imports directly.
+    """
+    target = data_location_file()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    value = "" if path is None else str(Path(path))
+    target.write_text(json.dumps({"data_dir": value}, indent=2), encoding="utf-8")
+
+
+def resolve_data_dir() -> Path:
+    """The active data folder, honouring the env var and configured override."""
+    env = os.environ.get(DATA_DIR_ENV, "").strip()
+    if env:
+        return Path(env)
+    configured = read_configured_data_dir()
+    if configured is not None:
+        return configured
+    return _app_root() / "data"
+
+
 def _bundled_seed_dir() -> Path | None:
     """Starter recipes/class config shipped inside the frozen bundle, if any."""
     if not getattr(sys, "frozen", False):
@@ -65,8 +129,41 @@ def _bundled_seed_dir() -> Path | None:
     return seed if seed.is_dir() else None
 
 
-ROOT = _app_root()
-DATA_DIR = ROOT / "data"
+SUBDIRS = ("captures", "labels", "recipes", "exports")
+
+
+def _ensure_data_dirs(base: Path) -> bool:
+    """Create the library's subfolders. False if the location is unusable."""
+    try:
+        for name in SUBDIRS:
+            (base / name).mkdir(parents=True, exist_ok=True)
+        return True
+    except Exception:
+        return False
+
+
+# Set when a configured location could not be used, so the UI can say so
+# instead of silently writing somewhere the operator does not expect.
+DATA_DIR_FALLBACK_REASON = ""
+
+DATA_DIR = resolve_data_dir()
+if not _ensure_data_dirs(DATA_DIR):
+    # A configured library on a network share may simply be offline. Falling
+    # back keeps the app usable; crashing at import would make it unlaunchable
+    # until someone edited a config file by hand.
+    _unusable = DATA_DIR
+    DATA_DIR = _app_root() / "data"
+    DATA_DIR_FALLBACK_REASON = (
+        f"The configured data folder could not be opened:\n{_unusable}\n\n"
+        f"Using the default location instead:\n{DATA_DIR}\n\n"
+        "If this is a network share, check that it is connected, then set the "
+        "folder again from Tools > Data folder."
+    )
+    _ensure_data_dirs(DATA_DIR)
+
+# ROOT stays the data folder's parent: it is only used as a working directory
+# for child processes and to resolve run paths relative to the library.
+ROOT = DATA_DIR.parent
 CAPTURE_DIR = DATA_DIR / "captures"
 LABEL_DIR = DATA_DIR / "labels"
 RECIPE_DIR = DATA_DIR / "recipes"
@@ -74,9 +171,6 @@ EXPORT_DIR = DATA_DIR / "exports"
 CLASS_CONFIG_PATH = DATA_DIR / "class_config.json"
 CAMERA_SETTINGS_PATH = DATA_DIR / "camera_settings.json"
 TRAINING_SETTINGS_PATH = DATA_DIR / "training_settings.json"
-
-for d in (CAPTURE_DIR, LABEL_DIR, RECIPE_DIR, EXPORT_DIR):
-    d.mkdir(parents=True, exist_ok=True)
 
 
 def _seed_user_data() -> None:
