@@ -1563,14 +1563,118 @@ class MainWindow(QMainWindow):
         filter_row.addWidget(QLabel("Show category"))
         filter_row.addWidget(self.recipe_filter_combo, 1)
 
+        # Image library location. This lives on a visible tab rather than only
+        # in the Tools menu, because the menu bar is hidden (see _build_menu).
+        library_box = QGroupBox("Image library")
+        library_layout = QVBoxLayout(library_box)
+        library_layout.setContentsMargins(8, 8, 8, 8)
+        library_layout.setSpacing(4)
+        self.library_path_label = QLabel()
+        self.library_path_label.setWordWrap(True)
+        self.library_path_label.setStyleSheet("color: #94a3b8;")
+        self.library_path_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+
+        # Remembered locations, so switching between site libraries does not
+        # mean re-browsing to a network path each time.
+        self.library_combo = QComboBox()
+        self.library_combo.setToolTip("Switch to a previously used image library.")
+        self.library_combo.activated.connect(self._on_library_combo_activated)
+
+        change_library_btn = QPushButton("Change Data Folder...")
+        change_library_btn.setToolTip(
+            "Point captures, labels, recipes and exports at another folder, such as "
+            "a shared drive. Takes effect after restarting."
+        )
+        change_library_btn.clicked.connect(self.change_data_folder)
+
+        library_layout.addWidget(self.library_path_label)
+        library_layout.addWidget(self.library_combo)
+        library_layout.addWidget(change_library_btn)
+        self._refresh_library_label()
+
         layout.addWidget(form_box)
         layout.addWidget(save_btn)
         layout.addLayout(recipe_btn_row)
         layout.addLayout(filter_row)
         layout.addWidget(self.recipe_list)
+        layout.addWidget(library_box)
         self._reload_recipe_filter_combo()
         self._refresh_recipes()
         return w
+
+    def _refresh_library_label(self) -> None:
+        """Show the active library path, how it was chosen, and any pending change."""
+        if not hasattr(self, "library_path_label"):
+            return
+        env = os.environ.get(storage_mod.DATA_DIR_ENV, "").strip()
+        configured = storage_mod.read_configured_data_dir()
+        if env:
+            source = f"set by {storage_mod.DATA_DIR_ENV}"
+        elif configured is not None:
+            source = "custom location"
+        else:
+            source = "default location"
+
+        text = f"{DATA_DIR}\n({source})"
+        # Covers both a change made this session and a configured location that
+        # could not be opened at startup -- in each case the folder in use is
+        # not the one configured, and saying so avoids confusion.
+        if configured is not None and not env and Path(configured) != DATA_DIR:
+            text += f"\n\nPending restart:\n{configured}"
+        self.library_path_label.setText(text)
+        self._reload_library_combo()
+
+    def _reload_library_combo(self) -> None:
+        """Populate the quick-switch list with known library locations."""
+        if not hasattr(self, "library_combo"):
+            return
+        active = str(storage_mod.read_configured_data_dir() or DATA_DIR)
+        entries = [str(p) for p in storage_mod.read_recent_data_dirs()]
+        default = str(storage_mod._app_root() / "data")
+        for extra in (active, default):
+            if extra not in entries:
+                entries.append(extra)
+
+        self.library_combo.blockSignals(True)
+        self.library_combo.clear()
+        for path in entries:
+            label = path + ("   [default]" if path == default else "")
+            self.library_combo.addItem(label, path)
+        idx = self.library_combo.findData(active)
+        self.library_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self.library_combo.blockSignals(False)
+
+    def _on_library_combo_activated(self, index: int) -> None:
+        """Switch to a remembered library picked from the list."""
+        target = self.library_combo.itemData(index)
+        if not target:
+            return
+        target = Path(target)
+        if target == (storage_mod.read_configured_data_dir() or DATA_DIR):
+            return
+
+        if not storage_mod._ensure_data_dirs(target):
+            QMessageBox.warning(
+                self, "Image library",
+                f"Cannot open that library:\n{target}\n\n"
+                "If it is on a network drive, check that it is connected. "
+                "The library was not changed.",
+            )
+            self._reload_library_combo()
+            return
+
+        # Selecting the built-in default clears the override rather than
+        # pinning that path, so a portable copy still follows its own folder.
+        if target == storage_mod._app_root() / "data":
+            storage_mod.write_configured_data_dir(None)
+        else:
+            storage_mod.write_configured_data_dir(target)
+        self._refresh_library_label()
+        QMessageBox.information(
+            self, "Image library",
+            f"Library set to:\n{target}\n\nRestart the application to load it.",
+        )
+        self.status.showMessage(f"Library set to {target} (restart to apply)", 10000)
 
     def _capture_tab(self) -> QWidget:
         """Live capture tab.
@@ -4860,6 +4964,7 @@ class MainWindow(QMainWindow):
         clicked = box.clickedButton()
         if clicked is reset_btn and reset_btn is not None:
             storage_mod.write_configured_data_dir(None)
+            self._refresh_library_label()
             QMessageBox.information(
                 self, "Data folder",
                 "Reset to the default location.\n\nRestart the application to apply it.",
@@ -4887,6 +4992,7 @@ class MainWindow(QMainWindow):
             return
 
         storage_mod.write_configured_data_dir(target)
+        self._refresh_library_label()
         QMessageBox.information(
             self, "Data folder",
             f"Image library set to:\n{target}\n\n"
