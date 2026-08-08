@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 import traceback
 import time
@@ -94,6 +95,7 @@ from bung_labeler.core import active_learning
 from bung_labeler.core import training as training_logic
 from bung_labeler.core import evaluation as evaluation_logic
 from bung_labeler.core import dataset_health
+from bung_labeler.core import storage as storage_mod
 from bung_labeler.core import class_stats
 from bung_labeler.version import APP_TITLE
 from bung_labeler.ui.canvas import ImageCanvas
@@ -499,6 +501,10 @@ class MainWindow(QMainWindow):
         health_action = QAction("Dataset health dashboard", self)
         health_action.triggered.connect(self.show_dataset_health)
         tools_menu.addAction(health_action)
+
+        data_folder_action = QAction("Data folder (image library)...", self)
+        data_folder_action.triggered.connect(self.change_data_folder)
+        tools_menu.addAction(data_folder_action)
 
         shortcuts_action = QAction("Keyboard shortcuts", self)
         shortcuts_action.setShortcut("F1")
@@ -4817,6 +4823,79 @@ class MainWindow(QMainWindow):
             f"Imported {len(imported)} image(s), {label_count} label file(s).", 8000
         )
 
+    def change_data_folder(self) -> None:
+        """Point the image library at another folder, e.g. a shared drive.
+
+        Takes effect on restart: DATA_DIR and everything derived from it are
+        module-level constants imported across the app, so re-pointing them in a
+        running process would leave stale paths behind.
+        """
+        env_override = os.environ.get(storage_mod.DATA_DIR_ENV, "").strip()
+        configured = storage_mod.read_configured_data_dir()
+
+        lines = [f"Current library:\n{DATA_DIR}", ""]
+        if env_override:
+            lines.append(
+                f"Note: {storage_mod.DATA_DIR_ENV} is set in the environment and "
+                "overrides whatever is chosen here."
+            )
+            lines.append("")
+        lines.append(
+            "Choose a folder to hold captures, labels, recipes and exports. "
+            "Point every machine at the same shared folder to share one library."
+        )
+
+        box = QMessageBox(self)
+        box.setWindowTitle("Data folder")
+        box.setIcon(QMessageBox.Information)
+        box.setText("Image library location")
+        box.setInformativeText("\n".join(lines))
+        choose_btn = box.addButton("Choose folder...", QMessageBox.AcceptRole)
+        reset_btn = None
+        if configured is not None:
+            reset_btn = box.addButton("Reset to default", QMessageBox.DestructiveRole)
+        box.addButton(QMessageBox.Cancel)
+        box.exec()
+
+        clicked = box.clickedButton()
+        if clicked is reset_btn and reset_btn is not None:
+            storage_mod.write_configured_data_dir(None)
+            QMessageBox.information(
+                self, "Data folder",
+                "Reset to the default location.\n\nRestart the application to apply it.",
+            )
+            return
+        if clicked is not choose_btn:
+            return
+
+        chosen = QFileDialog.getExistingDirectory(
+            self, "Select the image library folder", str(DATA_DIR),
+        )
+        if not chosen:
+            return
+
+        target = Path(chosen)
+        # Verify before saving: a share the operator cannot write to would
+        # otherwise only fail on the next launch, after the old path is gone.
+        if not storage_mod._ensure_data_dirs(target):
+            QMessageBox.warning(
+                self, "Data folder",
+                f"Cannot create the library folders in:\n{target}\n\n"
+                "Check that the drive is connected and that you have permission "
+                "to write there. The library was not changed.",
+            )
+            return
+
+        storage_mod.write_configured_data_dir(target)
+        QMessageBox.information(
+            self, "Data folder",
+            f"Image library set to:\n{target}\n\n"
+            "Restart the application to start using it.\n\n"
+            "Your existing images were not moved -- copy the contents of\n"
+            f"{DATA_DIR}\ninto the new folder if you want to bring them along.",
+        )
+        self.status.showMessage(f"Data folder set to {target} (restart to apply)", 10000)
+
     def _recipe_health_tally(self, recipe: Recipe) -> dict:
         """Walk one recipe's captures + sidecars into a dataset-health tally."""
         tally = dataset_health.new_tally()
@@ -5223,4 +5302,9 @@ def main() -> None:
     app = QApplication(sys.argv)
     win = MainWindow()
     win.show()
+    # A configured library that could not be opened (typically an offline
+    # network share) silently relocates the app's data. Say so rather than let
+    # an operator label into an unexpected folder.
+    if storage_mod.DATA_DIR_FALLBACK_REASON:
+        QMessageBox.warning(win, "Data folder", storage_mod.DATA_DIR_FALLBACK_REASON)
     sys.exit(app.exec())
