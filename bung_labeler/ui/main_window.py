@@ -999,7 +999,13 @@ class MainWindow(QMainWindow):
         if errors:
             QMessageBox.warning(self, "Evaluate", "Cannot evaluate:\n\n" + "\n".join(f"• {e}" for e in errors))
             return
-        cmd = evaluation_logic.build_eval_command(self._python_for_subprocess(), params)
+        if getattr(sys, "frozen", False):
+            # Same reasoning as training: run the metrics runner inside our own
+            # process image instead of a `python -m` that does not exist here.
+            cmd = [sys.executable, training_logic.EVAL_WORKER_FLAG] + \
+                evaluation_logic.build_eval_args(params)
+        else:
+            cmd = evaluation_logic.build_eval_command(self._python_for_subprocess(), params)
 
         proc = QProcess(self)
         proc.setProcessChannelMode(QProcess.MergedChannels)
@@ -1126,7 +1132,14 @@ class MainWindow(QMainWindow):
             return
 
         yolo_exe = self.train_yolo_exe_edit.text().strip() or "yolo"
-        cmd = training_logic.build_train_command(yolo_exe, params)
+        if getattr(sys, "frozen", False):
+            # A packaged build has no `yolo` CLI and no system Python, but it
+            # does bundle Ultralytics -- the same copy Auto-label already uses.
+            # Re-invoke ourselves as a worker rather than requiring a separate
+            # install just to train.
+            cmd = training_logic.build_worker_train_command(sys.executable, params)
+        else:
+            cmd = training_logic.build_train_command(yolo_exe, params)
 
         # Persist for next session.
         settings = dict(params)
@@ -3157,14 +3170,27 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Capture", "No frame available yet. Open live view first.")
             return
         self.save_recipe_from_ui()
+        # Full-resolution adjustment, matching what the live view shows -- the
+        # preview is downscaled and may skip CLAHE/sharpen, but the saved frame
+        # always gets the complete pipeline at full size.
         adjusted = self._adjust_frame(self.last_raw) if save_adjusted else None
-        raw_path, adj_path = save_capture(self.recipe, self.last_raw, adjusted)
+        # Capturing adjusted saves only the adjusted frame; the raw twin was
+        # doubling the dataset with images nobody wanted to label.
+        raw_path, adj_path = save_capture(
+            self.recipe, self.last_raw, adjusted, save_raw=not save_adjusted
+        )
         self._recipe_index_dirty = True
         self._refresh_images(force=True)
         self.current_image_path = adj_path if adj_path else raw_path
         self.canvas.load_image(self.current_image_path)
         self.canvas.clear_boxes()
-        self.status.showMessage(f"Captured: {self.current_image_path.name}", 5000)
+        # Name which variant landed on disk: the live view always renders the
+        # adjusted frame, so a raw capture can look darker than what was on
+        # screen and the difference is otherwise invisible.
+        kind = "adjusted" if save_adjusted else "raw (unadjusted)"
+        self.status.showMessage(
+            f"Captured {kind}: {self.current_image_path.name}", 6000
+        )
 
 
 

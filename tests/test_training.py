@@ -168,3 +168,51 @@ if __name__ == "__main__":
                 print(f"FAIL {name}")
                 traceback.print_exc()
     raise SystemExit(1 if failures else 0)
+
+
+# --- Frozen-build worker round-trip -------------------------------------------
+# A packaged build has no `yolo` CLI, so it re-invokes itself with these args.
+
+def _worker_params():
+    return dict(task="obb", model="yolo11s-obb.pt", data="d.yaml", imgsz=960,
+                batch=-1, epochs=50, patience=10, workers=8, device="0",
+                project="C:/out", name="run1", resume=False)
+
+
+def test_build_worker_train_command_shape():
+    cmd = t.build_worker_train_command("app.exe", _worker_params())
+    assert cmd[0] == "app.exe"
+    assert cmd[1] == t.TRAIN_WORKER_FLAG
+    assert "task=obb" in cmd and "model=yolo11s-obb.pt" in cmd
+
+
+def test_worker_args_round_trip_types():
+    cmd = t.build_worker_train_command("x", _worker_params())
+    back = t.parse_worker_args(cmd[2:])
+    assert back["imgsz"] == 960 and isinstance(back["imgsz"], int)
+    assert back["batch"] == -1 and back["epochs"] == 50 and back["workers"] == 8
+    assert back["device"] == "0" and isinstance(back["device"], str)
+
+
+def test_worker_args_keep_numeric_strings_as_strings():
+    # A run name or project path of "2024" must not become an int, or path
+    # building downstream breaks.
+    cmd = t.build_worker_train_command("x", dict(_worker_params(), name="2024", project="C:/1"))
+    back = t.parse_worker_args(cmd[2:])
+    assert back["name"] == "2024" and isinstance(back["name"], str)
+    assert back["project"] == "C:/1" and isinstance(back["project"], str)
+
+
+def test_worker_args_resume_is_bool():
+    cmd = t.build_worker_train_command("x", dict(_worker_params(), resume=True))
+    assert t.parse_worker_args(cmd[2:])["resume"] is True
+
+
+def test_worker_args_ignores_junk():
+    assert t.parse_worker_args(["novalue", "", "=x", "imgsz=notanint"]) == {}
+
+
+def test_train_kwargs_omits_empty_optionals():
+    k = t.train_kwargs(dict(_worker_params(), device="", project="", name=""))
+    assert "device" not in k and "project" not in k and "name" not in k
+    assert k["imgsz"] == 960 and k["epochs"] == 50

@@ -342,17 +342,35 @@ def label_folder(recipe: Recipe) -> Path:
     return p
 
 
-def save_capture(recipe: Recipe, frame_bgr: np.ndarray, adjusted_bgr: np.ndarray | None = None) -> tuple[Path, Path | None]:
+def save_capture(
+    recipe: Recipe,
+    frame_bgr: np.ndarray,
+    adjusted_bgr: np.ndarray | None = None,
+    save_raw: bool = True,
+) -> tuple[Path | None, Path | None]:
+    """Write a capture to the recipe's folder.
+
+    ``save_raw=False`` with an adjusted frame writes only the adjusted image.
+    Capturing adjusted used to emit both files, which doubled the dataset and
+    left an unadjusted twin of every frame to label or delete by hand.
+
+    Returns (raw_path, adjusted_path); either may be None.
+    """
     ts = time.strftime("%Y%m%d_%H%M%S")
     ms = int((time.time() % 1) * 1000)
     base = f"{recipe.safe_name}_{ts}_{ms:03d}"
     folder = capture_folder(recipe)
-    raw_path = folder / f"{base}.jpg"
-    cv2.imwrite(str(raw_path), frame_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
+
+    raw_path = None
+    if save_raw or adjusted_bgr is None:
+        raw_path = folder / f"{base}.jpg"
+        cv2.imwrite(str(raw_path), frame_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
+
     adjusted_path = None
     if adjusted_bgr is not None:
         adjusted_path = folder / f"{base}_adjusted.jpg"
         cv2.imwrite(str(adjusted_path), adjusted_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
+
     return raw_path, adjusted_path
 
 

@@ -24,6 +24,15 @@ APP_DIR = Path(__file__).resolve().parent
 if str(APP_DIR) not in sys.path:
     sys.path.insert(0, str(APP_DIR))
 
+# A frozen build re-invokes itself to run training/evaluation with its own
+# bundled Ultralytics (there is no `yolo` CLI or system Python inside a package).
+# Dispatch before importing Qt so a worker process never starts a GUI.
+from bung_labeler.worker import maybe_run_worker
+
+_worker_exit = maybe_run_worker(sys.argv)
+if _worker_exit is not None:
+    raise SystemExit(_worker_exit)
+
 try:
     from bung_labeler.ui.main_window import main
 except ModuleNotFoundError as exc:
