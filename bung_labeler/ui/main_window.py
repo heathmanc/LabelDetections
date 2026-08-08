@@ -564,7 +564,7 @@ class MainWindow(QMainWindow):
         while the operator only meant to scroll the page. Wheel events on these
         widgets are redirected to the scroll area instead.
         """
-        if event.type() == QEvent.Wheel and isinstance(
+        if event.type() == QEvent.Type.Wheel and isinstance(
             obj, (QAbstractSpinBox, QComboBox, QSlider)
         ):
             area = self._parent_scroll_area(obj)
@@ -586,11 +586,15 @@ class MainWindow(QMainWindow):
 
     def _install_wheel_guards(self) -> None:
         """Apply the wheel guard to every value widget currently in the UI."""
-        for widget in self.findChildren((QAbstractSpinBox, QComboBox, QSlider)):
-            # NoFocus would break keyboard use; StrongFocus keeps click/tab focus
-            # while the event filter suppresses wheel edits.
-            widget.setFocusPolicy(Qt.StrongFocus)
-            widget.installEventFilter(self)
+        # One call per type: PySide6's findChildren takes a single type, not a
+        # tuple (unlike isinstance). Passing a tuple raises at startup.
+        # QAbstractSpinBox covers QSpinBox and QDoubleSpinBox via subclassing.
+        for cls in (QAbstractSpinBox, QComboBox, QSlider):
+            for widget in self.findChildren(cls):
+                # NoFocus would break keyboard use; StrongFocus keeps click/tab
+                # focus while the event filter suppresses wheel edits.
+                widget.setFocusPolicy(Qt.StrongFocus)
+                widget.installEventFilter(self)
 
     @staticmethod
     def _scrollable_tab() -> tuple[QWidget, QWidget, QVBoxLayout]:
