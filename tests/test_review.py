@@ -152,6 +152,57 @@ def test_unconstrained_validate_skips_battery_checks_but_keeps_geometry():
     tiny = {"label": "widget", "class_id": 5, "x": 0, "y": 0, "w": 1, "h": 1}
     assert any("degenerate" in s for s in r.validate_boxes([tiny], 500, 500, 0))
 
+# --- Sealed recipes (battery models with no bunsen valves) -------------------
+
+def _batt():
+    return {"kind": "obb", "points": [[0, 0], [100, 0], [100, 100], [0, 100]],
+            "label": "battery", "class_id": 0}
+
+
+def _bung(cx, cy):
+    return {"kind": "box", "x": cx - 5, "y": cy - 5, "w": 10, "h": 10,
+            "label": "bung", "class_id": 1}
+
+
+def test_sealed_passes_with_a_battery_and_no_bungs():
+    assert r.quantities_satisfied([_batt()], 6, sealed=True) is True
+
+
+def test_sealed_fails_when_a_bung_is_present():
+    # The whole point: on a sealed model a bung is a defect, not a shortfall.
+    assert r.quantities_satisfied([_batt(), _bung(20, 20)], 6, sealed=True) is False
+
+
+def test_sealed_still_requires_a_battery():
+    assert r.quantities_satisfied([], 6, sealed=True) is False
+
+
+def test_sealed_ignores_the_expected_count():
+    for expected in (0, 1, 6, 99):
+        assert r.quantities_satisfied([_batt()], expected, sealed=True) is True
+        assert r.quantities_satisfied([_batt(), _bung(20, 20)], expected, sealed=True) is False
+
+
+def test_sealed_rejects_a_bung_outside_any_battery():
+    assert r.quantities_satisfied([_batt(), _bung(500, 500)], 6, sealed=True) is False
+
+
+def test_unsealed_behaviour_is_unchanged():
+    assert r.quantities_satisfied([_batt()], 6) is False
+    full = [_batt()] + [_bung(10 + i * 12, 50) for i in range(6)]
+    assert r.quantities_satisfied(full, 6) is True
+    # free-form still passes anything non-empty
+    assert r.quantities_satisfied([_batt(), _bung(20, 20)], 0) is True
+
+
+def test_sealed_summary_names_the_defect():
+    text = r.quantity_summary_text([_batt(), _bung(20, 20)], 6, sealed=True)
+    assert "Sealed" in text and "defect" in text
+
+
+def test_sealed_summary_with_no_battery():
+    assert "need at least 1" in r.quantity_summary_text([], 6, sealed=True)
+
 
 if __name__ == "__main__":
     import traceback

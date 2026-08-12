@@ -1616,6 +1616,14 @@ class MainWindow(QMainWindow):
             "Off: free-form labeling for any object classes (no battery/bung check)."
         )
         self.constrained_check.toggled.connect(self._on_constrained_toggled)
+        self.sealed_check = QCheckBox("Sealed battery - no bunsen valves")
+        self.sealed_check.setChecked(bool(getattr(self.recipe, "sealed", False)))
+        self.sealed_check.setToolTip(
+            "On: this battery model has no bunsen valves. Review expects zero bungs,\n"
+            "so a detected bung is a defect rather than a count shortfall.\n"
+            "Saved in the recipe JSON as \"sealed\": true for the BungVision runtime."
+        )
+        self.sealed_check.toggled.connect(self._on_sealed_toggled)
         self.notes_edit = QTextEdit()
         self.notes_edit.setFixedHeight(54)
         self.notes_edit.setPlaceholderText("Notes, lighting setup, lens height, battery family, etc.")
@@ -1624,8 +1632,9 @@ class MainWindow(QMainWindow):
         form.addRow("Model", self.model_edit)
         form.addRow("Expected bungs", self.expected_spin)
         form.addRow("Quantity check", self.constrained_check)
+        form.addRow("Sealed", self.sealed_check)
         form.addRow("Notes", self.notes_edit)
-        self.expected_spin.setEnabled(self.constrained_check.isChecked())
+        self._sync_expected_enabled()
 
         save_btn = QPushButton("Save Recipe")
         save_btn.clicked.connect(self.save_recipe_from_ui)
@@ -2882,6 +2891,7 @@ class MainWindow(QMainWindow):
             category=self._category_from_ui(),
             expected_bungs=self._expected_bungs_value(),
             constrained=self.constrained_check.isChecked() if hasattr(self, "constrained_check") else True,
+            sealed=self.sealed_check.isChecked() if hasattr(self, "sealed_check") else False,
             brightness=self.brightness_slider.value(),
             contrast=self.contrast_slider.value(),
             gamma=self.gamma_slider.value() / 100.0,
@@ -2952,6 +2962,9 @@ class MainWindow(QMainWindow):
         self.model_edit.setText(r.model)
         if hasattr(self, "constrained_check"):
             self.constrained_check.setChecked(bool(getattr(r, "constrained", True)))
+        if hasattr(self, "sealed_check"):
+            self.sealed_check.setChecked(bool(getattr(r, "sealed", False)))
+        self._sync_expected_enabled()
         self._set_int_line_value(self.expected_spin, r.expected_bungs)
         if hasattr(self, "count_required_spin"):
             self._set_int_line_value(self.count_required_spin, r.expected_bungs)
@@ -4811,19 +4824,51 @@ class MainWindow(QMainWindow):
             return 0
         return int(self._expected_bungs_value() if hasattr(self, "expected_spin") else self.recipe.expected_bungs)
 
+    def _sync_expected_enabled(self) -> None:
+        """The expected count is meaningless unless the check applies and the
+        recipe is not sealed (sealed always means zero)."""
+        if not hasattr(self, "expected_spin"):
+            return
+        constrained = self.constrained_check.isChecked() if hasattr(self, "constrained_check") else True
+        sealed = self.sealed_check.isChecked() if hasattr(self, "sealed_check") else False
+        self.expected_spin.setEnabled(constrained and not sealed)
+
     def _on_constrained_toggled(self, checked: bool) -> None:
-        if hasattr(self, "expected_spin"):
-            self.expected_spin.setEnabled(checked)
+        self._sync_expected_enabled()
         # OK/CHECK status depends on whether the constraint applies.
         self._image_status_cache.clear()
         self._refresh_images()
         self._update_dataset_summary()
 
+    def _on_sealed_toggled(self, checked: bool) -> None:
+        self._sync_expected_enabled()
+        # Sealed changes what counts as a passing image, so cached OK/CHECK
+        # statuses have to be recomputed.
+        self._image_status_cache.clear()
+        self._refresh_images()
+        self._update_dataset_summary()
+
+    def _recipe_sealed(self) -> bool:
+        """Sealed recipes expect zero bungs; a bung is then a defect.
+
+        Only meaningful while the quantity check is on -- an unconstrained
+        recipe is free-form labeling and must stay unchecked.
+        """
+        if not self._recipe_constrained():
+            return False
+        if hasattr(self, "sealed_check"):
+            return bool(self.sealed_check.isChecked())
+        return bool(getattr(self.recipe, "sealed", False))
+
     def _quantities_satisfied(self, boxes: list[dict]) -> bool:
-        return review_logic.quantities_satisfied(boxes, self._constraint_expected())
+        return review_logic.quantities_satisfied(
+            boxes, self._constraint_expected(), sealed=self._recipe_sealed()
+        )
 
     def _quantity_summary_text(self, boxes: list[dict]) -> str:
-        return review_logic.quantity_summary_text(boxes, self._constraint_expected())
+        return review_logic.quantity_summary_text(
+            boxes, self._constraint_expected(), sealed=self._recipe_sealed()
+        )
 
     def mark_current_reviewed(self) -> None:
         if not self.current_image_path:
@@ -5244,6 +5289,7 @@ class MainWindow(QMainWindow):
         tally = dataset_health.new_tally()
         expected = int(getattr(recipe, "expected_bungs", 6))
         constrained = bool(getattr(recipe, "constrained", True))
+        sealed = bool(getattr(recipe, "sealed", False))
         images = sorted(capture_folder(recipe).glob("*.jpg"))
         ljson = label_folder(recipe)
         for img in images:
@@ -5255,7 +5301,7 @@ class MainWindow(QMainWindow):
                     data = json.loads(sidecar.read_text(encoding="utf-8"))
                 except Exception:
                     data = None
-            status = dataset_health.annotation_status(data, expected, constrained)
+            status = dataset_health.annotation_status(data, expected, constrained, sealed)
             dataset_health.add_status(tally, status)
         return tally
 
