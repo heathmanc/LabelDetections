@@ -349,6 +349,14 @@ class MainWindow(QMainWindow):
 
         self._build_ui()
         self.polish_buttons()
+        # Now that button minimums exist, size the pane so nothing can elide.
+        # 420px: measured as the narrowest width at which no button label
+        # elides on any tab (binary-searched; the exact threshold is 418).
+        # Qt's own layout minimum reports 383 here, which still clips, so this
+        # cannot be derived from minimumSizeHint. test_ui_smoke asserts nothing
+        # clips at this width, so growing a label fails the suite rather than
+        # silently truncating in the UI.
+        self.tabs.setMinimumWidth(420)
         self._build_menu()
         self._refresh_recipes()
         self._refresh_images()
@@ -702,10 +710,14 @@ class MainWindow(QMainWindow):
         right = self._scroll_panel(self._right_panel(), min_width=360, preferred_width=380)
         # v0.9.18: v0.9.17 overcorrected and made the entire left rail too wide.
         # Keep enough room for the capture tab, but let the image canvas stay dominant.
-        # Narrower: the recipe tab drove the old 390 floor, and the canvas
-        # is the part that benefits from the space.
-        left.setMinimumWidth(300)
-        left.setMaximumWidth(430)
+        # Minimum is derived from the widest tab's own content, not guessed.
+        # Guessing it low let compact buttons elide their labels -- "Mark
+        # Current Reviewed" rendered as "Mark Current Reviewe". Computed after
+        # the tabs exist so it tracks content changes instead of going stale.
+        # Minimum is set after polish_buttons in __init__: the button widths it
+        # assigns are what the content minimum depends on, so computing it here
+        # would read pre-polish sizes and come out too small.
+        left.setMaximumWidth(520)
         right.setMinimumWidth(360)
         right.setMaximumWidth(450)
 
@@ -1668,14 +1680,14 @@ class MainWindow(QMainWindow):
         self.expected_spin.setFixedWidth(48)
         self.expected_spin.setPlaceholderText("6")
         self.expected_spin.editingFinished.connect(self._sync_expected_bungs_from_text)
-        self.constrained_check = QCheckBox("Enforce battery / bung quantity check")
+        self.constrained_check = QCheckBox()
         self.constrained_check.setChecked(bool(getattr(self.recipe, "constrained", True)))
         self.constrained_check.setToolTip(
             "On: review requires every battery to hold the expected number of bungs.\n"
             "Off: free-form labeling for any object classes (no battery/bung check)."
         )
         self.constrained_check.toggled.connect(self._on_constrained_toggled)
-        self.sealed_check = QCheckBox("Sealed battery - no bunsen valves")
+        self.sealed_check = QCheckBox()
         self.sealed_check.setChecked(bool(getattr(self.recipe, "sealed", False)))
         self.sealed_check.setToolTip(
             "On: this battery model has no bunsen valves. Review expects zero bungs,\n"
@@ -1702,7 +1714,12 @@ class MainWindow(QMainWindow):
         delete_recipe_btn = QPushButton("Delete Selected")
         delete_recipe_btn.setToolTip("Permanently delete the selected recipe file. Captured images and labels are NOT deleted.")
         delete_recipe_btn.clicked.connect(self.delete_selected_recipe)
+        # Same compact treatment as the Live Capture tab, which sizes cleanly in
+        # the narrow pane instead of stretching edge to edge.
+        for _b in (save_btn, load_btn, delete_recipe_btn):
+            _b.setProperty("compactCaptureButton", True)
         recipe_btn_row = QHBoxLayout()
+        recipe_btn_row.setSpacing(6)
         recipe_btn_row.addWidget(load_btn)
         recipe_btn_row.addWidget(delete_recipe_btn)
 
@@ -1736,6 +1753,7 @@ class MainWindow(QMainWindow):
             "Point captures, labels, recipes and exports at another folder, such as "
             "a shared drive. Takes effect after restarting."
         )
+        change_library_btn.setProperty("compactCaptureButton", True)
         change_library_btn.clicked.connect(self.change_data_folder)
 
         library_layout.addWidget(self.library_path_label)
@@ -5130,7 +5148,10 @@ class MainWindow(QMainWindow):
             if btn.property("compactCaptureButton"):
                 btn.setMinimumHeight(24)
                 btn.setMaximumHeight(26)
-                btn.setMinimumWidth(0)
+                # A zero minimum let the label elide -- "Mark Current Reviewed"
+                # rendered as "Mark Current Reviewe". Compact buttons keep their
+                # text width; the pane minimum below is sized to fit them.
+                btn.setMinimumWidth(self._button_text_width(btn))
                 if btn.maximumWidth() > 16777214:
                     btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
                 else:
@@ -5139,7 +5160,7 @@ class MainWindow(QMainWindow):
             if btn.property("rightPanelButton"):
                 btn.setMinimumHeight(24)
                 btn.setMaximumHeight(26)
-                btn.setMinimumWidth(0)
+                btn.setMinimumWidth(self._button_text_width(btn))
                 btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
                 continue
             # Measure the actual rendered text rather than guessing 6px/char.
@@ -5169,7 +5190,10 @@ class MainWindow(QMainWindow):
         """
         text = btn.text().replace("&&", "&")
         advance = btn.fontMetrics().horizontalAdvance(text)
-        return max(44, advance + 18)
+        # Qt's own minimumSizeHint accounts for style padding the font advance
+        # does not, and it is what actually governs elision -- take whichever
+        # is larger or the label still clips.
+        return max(44, advance + 18, btn.minimumSizeHint().width())
 
     def _simple_label_from_text(self, label: str, class_id: int = -1) -> tuple[str, int]:
         return review_logic.simple_label(label, class_id)

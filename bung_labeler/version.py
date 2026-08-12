@@ -6,5 +6,5 @@ editing the window title and the review-stamp string separately.
 from __future__ import annotations
 
 APP_NAME = "BungVision Label Studio"
-APP_VERSION = "0.9.92"
+APP_VERSION = "0.9.93"
 APP_TITLE = f"{APP_NAME} v{APP_VERSION}"
