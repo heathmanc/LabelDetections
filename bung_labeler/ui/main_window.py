@@ -348,11 +348,15 @@ class MainWindow(QMainWindow):
 
         self._build_ui()
         self.polish_buttons()
-        self._install_wheel_guards()
         self._build_menu()
         self._refresh_recipes()
         self._refresh_images()
         self._apply_theme()
+        # After _apply_theme: popup heights are computed from styled row
+        # metrics, and the stylesheet changes row height. Sizing them before
+        # theming left the height stale, so the popup resized on first open --
+        # visible as a flicker.
+        self._install_wheel_guards()
         self._class_changed(0)
         self._update_box_count()
 
@@ -619,9 +623,20 @@ class MainWindow(QMainWindow):
                 # focus while the event filter suppresses wheel edits.
                 widget.setFocusPolicy(Qt.StrongFocus)
                 widget.installEventFilter(self)
-                # Watch the popup so it can be sized to its rows on show.
                 if isinstance(widget, QComboBox):
+                    # Size the popup up front and whenever its items change.
+                    # Doing it in the Show handler meant Qt painted the popup at
+                    # the wrong size and then resized it, which is visible as a
+                    # flicker. The Show handler stays as a safety net; when the
+                    # height is already correct it is a no-op and emits nothing.
                     widget.view().installEventFilter(self)
+                    self._fit_combo_popup(widget.view())
+                    model = widget.model()
+                    for signal in (model.rowsInserted, model.rowsRemoved,
+                                   model.modelReset, model.layoutChanged):
+                        signal.connect(
+                            lambda *_a, v=widget.view(): self._fit_combo_popup(v)
+                        )
 
     @staticmethod
     def _scrollable_tab() -> tuple[QWidget, QWidget, QVBoxLayout]:

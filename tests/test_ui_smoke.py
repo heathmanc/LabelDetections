@@ -195,6 +195,42 @@ def test_combo_popup_shrinks_when_items_are_removed():
     combo.addItem("only one")
     assert _popup_rows_visible(combo) <= 1.05, "popup kept its old height"
 
+def test_combo_popups_do_not_resize_after_being_shown():
+    """A resize after Show means Qt painted the popup at one size then changed
+    it -- which is what reads as flicker. Geometry assertions cannot see
+    painting, so this counts the resize events instead.
+    """
+    from PySide6.QtCore import QObject
+
+    class _Spy(QObject):
+        def __init__(self):
+            super().__init__()
+            self.resizes = []
+            self.shown = False
+
+        def eventFilter(self, obj, event):
+            if event.type() == QEvent.Type.Show:
+                self.shown = True
+            elif event.type() == QEvent.Type.Resize and self.shown:
+                self.resizes.append(event.size().height())
+            return False
+
+    win = _window()
+    offenders = []
+    for combo in win.findChildren(QComboBox):
+        if not combo.count():
+            continue
+        spy = _Spy()
+        view = combo.view()
+        view.installEventFilter(spy)
+        combo.showPopup()
+        QApplication.processEvents()
+        combo.hidePopup()
+        view.removeEventFilter(spy)
+        if spy.resizes:
+            offenders.append(f"{combo.itemText(0)!r}: {spy.resizes}")
+    assert not offenders, "popup resized after show:\n" + "\n".join(offenders)
+
 
 
 
