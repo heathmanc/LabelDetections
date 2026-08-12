@@ -630,7 +630,14 @@ class MainWindow(QMainWindow):
                     # flicker. The Show handler stays as a safety net; when the
                     # height is already correct it is a no-op and emits nothing.
                     widget.view().installEventFilter(self)
-                    self._fit_combo_popup(widget.view())
+                    # Fill opaquely: without this the popup frame paints nothing
+                    # on its first expose and the window behind shows through.
+                    view = widget.view()
+                    view.setAutoFillBackground(True)
+                    container = view.parentWidget()
+                    if container is not None:
+                        container.setAutoFillBackground(True)
+                    self._fit_combo_popup(view)
                     model = widget.model()
                     for signal in (model.rowsInserted, model.rowsRemoved,
                                    model.modelReset, model.layoutChanged):
@@ -2620,8 +2627,18 @@ class MainWindow(QMainWindow):
                box of dead space that Qt then had to reposition, which is what
                made short dropdowns feel glitchy. maxVisibleItems caps the tall
                ones instead. */
-            QComboBox QAbstractItemView {
+            /* The popup view is a QListView, which the generic input rule above
+               (QLineEdit, ..., QListWidget) never matched -- so it had no
+               background and the first paint showed straight through to the
+               window behind before the rows drew. That is the flicker.
+               QComboBox QListView is spelled out too: the popup is a QListView
+               and matching it directly avoids relying on the abstract base. */
+            QComboBox QAbstractItemView, QComboBox QListView {
+                background: #111827;
+                color: #e5e7eb;
+                border: 1px solid #334155;
                 selection-background-color: #1d4ed8;
+                selection-color: #ffffff;
                 outline: none;
             }
             QComboBox QAbstractItemView::item { min-height: 22px; }
