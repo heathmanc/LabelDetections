@@ -13,7 +13,8 @@ LABELED_STATUSES = ("ready", "forced", "problem", "needs_review")
 ALL_STATUSES = LABELED_STATUSES + ("empty", "unlabeled")
 
 
-def annotation_status(data: dict | None, expected: int, constrained: bool = True) -> str:
+def annotation_status(data: dict | None, expected: int, constrained: bool = True,
+                      sealed: bool = False) -> str:
     """Classify one image from its sidecar annotation dict.
 
     Returns one of:
@@ -34,7 +35,8 @@ def annotation_status(data: dict | None, expected: int, constrained: bool = True
     if review_logic.annotation_force_reviewed(data):
         return "forced"
     exp = int(expected) if constrained else 0
-    if review_logic.quantities_satisfied(boxes, exp):
+    # Sealed only applies while constrained, matching the review path.
+    if review_logic.quantities_satisfied(boxes, exp, sealed=bool(sealed) and bool(constrained)):
         return "ready"
     return "problem"
 

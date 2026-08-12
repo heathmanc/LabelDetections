@@ -203,14 +203,24 @@ def per_battery_bung_counts(boxes: list[dict]) -> tuple[list[int], int]:
     return counts, outside
 
 
-def quantities_satisfied(boxes: list[dict], expected: int) -> bool:
+def quantities_satisfied(boxes: list[dict], expected: int, sealed: bool = False) -> bool:
     """Review passes without force when every battery in view holds exactly the
     expected number of bungs, there is at least one battery, and no bung falls
     outside all batteries. This lets multiple fully-labeled batteries pass.
 
+    ``sealed=True`` describes a battery model with no bunsen valves at all: at
+    least one battery must be present and there must be *no* bungs anywhere.
+    This is distinct from ``expected <= 0`` -- a sealed recipe still enforces a
+    count, it just enforces zero, so a stray bung is a genuine defect.
+
     ``expected <= 0`` unlocks the recipe from the battery/bung constraint
     (free-form labeling): any non-empty set of labels passes review, so the
     tool can be used for arbitrary object classes."""
+    if sealed:
+        counts, outside = per_battery_bung_counts(boxes)
+        if not counts or outside:
+            return False
+        return all(c == 0 for c in counts)
     if int(expected) <= 0:
         return bool(boxes)
     counts, outside = per_battery_bung_counts(boxes)
@@ -219,8 +229,19 @@ def quantities_satisfied(boxes: list[dict], expected: int) -> bool:
     return all(c == int(expected) for c in counts)
 
 
-def quantity_summary_text(boxes: list[dict], expected: int) -> str:
+def quantity_summary_text(boxes: list[dict], expected: int, sealed: bool = False) -> str:
     """Human-readable per-battery breakdown for review dialogs."""
+    if sealed:
+        counts, outside = per_battery_bung_counts(boxes)
+        if not counts:
+            return "Batteries: 0 (need at least 1)\nSealed recipe: no bungs expected"
+        lines = ["Sealed recipe: no bungs expected"]
+        for i, c in enumerate(counts):
+            state = "OK" if c == 0 else f"{c} bung(s) found - defect"
+            lines.append(f"Battery {i + 1}: {state}")
+        if outside:
+            lines.append(f"Bungs outside any battery: {outside}")
+        return "\n".join(lines)
     if int(expected) <= 0:
         return f"Free-form labeling (battery/bung check disabled).\nLabels on this image: {len(boxes)}"
     counts, outside = per_battery_bung_counts(boxes)

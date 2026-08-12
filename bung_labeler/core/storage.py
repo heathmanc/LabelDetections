@@ -424,6 +424,12 @@ class Recipe:
     # When False, the recipe is unlocked from the battery/bung quantity check
     # so the tool can label arbitrary object classes (free-form labeling).
     constrained: bool = True
+    # Sealed battery model: no bunsen valves at all. Correct product is a
+    # battery with zero bungs, so a detected bung is a defect rather than a
+    # missing-count failure. Written into the recipe JSON so the BungVision
+    # runtime can read it and not reject a sealed battery for having no bungs.
+    # Distinct from constrained=False, which disables the check entirely.
+    sealed: bool = False
     brightness: int = 0
     contrast: int = 0
     gamma: float = 1.0

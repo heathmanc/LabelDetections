@@ -75,6 +75,23 @@ def test_merge_tally():
     assert a["problem"] == 1
 
 
+def test_sealed_ready_with_no_bungs():
+    data = _reviewed([_battery(0)])
+    assert dh.annotation_status(data, 6, sealed=True) == "ready"
+
+
+def test_sealed_problem_when_a_bung_is_present():
+    data = _reviewed(_full(0, n=1))
+    assert dh.annotation_status(data, 6, sealed=True) == "problem"
+
+
+def test_sealed_ignored_when_unconstrained():
+    # Free-form labeling must stay free-form even if the recipe is flagged.
+    data = _reviewed(_full(0, n=1))
+    assert dh.annotation_status(data, 6, constrained=False, sealed=True) == "ready"
+
+
+
 if __name__ == "__main__":
     import traceback
     failures = 0
