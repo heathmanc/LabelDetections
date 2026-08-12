@@ -46,6 +46,7 @@ from PySide6.QtWidgets import (
     QSlider,
     QSpinBox,
     QAbstractSpinBox,
+    QAbstractItemView,
     QSplitter,
     QStatusBar,
     QTableWidget,
@@ -564,6 +565,13 @@ class MainWindow(QMainWindow):
         while the operator only meant to scroll the page. Wheel events on these
         widgets are redirected to the scroll area instead.
         """
+        # Qt sizes a combo popup from an unstyled row metric, but the themed
+        # rows render taller, so the last row was always clipped -- every
+        # dropdown showed n-0.5 items no matter how much space was free.
+        # Resize the view to fit its rows as it is shown.
+        if event.type() == QEvent.Type.Show and isinstance(obj, QAbstractItemView):
+            self._fit_combo_popup(obj)
+            return False
         if event.type() == QEvent.Type.Wheel and isinstance(
             obj, (QAbstractSpinBox, QComboBox, QSlider)
         ):
@@ -584,6 +592,22 @@ class MainWindow(QMainWindow):
             node = node.parentWidget()
         return None
 
+    @staticmethod
+    def _fit_combo_popup(view) -> None:
+        """Make a combo popup exactly tall enough for the rows it will show."""
+        combo = view.parent()
+        while combo is not None and not isinstance(combo, QComboBox):
+            combo = combo.parent()
+        if combo is None or combo.count() <= 0:
+            return
+        rows = min(combo.count(), max(1, combo.maxVisibleItems()))
+        row_h = view.sizeHintForRow(0)
+        if row_h <= 0:
+            row_h = view.fontMetrics().height() + 8
+        # Fixed, not minimum: a minimum is sticky, so a combo that shrinks (a
+        # repopulated recipe or category list) would keep the taller popup.
+        view.setFixedHeight(rows * row_h)
+
     def _install_wheel_guards(self) -> None:
         """Apply the wheel guard to every value widget currently in the UI."""
         # One call per type: PySide6's findChildren takes a single type, not a
@@ -595,6 +619,9 @@ class MainWindow(QMainWindow):
                 # focus while the event filter suppresses wheel edits.
                 widget.setFocusPolicy(Qt.StrongFocus)
                 widget.installEventFilter(self)
+                # Watch the popup so it can be sized to its rows on show.
+                if isinstance(widget, QComboBox):
+                    widget.view().installEventFilter(self)
 
     @staticmethod
     def _scrollable_tab() -> tuple[QWidget, QWidget, QVBoxLayout]:

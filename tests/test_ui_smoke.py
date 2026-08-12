@@ -143,13 +143,57 @@ def test_stylesheet_has_no_unsubstituted_placeholders():
         assert token not in css, f"{token} left unsubstituted"
 
 
-def test_combo_popups_are_not_forced_to_a_fixed_height():
-    # A forced minimum left short lists as a tall box of dead space, which is
-    # what made the dropdowns feel glitchy.
+def test_short_combo_popups_are_not_padded_out():
+    # Popups were forced to a 120px floor, so a 2-item list opened as a tall
+    # box of dead space. Height must now track the row count.
     win = _window()
     for combo in win.findChildren(QComboBox):
-        assert combo.view().minimumHeight() < 120, \
-            f"popup for {combo.itemText(0)!r} forced to a fixed height"
+        n = combo.count()
+        if not n or n > 3:
+            continue
+        _popup_rows_visible(combo)  # realise the popup
+        assert combo.view().height() < 100, (
+            f"popup for {combo.itemText(0)!r} is {combo.view().height()}px "
+            f"for only {n} items"
+        )
+
+def _popup_rows_visible(combo):
+    combo.showPopup()
+    view = combo.view()
+    row = view.sizeHintForRow(0) or 22
+    out = view.height() / row
+    combo.hidePopup()
+    return out
+
+
+def test_every_combo_popup_shows_all_its_rows():
+    # Qt sizes the popup from an unstyled row metric while the themed rows
+    # render taller, so every dropdown showed n-0.5 items regardless of the
+    # space available. Must hold on the FIRST show, with no warm-up.
+    win = _window()
+    for combo in win.findChildren(QComboBox):
+        if not combo.count():
+            continue
+        want = min(combo.count(), max(1, combo.maxVisibleItems()))
+        got = _popup_rows_visible(combo)
+        assert got >= want - 0.05, (
+            f"popup for {combo.itemText(0)!r} shows {got:.1f} of {want} rows"
+        )
+
+
+def test_combo_popup_shrinks_when_items_are_removed():
+    # A sticky minimum height left a repopulated list (recipes, categories)
+    # with an oversized popup full of dead space.
+    win = _window()
+    # Unparented: a child combo would be picked up by findChildren in other
+    # tests as an unguarded widget, since the window is shared.
+    combo = QComboBox()
+    combo.addItems([f"item {i}" for i in range(8)])
+    combo.view().installEventFilter(win)
+    assert _popup_rows_visible(combo) >= 7.95
+    combo.clear()
+    combo.addItem("only one")
+    assert _popup_rows_visible(combo) <= 1.05, "popup kept its old height"
 
 
 
