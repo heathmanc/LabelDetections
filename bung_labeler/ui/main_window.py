@@ -39,6 +39,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QListWidget,
+    QListView,
     QListWidgetItem,
     QMainWindow,
     QMessageBox,
@@ -624,6 +625,13 @@ class MainWindow(QMainWindow):
                 widget.setFocusPolicy(Qt.StrongFocus)
                 widget.installEventFilter(self)
                 if isinstance(widget, QComboBox):
+                    # Replace Qt's private combo view with a plain QListView.
+                    # The default view has platform-specific painting that does
+                    # not composite cleanly under a stylesheet, which shows as a
+                    # flash of the window behind while the popup opens.
+                    # Must happen before the filters below: setView() discards
+                    # the old view and anything installed on it.
+                    widget.setView(QListView(widget))
                     # Size the popup up front and whenever its items change.
                     # Doing it in the Show handler meant Qt painted the popup at
                     # the wrong size and then resized it, which is visible as a
@@ -5780,6 +5788,12 @@ class MainWindow(QMainWindow):
 
 def main() -> None:
     app = QApplication(sys.argv)
+    # Windows enables the combo-box open animation by default (it follows the
+    # OS "animate controls" setting). Qt animates the popup open by painting it
+    # progressively, which under a stylesheet flashes the window behind before
+    # the rows appear -- the popup looks correct once open, but the opening
+    # does not. Nothing here depends on the animation, so turn it off.
+    QApplication.setEffectEnabled(Qt.UIEffect.UI_AnimateCombo, False)
     win = MainWindow()
     win.show()
     # A configured library that could not be opened (typically an offline
