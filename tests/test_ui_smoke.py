@@ -231,6 +231,36 @@ def test_combo_popups_do_not_resize_after_being_shown():
             offenders.append(f"{combo.itemText(0)!r}: {spy.resizes}")
     assert not offenders, "popup resized after show:\n" + "\n".join(offenders)
 
+def _popup_view_rule(css: str) -> str:
+    start = css.index("QComboBox QAbstractItemView")
+    return css[start:css.index("}", start)]
+
+
+def test_combo_popup_declares_an_opaque_background():
+    """The popup view is a QListView, which the generic input rule (matching
+    QListWidget) never covered. With no background it paints nothing on first
+    expose and the window behind shows through before the rows draw.
+
+    Note: this asserts the cause, not the appearance -- render() forces a full
+    repaint, so painting order cannot be observed offscreen.
+    """
+    rule = _popup_view_rule(_window().styleSheet())
+    body = rule.split("{", 1)[1]  # drop the selector, or it glues to decl #1
+    decls = [d.strip() for d in body.split(";")]
+    assert any(d.startswith("background") for d in decls), (
+        "popup view has no background declaration; "
+        "selection-background-color does not count"
+    )
+
+
+def test_combo_popup_widgets_fill_their_background():
+    win = _window()
+    for combo in win.findChildren(QComboBox):
+        view = combo.view()
+        assert view.autoFillBackground(), (
+            f"popup view for {combo.itemText(0)!r} does not fill its background"
+        )
+
 
 
 
