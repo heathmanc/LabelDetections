@@ -203,6 +203,48 @@ def test_sealed_summary_names_the_defect():
 def test_sealed_summary_with_no_battery():
     assert "need at least 1" in r.quantity_summary_text([], 6, sealed=True)
 
+# --- Sealed class-name suffix (the only signal that reaches BungVision) ------
+
+def test_sealed_suffix_marks_battery_only():
+    boxes = [_batt(), _bung(20, 20)]
+    out = r.apply_sealed_suffix(boxes, sealed=True)
+    assert [b["label"] for b in out] == ["battery_sealed", "bung"]
+
+
+def test_sealed_suffix_is_idempotent():
+    once = r.apply_sealed_suffix([_batt()], sealed=True)
+    twice = r.apply_sealed_suffix(once, sealed=True)
+    assert [b["label"] for b in twice] == ["battery_sealed"]
+
+
+def test_unticking_sealed_reverts_the_label():
+    sealed = r.apply_sealed_suffix([_batt()], sealed=True)
+    assert [b["label"] for b in r.apply_sealed_suffix(sealed, sealed=False)] == ["battery"]
+
+
+def test_sealed_box_still_counts_as_a_battery():
+    sealed = r.apply_sealed_suffix([_batt()], sealed=True)[0]
+    assert r._box_is_battery(sealed) is True
+    assert r.quantities_satisfied([sealed], 6, sealed=True) is True
+
+
+def test_simple_label_preserves_sealed():
+    # Collapsing battery_sealed back to battery would erase the distinction the
+    # model is trained on, which matters when labels come back from BungVision.
+    assert r.simple_label("battery_sealed", 3)[0] == "battery_sealed"
+
+
+def test_simple_label_still_collapses_ordinary_variants():
+    assert r.simple_label("battery_acme", 0) == ("battery", 0)
+    assert r.simple_label("bung_rubber", 1) == ("bung", 1)
+
+
+def test_apply_sealed_suffix_does_not_mutate_input():
+    boxes = [_batt()]
+    r.apply_sealed_suffix(boxes, sealed=True)
+    assert boxes[0]["label"] == "battery"
+
+
 
 if __name__ == "__main__":
     import traceback
