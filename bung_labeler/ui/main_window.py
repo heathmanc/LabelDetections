@@ -2555,10 +2555,34 @@ class MainWindow(QMainWindow):
             QSpinBox::down-arrow:disabled, QDoubleSpinBox::down-arrow:disabled {
                 opacity: 80;
             }
-            QComboBox QAbstractItemView {
-                min-height: 120px;
-                selection-background-color: #1d4ed8;
+            /* Styling a QComboBox replaces its native drop-down button with an
+               unstyled subcontrol, the same trap as the spinbox step buttons.
+               Size and position it explicitly, and reuse the spinner chevron. */
+            QComboBox::drop-down {
+                subcontrol-origin: border;
+                subcontrol-position: center right;
+                width: 22px;
+                border-left: 1px solid #334155;
+                border-top-right-radius: 5px;
+                border-bottom-right-radius: 5px;
+                background: #1e293b;
             }
+            QComboBox::drop-down:hover { background: #334155; }
+            QComboBox::down-arrow {
+                image: url("__SPIN_DOWN__");
+                width: 10px;
+                height: 7px;
+            }
+            QComboBox::down-arrow:disabled { opacity: 80; }
+            /* No min-height: forcing 120px made a 2-item popup render as a tall
+               box of dead space that Qt then had to reposition, which is what
+               made short dropdowns feel glitchy. maxVisibleItems caps the tall
+               ones instead. */
+            QComboBox QAbstractItemView {
+                selection-background-color: #1d4ed8;
+                outline: none;
+            }
+            QComboBox QAbstractItemView::item { min-height: 22px; }
             QTextEdit { min-height: 56px; }
             QLabel { padding: 2px 0; }
             QTabWidget::pane {
@@ -5027,10 +5051,12 @@ class MainWindow(QMainWindow):
             btn.setMinimumWidth(self._button_text_width(btn))
             btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         for combo in self.findChildren(QComboBox):
+            # Let the popup size itself to its contents; maxVisibleItems caps
+            # long lists. A forced minimum height left short lists with dead
+            # space and made them feel glitchy.
             combo.setMaxVisibleItems(12)
-            combo.view().setMinimumHeight(120)
             combo.setSizeAdjustPolicy(QComboBox.AdjustToContentsOnFirstShow)
-            combo.setMinimumHeight(26)
+            combo.setMinimumHeight(28)
 
     @staticmethod
     def _button_text_width(btn: QPushButton) -> int:
