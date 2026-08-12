@@ -88,7 +88,10 @@ class ImageCanvas(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setMinimumSize(640, 360)
+        # 640 forced the three panes to need 1355px total while the window
+        # declared a 1000px minimum, so the right rail was pushed off-screen at
+        # 1280x720. The canvas scales its image to whatever room it gets.
+        self.setMinimumSize(320, 240)
         self.pixmap: QPixmap | None = None
         self.image_path: Path | None = None
         self.image_w = 0
