@@ -702,8 +702,10 @@ class MainWindow(QMainWindow):
         right = self._scroll_panel(self._right_panel(), min_width=360, preferred_width=380)
         # v0.9.18: v0.9.17 overcorrected and made the entire left rail too wide.
         # Keep enough room for the capture tab, but let the image canvas stay dominant.
-        left.setMinimumWidth(390)
-        left.setMaximumWidth(520)
+        # Narrower: the recipe tab drove the old 390 floor, and the canvas
+        # is the part that benefits from the space.
+        left.setMinimumWidth(300)
+        left.setMaximumWidth(430)
         right.setMinimumWidth(360)
         right.setMaximumWidth(450)
 
@@ -2508,8 +2510,8 @@ class MainWindow(QMainWindow):
                 color: #93c5fd;
             }
             QPushButton {
-                min-height: 28px;
-                padding: 4px 8px;
+                min-height: 22px;
+                padding: 3px 8px;
                 background: #1d4ed8;
                 color: white;
                 border: 0;
@@ -2641,6 +2643,38 @@ class MainWindow(QMainWindow):
                window behind before the rows drew. That is the flicker.
                QComboBox QListView is spelled out too: the popup is a QListView
                and matching it directly avoids relying on the abstract base. */
+            /* The scrollbars were already ~14px wide, but unstyled: the
+               default handle against the #0f172a theme is effectively
+               invisible. The fix is contrast, not width -- keep the platform
+               width and give the handle a light, obvious colour. */
+            QScrollBar:vertical {
+                background: #0f172a;
+                width: 14px;
+                margin: 0;
+                border: none;
+            }
+            QScrollBar::handle:vertical {
+                background: #64748b;
+                min-height: 30px;
+                border-radius: 6px;
+            }
+            QScrollBar::handle:vertical:hover { background: #94a3b8; }
+            QScrollBar:horizontal {
+                background: #0f172a;
+                height: 14px;
+                margin: 0;
+                border: none;
+            }
+            QScrollBar::handle:horizontal {
+                background: #64748b;
+                min-width: 30px;
+                border-radius: 6px;
+            }
+            QScrollBar::handle:horizontal:hover { background: #94a3b8; }
+            QScrollBar::add-line, QScrollBar::sub-line {
+                height: 0; width: 0; border: none; background: none;
+            }
+            QScrollBar::add-page, QScrollBar::sub-page { background: none; }
             QComboBox QAbstractItemView, QComboBox QListView {
                 background: #111827;
                 color: #e5e7eb;
@@ -5114,7 +5148,7 @@ class MainWindow(QMainWindow):
             # what the label needed -- so "Promote model" / "Start Training"
             # were clipped. No ceiling: a button must never be narrower than
             # its own text.
-            btn.setMinimumHeight(28)
+            btn.setMinimumHeight(24)
             btn.setMinimumWidth(self._button_text_width(btn))
             btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         for combo in self.findChildren(QComboBox):
@@ -5135,7 +5169,7 @@ class MainWindow(QMainWindow):
         """
         text = btn.text().replace("&&", "&")
         advance = btn.fontMetrics().horizontalAdvance(text)
-        return max(54, advance + 26)
+        return max(44, advance + 18)
 
     def _simple_label_from_text(self, label: str, class_id: int = -1) -> tuple[str, int]:
         return review_logic.simple_label(label, class_id)
