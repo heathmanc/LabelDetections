@@ -284,6 +284,33 @@ def test_combo_views_are_plain_listviews():
     for combo in _window().findChildren(QComboBox):
         assert isinstance(combo.view(), QListView), type(combo.view()).__name__
 
+def test_scrollbars_are_visible_against_the_dark_theme():
+    # They were always ~14px wide but unstyled, so the default handle was
+    # effectively invisible on the #0f172a background. Contrast is the fix.
+    css = _window().styleSheet()
+    assert "QScrollBar::handle:vertical" in css, "scrollbar handle unstyled"
+    import re
+    m = re.search(r"QScrollBar::handle:vertical \{[^}]*background:\s*(#[0-9a-fA-F]{6})", css)
+    assert m, "scrollbar handle has no background colour"
+    # Must be clearly lighter than the #0f172a track to be seen.
+    r, g, b = (int(m.group(1)[i:i + 2], 16) for i in (1, 3, 5))
+    assert (r + g + b) / 3 > 80, f"handle {m.group(1)} too dark to see"
+
+
+def test_buttons_are_not_oversized():
+    win = _window()
+    for btn in win.findChildren(QPushButton):
+        h = btn.sizeHint().height()
+        assert h <= 30, f"{btn.text()!r} is {h}px tall"
+
+
+def test_left_pane_can_be_narrow():
+    # The recipe tab drove a 390px floor; the canvas is what needs the space.
+    win = _window()
+    assert win.tabs.minimumWidth() <= 320, (
+        f"left pane cannot go below {win.tabs.minimumWidth()}px"
+    )
+
 
 
 
