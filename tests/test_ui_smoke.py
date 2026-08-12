@@ -129,6 +129,30 @@ def test_theme_stylesheet_applied():
     assert "QSpinBox::up-button" in css, "spinbox step buttons unstyled"
     assert "QSpinBox::down-button" in css
 
+def test_combo_dropdown_subcontrols_are_styled():
+    # Styling a QComboBox replaces its native drop-down with an unstyled
+    # subcontrol -- the same trap that made the spinbox arrows unusable.
+    css = _window().styleSheet()
+    assert "QComboBox::drop-down" in css
+    assert "QComboBox::down-arrow" in css
+
+
+def test_stylesheet_has_no_unsubstituted_placeholders():
+    css = _window().styleSheet()
+    for token in ("__SPIN_UP__", "__SPIN_DOWN__", "__CHECKBOX_CHECK__"):
+        assert token not in css, f"{token} left unsubstituted"
+
+
+def test_combo_popups_are_not_forced_to_a_fixed_height():
+    # A forced minimum left short lists as a tall box of dead space, which is
+    # what made the dropdowns feel glitchy.
+    win = _window()
+    for combo in win.findChildren(QComboBox):
+        assert combo.view().minimumHeight() < 120, \
+            f"popup for {combo.itemText(0)!r} forced to a fixed height"
+
+
+
 
 if __name__ == "__main__":
     import traceback
