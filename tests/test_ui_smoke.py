@@ -304,11 +304,32 @@ def test_buttons_are_not_oversized():
         assert h <= 30, f"{btn.text()!r} is {h}px tall"
 
 
-def test_left_pane_can_be_narrow():
-    # The recipe tab drove a 390px floor; the canvas is what needs the space.
+def test_no_button_label_clips_at_the_minimum_pane_width():
+    """The pane minimum must be wide enough that no button elides its label.
+
+    Compact buttons previously had minimumWidth(0), so "Mark Current Reviewed"
+    rendered as "Mark Current Reviewe". Squeeze the pane to its minimum and
+    check every tab, so growing a label fails here rather than truncating in
+    the UI.
+    """
     win = _window()
-    assert win.tabs.minimumWidth() <= 320, (
-        f"left pane cannot go below {win.tabs.minimumWidth()}px"
+    original = win.tabs.width()
+    win.tabs.setFixedWidth(win.tabs.minimumWidth())
+    QApplication.processEvents()
+    clipped = []
+    try:
+        for i in range(win.tabs.count()):
+            win.tabs.setCurrentIndex(i)
+            QApplication.processEvents()
+            for btn in win.tabs.currentWidget().findChildren(QPushButton):
+                if btn.width() and btn.width() < btn.minimumSizeHint().width() - 1:
+                    clipped.append(f"{win.tabs.tabText(i)}: {btn.text()!r}")
+    finally:
+        win.tabs.setMinimumWidth(420)
+        win.tabs.setMaximumWidth(520)
+        win.tabs.resize(original, win.tabs.height())
+    assert not clipped, (
+        f"at {win.tabs.minimumWidth()}px these labels clip: " + ", ".join(clipped)
     )
 
 
