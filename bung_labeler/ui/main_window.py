@@ -350,13 +350,14 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self.polish_buttons()
         # Now that button minimums exist, size the pane so nothing can elide.
-        # 420px: measured as the narrowest width at which no button label
-        # elides on any tab (binary-searched; the exact threshold is 418).
-        # Qt's own layout minimum reports 383 here, which still clips, so this
-        # cannot be derived from minimumSizeHint. test_ui_smoke asserts nothing
-        # clips at this width, so growing a label fails the suite rather than
-        # silently truncating in the UI.
-        self.tabs.setMinimumWidth(420)
+        # 355px: binary-searched as the narrowest width at which no button
+        # label elides, measured on a 1280x720 window where the vertical
+        # scrollbar is present and steals ~14px (351 exactly). Measuring on a
+        # larger window gives 337, which then clips at 720p. Qt's own layout
+        # minimum cannot produce either -- it reports a value that still clips.
+        # test_ui_smoke re-checks this, so a longer label fails the suite
+        # instead of truncating in the UI.
+        self.tabs.setMinimumWidth(355)
         self._build_menu()
         self._refresh_recipes()
         self._refresh_images()
@@ -717,7 +718,7 @@ class MainWindow(QMainWindow):
         # Minimum is set after polish_buttons in __init__: the button widths it
         # assigns are what the content minimum depends on, so computing it here
         # would read pre-polish sizes and come out too small.
-        left.setMaximumWidth(520)
+        left.setMaximumWidth(400)
         right.setMinimumWidth(360)
         right.setMaximumWidth(450)
 
@@ -769,18 +770,22 @@ class MainWindow(QMainWindow):
         _saved_test = load_test_settings()
         self.test_model_edit = QLineEdit(str(_saved_test.get("model", "")))
         self.test_model_edit.setPlaceholderText("BungVision OBB best.pt or .engine")
+        self.test_model_edit.setMinimumWidth(60)
+        self.test_model_edit.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         browse_model = QPushButton("Model...")
         browse_model.clicked.connect(self.browse_test_model)
-        row = QHBoxLayout(); row.addWidget(self.test_model_edit); row.addWidget(browse_model)
+        row = QHBoxLayout(); row.addWidget(self.test_model_edit, 1); row.addWidget(browse_model)
         form.addWidget(QLabel("OBB model")); form.addLayout(row)
 
         self.test_image_edit = QLineEdit(str(_saved_test.get("image", "")))
         self.test_image_edit.setPlaceholderText("test image path")
+        self.test_image_edit.setMinimumWidth(60)
+        self.test_image_edit.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         browse_img = QPushButton("Image...")
         browse_img.clicked.connect(self.browse_test_image)
         use_current = QPushButton("Use Current")
         use_current.clicked.connect(self.use_current_test_image)
-        row = QHBoxLayout(); row.addWidget(self.test_image_edit); row.addWidget(browse_img); row.addWidget(use_current)
+        row = QHBoxLayout(); row.addWidget(self.test_image_edit, 1); row.addWidget(browse_img); row.addWidget(use_current)
         form.addWidget(QLabel("Test image")); form.addLayout(row)
 
 
@@ -841,10 +846,10 @@ class MainWindow(QMainWindow):
         show_labels_btn = QPushButton("Show Labels")
         show_labels_btn.setToolTip("Shows saved/manual labels again. This does not affect model-test overlays.")
         show_labels_btn.clicked.connect(self.show_saved_annotations)
-        auto_label_btn = QPushButton("Auto-label Current")
+        auto_label_btn = QPushButton("Auto-label")
         auto_label_btn.setToolTip("Pre-label the current image with this model. Predictions become editable labels you correct and save. Undo with Ctrl+Z.")
         auto_label_btn.clicked.connect(self.auto_label_current)
-        prelabel_btn = QPushButton("Pre-label && Review All")
+        prelabel_btn = QPushButton("Pre-label All")
         prelabel_btn.setToolTip("Run the model on every unlabeled image, save the predictions as un-reviewed labels, and open them in the review queue lowest-confidence first. Existing labels are untouched. (Ctrl+Shift+P)")
         prelabel_btn.clicked.connect(self.prelabel_and_review)
 
@@ -1746,9 +1751,14 @@ class MainWindow(QMainWindow):
         # mean re-browsing to a network path each time.
         self.library_combo = QComboBox()
         self.library_combo.setToolTip("Switch to a previously used image library.")
+        # Paths are long and arbitrary; let the combo elide rather than force
+        # the whole left pane wider than every other control needs.
+        self.library_combo.setMinimumContentsLength(12)
+        self.library_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.library_combo.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         self.library_combo.activated.connect(self._on_library_combo_activated)
 
-        change_library_btn = QPushButton("Change Data Folder...")
+        change_library_btn = QPushButton("Change Folder...")
         change_library_btn.setToolTip(
             "Point captures, labels, recipes and exports at another folder, such as "
             "a shared drive. Takes effect after restarting."
@@ -1999,7 +2009,8 @@ class MainWindow(QMainWindow):
         cam_layout.addWidget(self._camera_settings_hidden)
         self._on_camera_backend_changed(self.backend_combo.currentText())
 
-        camera_settings_btn = QPushButton("Camera Settings...")
+        camera_settings_btn = QPushButton("Camera...")
+        camera_settings_btn.setToolTip("Open the camera settings dialog.")
         camera_settings_btn.clicked.connect(self.open_camera_settings_dialog)
         camera_settings_btn.setProperty("compactCaptureButton", True)
         camera_settings_btn.setMinimumHeight(24)
@@ -2051,9 +2062,10 @@ class MainWindow(QMainWindow):
         self.show_unreviewed_only_check.stateChanged.connect(self._refresh_images)
         find_unreviewed = QPushButton("Find Unreviewed")
         find_unreviewed.clicked.connect(self.find_next_unreviewed_image)
-        mark_reviewed = QPushButton("Mark Current Reviewed")
+        mark_reviewed = QPushButton("Mark Reviewed")
+        mark_reviewed.setToolTip("Mark the current image reviewed.")
         mark_reviewed.clicked.connect(self.mark_current_reviewed)
-        force_reviewed = QPushButton("Force Review Current")
+        force_reviewed = QPushButton("Force Review")
         force_reviewed.setToolTip("Use this only when you intentionally want a mismatch image exported, such as a missing-bung/fail example.")
         force_reviewed.clicked.connect(self.force_mark_current_reviewed)
         for btn in (find_unreviewed, mark_reviewed, force_reviewed):
@@ -2134,7 +2146,8 @@ class MainWindow(QMainWindow):
         form.addRow("CLAHE clip", self.clahe_clip_slider)
         form.addRow("CLAHE grid", self.clahe_grid_slider)
 
-        reset = QPushButton("Reset Adjustments")
+        reset = QPushButton("Reset")
+        reset.setToolTip("Reset all contrast/brightness adjustments to their defaults.")
         reset.clicked.connect(self.reset_adjustments)
         layout.addWidget(box)
         layout.addWidget(reset)
@@ -2167,6 +2180,9 @@ class MainWindow(QMainWindow):
         self.tool_combo.currentIndexChanged.connect(self._tool_changed)
         self.count_label = QLabel("Battery: 0 / 1   Bungs: 0 / expected 6")
         self.dataset_label = QLabel("Dataset: 0 images, 0 labeled, 0 ready")
+        # Both grow with the dataset and were clipped at the rail's edge.
+        for _lbl in (self.count_label, self.dataset_label):
+            _lbl.setWordWrap(True)
 
         save = QPushButton("Save")
         save.clicked.connect(self.save_labels)

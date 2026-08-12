@@ -121,8 +121,8 @@ def test_menu_actions_have_callable_slots():
 def test_key_buttons_exist_and_are_wired():
     win = _window()
     labels = {b.text() for b in win.findChildren(QPushButton)}
-    for expected in ("Start Training", "Run Model", "Auto-label Current",
-                     "Change Data Folder...", "Dataset Health"):
+    for expected in ("Start Training", "Run Model", "Auto-label",
+                     "Change Folder...", "Dataset Health"):
         assert expected in labels, f"{expected!r} button missing"
 
 
@@ -325,8 +325,8 @@ def test_no_button_label_clips_at_the_minimum_pane_width():
                 if btn.width() and btn.width() < btn.minimumSizeHint().width() - 1:
                     clipped.append(f"{win.tabs.tabText(i)}: {btn.text()!r}")
     finally:
-        win.tabs.setMinimumWidth(420)
-        win.tabs.setMaximumWidth(520)
+        win.tabs.setMinimumWidth(355)
+        win.tabs.setMaximumWidth(400)
         win.tabs.resize(original, win.tabs.height())
     assert not clipped, (
         f"at {win.tabs.minimumWidth()}px these labels clip: " + ", ".join(clipped)
