@@ -3727,6 +3727,7 @@ class MainWindow(QMainWindow):
         box_dicts = self._overlay_items_to_box_dicts(
             battery_items + bung_items + other_items
         )
+        box_dicts = review_logic.apply_sealed_suffix(box_dicts, self._recipe_sealed())
         if not box_dicts:
             QMessageBox.information(
                 self, "Auto-label",
@@ -3910,6 +3911,7 @@ class MainWindow(QMainWindow):
             box_dicts = self._overlay_items_to_box_dicts(
                 battery_items + bung_items + other_items
             )
+            box_dicts = review_logic.apply_sealed_suffix(box_dicts, self._recipe_sealed())
 
             if box_dicts:
                 h, w = frame.shape[:2]
@@ -4969,6 +4971,10 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Labels", "Open or capture an image before saving labels.")
             return
         boxes = [b.to_dict() for b in self.canvas.boxes]
+        # Mark battery classes sealed/unsealed to match the recipe, so the flag
+        # and the exported training classes cannot drift apart. This is the only
+        # signal that reaches the BungVision runtime -- it detects the class.
+        boxes = review_logic.apply_sealed_suffix(boxes, self._recipe_sealed())
         batt, bung = self._counts_from_box_dicts(boxes)
         expected = self._expected_bungs_value() if hasattr(self, "expected_spin") else self.recipe.expected_bungs
         review = self._review_record("save_labels") if self._quantities_satisfied(boxes) else None

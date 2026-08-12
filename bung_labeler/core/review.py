@@ -101,9 +101,56 @@ def make_review_record(
 
 # --- box classification ---------------------------------------------------
 
+# Suffix marking a battery model with no bunsen valves. One shared class across
+# every sealed recipe, so the model learns a single "sealed battery" concept
+# rather than one class per recipe. This is the only thing that reaches the
+# BungVision runtime -- it detects the class, there is no config to read.
+SEALED_SUFFIX = "_sealed"
+
+
+def sealed_class_name(label: str) -> str:
+    """Append the sealed marker to a class name, idempotently."""
+    text = str(label or "").strip()
+    if not text or text.lower().endswith(SEALED_SUFFIX):
+        return text
+    return text + SEALED_SUFFIX
+
+
+def unsealed_class_name(label: str) -> str:
+    """Strip the sealed marker, for going back to a normal recipe."""
+    text = str(label or "").strip()
+    if text.lower().endswith(SEALED_SUFFIX):
+        return text[: -len(SEALED_SUFFIX)]
+    return text
+
+
+def apply_sealed_suffix(boxes: list[dict], sealed: bool) -> list[dict]:
+    """Return boxes with battery labels marked sealed (or unmarked).
+
+    Only battery classes are touched: the battery is what identifies the
+    product model, and a sealed battery has no bungs to mark anyway. Keeps the
+    recipe's sealed flag and the exported training classes from drifting apart.
+    """
+    out: list[dict] = []
+    for box in boxes:
+        b = dict(box)
+        label = str(b.get("label", ""))
+        if _box_is_battery(b):
+            b["label"] = sealed_class_name(label) if sealed else unsealed_class_name(label)
+        out.append(b)
+    return out
+
+
 def simple_label(label: str, class_id: int = -1) -> tuple[str, int]:
-    """Collapse any battery/bung/retainer variant to its canonical (label, id)."""
+    """Collapse any battery/bung/retainer variant to its canonical (label, id).
+
+    Sealed classes are preserved: collapsing battery_sealed back to battery
+    would erase the distinction the model is trained on, which matters when
+    labels are imported back from BungVision.
+    """
     label_l = str(label or "").lower()
+    if label_l.endswith(SEALED_SUFFIX):
+        return str(label or ""), int(class_id)
     if label_l == "battery" or label_l.startswith("battery_") or int(class_id) == 0:
         return "battery", 0
     if label_l == "bung" or label_l.startswith("bung_") or int(class_id) == 1:
