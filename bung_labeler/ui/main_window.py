@@ -4308,8 +4308,33 @@ class MainWindow(QMainWindow):
         return False
 
     def _count_filter_match(self, name: str, cls_id: int, count_names: set[str], count_ids: set[int]) -> bool:
-        """Return True if a detection should be counted as a bung."""
+        """Return True if a detection should be counted as a bung.
+
+        A detection whose *name* identifies it as a battery is never a bung,
+        even if its class ID collides with the count filter. Class IDs are
+        positional: exporting battery + battery_sealed makes battery_sealed
+        class 1, which the default "bung,1" filter would otherwise claim -- so
+        one battery was counted as both a battery and a bung, producing two
+        labels per object. Names are meaningful, IDs are only a fallback.
+        """
+        if self._name_matches(name, self._battery_class_names()):
+            return False
         return self._class_filter_match(name, cls_id, count_names, count_ids)
+
+    def _name_matches(self, name: str, tokens: set[str]) -> bool:
+        """Name-only half of _class_filter_match, ignoring class IDs."""
+        lname = str(name).strip().lower()
+        if not lname:
+            return False
+        nname = self._normalize_class_token(lname)
+        for token in tokens:
+            token_l = str(token).strip().lower()
+            ntok = self._normalize_class_token(token_l)
+            if not ntok:
+                continue
+            if lname == token_l or nname == ntok or ntok in nname:
+                return True
+        return False
 
     def _filter_names_from_edit(self, edit_attr: str, default_text: str) -> set[str]:
         widget = getattr(self, edit_attr, None)
