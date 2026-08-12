@@ -30,6 +30,9 @@ import tempfile  # noqa: E402
 
 os.environ["BUNGVISION_DATA_DIR"] = tempfile.mkdtemp(prefix="bungvision-smoke-")
 
+from pathlib import Path  # noqa: E402
+_UI_DIR = Path(__file__).resolve().parents[1] / "bung_labeler" / "ui"
+
 try:
     from PySide6.QtCore import QEvent, QPoint, Qt
     from PySide6.QtGui import QWheelEvent
@@ -260,6 +263,26 @@ def test_combo_popup_widgets_fill_their_background():
         assert view.autoFillBackground(), (
             f"popup view for {combo.itemText(0)!r} does not fill its background"
         )
+
+def test_combo_open_animation_is_disabled():
+    """Windows enables the combo open animation by default. Qt paints the popup
+    progressively as it opens, which under a stylesheet flashes the window
+    behind -- the popup is correct once open, but the opening is not.
+
+    main() disables it; assert the call is present, since this environment
+    reports every UI effect as already off and cannot exercise it.
+    """
+    src = (_UI_DIR / "main_window.py").read_text()
+    assert "UI_AnimateCombo" in src, "combo open animation is never disabled"
+    assert "setEffectEnabled" in src
+
+
+def test_combo_views_are_plain_listviews():
+    # Qt's private combo view has platform-specific painting that does not
+    # composite cleanly under a stylesheet.
+    from PySide6.QtWidgets import QListView
+    for combo in _window().findChildren(QComboBox):
+        assert isinstance(combo.view(), QListView), type(combo.view()).__name__
 
 
 
