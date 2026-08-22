@@ -75,8 +75,10 @@ Typical operator flow:
 6. Save labels.
 7. Mark images reviewed when the counts are correct.
 8. Use **Force Review Current** only for intentional mismatch/fail examples.
-9. Export dataset.
-10. Train YOLO OBB model using the exported `data.yaml`.
+9. Add background images (empty conveyor, bare fixture) with **Import Backgrounds...**
+   or **Mark Background**.
+10. Export dataset.
+11. Train YOLO OBB model using the exported `data.yaml`.
 
 Export is intentionally reviewed-only. There is no normal option to export every labeled image.
 
@@ -525,6 +527,34 @@ v0.9.37 fixed this by clearing stale review metadata on mismatch save.
 Use **Force Review Current** for intentional fail/missing-bung examples.
 
 Force-reviewed images are included in reviewed-only export/training, but are marked so they can be identified later.
+
+### Background (negative) images
+
+Images that contain no objects at all -- an empty conveyor, a bare fixture --
+teach the model what *not* to detect. Add them either way:
+
+* **Import Backgrounds...** on the Live Capture tab bulk-imports image files and
+  marks every one of them background as it lands, so no hand-labeling is needed.
+* **Mark Background** flags the image currently open.
+
+A background is stored as a reviewed annotation with zero boxes and an explicit
+`"background": true` flag, and exports as an empty `.txt` label file -- which is
+exactly how YOLO consumes a negative sample.
+
+The flag is deliberate rather than inferred from "this image has no boxes": an
+annotation with no boxes is usually unfinished work, and exporting that as a
+negative would teach the model to ignore real objects. Drawing any box on a
+background image clears the flag automatically.
+
+An export made up of nothing but backgrounds is refused -- there would be no
+classes to train.
+
+### Recipes with no checks
+
+A recipe's **Checks** box (*Enforce battery/bung counts*) can be turned off, which
+unlocks it from the battery/bung quantity rules entirely: any labels pass review,
+and any class can be drawn. The shipped `General / Backgrounds` recipe comes with
+checks already off, as a place to put conveyor shots and other free-form images.
 
 Typical force-review metadata:
 

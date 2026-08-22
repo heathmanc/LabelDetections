@@ -55,6 +55,26 @@ def annotation_reviewed(data: dict | None) -> bool:
     return False
 
 
+def is_background_annotation(data: dict | None) -> bool:
+    """True for an image deliberately marked as containing no objects.
+
+    Background (negative) samples teach the model what an empty conveyor looks
+    like. The flag is explicit: an annotation that merely has no boxes yet is
+    unfinished work, not a negative sample, and must never be exported as one.
+    A box on the image overrides the flag, since the two contradict.
+    """
+    if not isinstance(data, dict):
+        return False
+    if data.get("boxes"):
+        return False
+    return bool(data.get("background", False))
+
+
+def make_background_record() -> dict:
+    """Review stamp for a background image, so it is export-eligible."""
+    return make_review_record("marked_background")
+
+
 def annotation_force_reviewed(data: dict | None) -> bool:
     """True when an image was force-reviewed despite a quantity mismatch."""
     if not data or not annotation_reviewed(data):

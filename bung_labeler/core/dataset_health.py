@@ -10,7 +10,9 @@ from . import review as review_logic
 
 # Per-image classifications.  "labeled" statuses are the ones that carry boxes.
 LABELED_STATUSES = ("ready", "forced", "problem", "needs_review")
-ALL_STATUSES = LABELED_STATUSES + ("empty", "unlabeled")
+# "background" is annotated work but carries no boxes, so it is deliberately
+# outside LABELED_STATUSES while still counting toward export_ready().
+ALL_STATUSES = LABELED_STATUSES + ("background", "empty", "unlabeled")
 
 
 def annotation_status(data: dict | None, expected: int, constrained: bool = True,
@@ -19,6 +21,7 @@ def annotation_status(data: dict | None, expected: int, constrained: bool = True
 
     Returns one of:
       unlabeled    - no sidecar JSON at all
+      background   - deliberately marked as containing no objects (negative)
       empty        - sidecar exists but has no boxes
       needs_review - has boxes but not marked reviewed
       forced       - reviewed via Force Review (intentional mismatch)
@@ -29,7 +32,7 @@ def annotation_status(data: dict | None, expected: int, constrained: bool = True
         return "unlabeled"
     boxes = data.get("boxes") or []
     if not boxes:
-        return "empty"
+        return "background" if review_logic.is_background_annotation(data) else "empty"
     if not review_logic.annotation_reviewed(data):
         return "needs_review"
     if review_logic.annotation_force_reviewed(data):
@@ -65,7 +68,11 @@ def tally_statuses(statuses: list[str]) -> dict:
 
 def export_ready(tally: dict) -> int:
     """Images that would be included in a reviewed-only export."""
-    return int(tally.get("ready", 0)) + int(tally.get("forced", 0))
+    return (
+        int(tally.get("ready", 0))
+        + int(tally.get("forced", 0))
+        + int(tally.get("background", 0))
+    )
 
 
 def merge_tally(into: dict, other: dict) -> None:

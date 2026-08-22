@@ -1685,11 +1685,13 @@ class MainWindow(QMainWindow):
         self.expected_spin.setFixedWidth(48)
         self.expected_spin.setPlaceholderText("6")
         self.expected_spin.editingFinished.connect(self._sync_expected_bungs_from_text)
-        self.constrained_check = QCheckBox()
+        self.constrained_check = QCheckBox("Enforce battery/bung counts")
         self.constrained_check.setChecked(bool(getattr(self.recipe, "constrained", True)))
         self.constrained_check.setToolTip(
             "On: review requires every battery to hold the expected number of bungs.\n"
-            "Off: free-form labeling for any object classes (no battery/bung check)."
+            "Off: no checks at all -- free-form labeling for any object classes.\n"
+            "Turn this off for a general-purpose recipe such as backgrounds or\n"
+            "mixed reference shots."
         )
         self.constrained_check.toggled.connect(self._on_constrained_toggled)
         self.sealed_check = QCheckBox()
@@ -1707,7 +1709,7 @@ class MainWindow(QMainWindow):
         form.addRow("Group", self.group_edit)
         form.addRow("Model", self.model_edit)
         form.addRow("Expected bungs", self.expected_spin)
-        form.addRow("Quantity check", self.constrained_check)
+        form.addRow("Checks", self.constrained_check)
         form.addRow("Sealed", self.sealed_check)
         form.addRow("Notes", self.notes_edit)
         self._sync_expected_enabled()
@@ -2068,7 +2070,14 @@ class MainWindow(QMainWindow):
         force_reviewed = QPushButton("Force Review")
         force_reviewed.setToolTip("Use this only when you intentionally want a mismatch image exported, such as a missing-bung/fail example.")
         force_reviewed.clicked.connect(self.force_mark_current_reviewed)
-        for btn in (find_unreviewed, mark_reviewed, force_reviewed):
+        mark_background = QPushButton("Mark Background")
+        mark_background.setToolTip(
+            "Mark the current image as containing no objects at all -- an empty\n"
+            "conveyor or fixture. It exports as an empty label file, which is how\n"
+            "YOLO learns what a negative looks like."
+        )
+        mark_background.clicked.connect(self.mark_current_background)
+        for btn in (find_unreviewed, mark_reviewed, force_reviewed, mark_background):
             btn.setProperty("compactCaptureButton", True)
             btn.setMinimumHeight(24)
             btn.setMaximumHeight(26)
@@ -2079,7 +2088,7 @@ class MainWindow(QMainWindow):
         review_grid = QGridLayout()
         review_grid.setHorizontalSpacing(6)
         review_grid.setVerticalSpacing(4)
-        for i, btn in enumerate((find_unreviewed, mark_reviewed, force_reviewed)):
+        for i, btn in enumerate((find_unreviewed, mark_reviewed, force_reviewed, mark_background)):
             review_grid.addWidget(btn, i // 2, i % 2)
         review_grid.setColumnStretch(0, 1)
         review_grid.setColumnStretch(1, 1)
@@ -2092,7 +2101,14 @@ class MainWindow(QMainWindow):
         import_images_btn = QPushButton("Import Images...")
         import_images_btn.setToolTip("Copy existing image files into this recipe. You can optionally specify a separate folder containing matching BungVision label JSON files.")
         import_images_btn.clicked.connect(self.import_images_to_recipe)
-        for btn in (load_selected, delete_selected, import_images_btn):
+        import_bg_btn = QPushButton("Import Backgrounds...")
+        import_bg_btn.setToolTip(
+            "Copy in images that contain no objects at all -- empty conveyor, bare\n"
+            "fixture. Each one is marked background on import and exports as an\n"
+            "empty label file, so no hand-labeling is needed."
+        )
+        import_bg_btn.clicked.connect(self.import_background_images)
+        for btn in (load_selected, delete_selected, import_images_btn, import_bg_btn):
             btn.setProperty("compactCaptureButton", True)
             btn.setMinimumHeight(24)
             btn.setMaximumHeight(26)
@@ -2108,6 +2124,7 @@ class MainWindow(QMainWindow):
         image_button_row2.setContentsMargins(0, 0, 0, 0)
         image_button_row2.setSpacing(6)
         image_button_row2.addWidget(import_images_btn)
+        image_button_row2.addWidget(import_bg_btn)
 
         layout.addWidget(cam_box)
         layout.addWidget(control_box)
@@ -3278,6 +3295,12 @@ class MainWindow(QMainWindow):
             else:
                 status = "problem"
                 prefix = "⚠ REVIEWED CHECK  "
+        elif review_logic.is_background_annotation(data):
+            # A deliberate negative, not unfinished work: it is export-ready and
+            # must never show up in the "needs review" queue.
+            status = "background"
+            reviewed = True
+            prefix = "▨ BACKGROUND  "
         elif json_exists:
             prefix = "◇ JSON EMPTY  "
         else:
@@ -3555,8 +3578,6 @@ class MainWindow(QMainWindow):
         self.status.showMessage(
             f"Captured {kind}: {self.current_image_path.name}", 6000
         )
-
-
 
     def _save_test_settings(self) -> None:
         """Persist the Model Test tab so nothing is re-entered next launch."""
@@ -5133,6 +5154,47 @@ class MainWindow(QMainWindow):
         self._refresh_images()
         self._update_dataset_summary()
 
+    def mark_current_background(self) -> None:
+        """Record the current image as a deliberate negative (no objects).
+
+        Background samples are how the model learns that a bare conveyor is not
+        a battery. They are stored as a reviewed annotation with zero boxes and
+        an explicit background flag, and export as an empty label file.
+        """
+        if not self.current_image_path:
+            QMessageBox.information(
+                self, "Background", "Open or capture an image before marking it background."
+            )
+            return
+        existing = len(self.canvas.boxes) or len(self._boxes_for_review())
+        if existing:
+            reply = QMessageBox.question(
+                self, "Background",
+                f"This image has {existing} label(s).\n\n"
+                "Marking it background will discard them and record the image as "
+                "containing no objects. Continue?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                return
+            self.canvas.push_undo_snapshot()
+            self.canvas.clear_boxes()
+
+        path = save_annotations(
+            self.current_image_path,
+            self.canvas.image_w,
+            self.canvas.image_h,
+            [],
+            self.class_names,
+            review=review_logic.make_background_record(),
+            background=True,
+        )
+        self._invalidate_image_status(self.current_image_path)
+        self.status.showMessage(f"Marked background (no objects): {path.name}", 6000)
+        self._update_box_count()
+        self._refresh_images()
+        self._update_dataset_summary()
+
     def find_next_unreviewed_image(self) -> None:
         images = self._get_recipe_image_paths()
         if not images:
@@ -5328,7 +5390,8 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _new_summary_totals() -> dict:
-        return {"total": 0, "labeled": 0, "ready": 0, "forced": 0, "problems": 0, "needs_review": 0}
+        return {"total": 0, "labeled": 0, "ready": 0, "forced": 0, "problems": 0,
+                "needs_review": 0, "background": 0}
 
     def _accumulate_summary(self, totals: dict, entry: dict) -> None:
         """Fold one cached image-status entry into the running dataset totals."""
@@ -5345,6 +5408,8 @@ class MainWindow(QMainWindow):
         elif status == "needs_review":
             totals["needs_review"] += 1
             totals["problems"] += 1
+        elif status == "background":
+            totals["background"] += 1
 
     def _set_dataset_summary_label(self, totals: dict) -> None:
         if not hasattr(self, "dataset_label"):
@@ -5352,7 +5417,8 @@ class MainWindow(QMainWindow):
         self.dataset_label.setText(
             f"Dataset: {totals['total']} images, {totals['labeled']} labeled, "
             f"{totals['ready']} ready, {totals['forced']} forced, "
-            f"{totals['problems']} problems, {totals['needs_review']} needs review"
+            f"{totals['problems']} problems, {totals['needs_review']} needs review, "
+            f"{totals['background']} background"
         )
 
     def _update_dataset_summary(self) -> None:
@@ -5406,6 +5472,51 @@ class MainWindow(QMainWindow):
         self.status.showMessage(
             f"Imported {len(imported)} image(s), {label_count} label file(s).", 8000
         )
+
+    def import_background_images(self) -> None:
+        """Bulk-import negative images -- empty conveyor, bare fixture.
+
+        Marked background as they land, because there is nothing to draw on
+        them: making the operator open a few hundred empty frames one at a time
+        just to click "no objects here" is the reason negatives never get added.
+        """
+        self.recipe = self._current_recipe_from_ui()
+        exts = " ".join(f"*{e}" for e in IMPORT_IMAGE_EXTS)
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "Import background images (no objects)", "",
+            f"Images ({exts});;All files (*)",
+        )
+        if not paths:
+            return
+
+        reply = QMessageBox.question(
+            self, "Import Backgrounds",
+            f"Import {len(paths)} image(s) as backgrounds?\n\n"
+            "Each will be marked as containing no objects and exported as an "
+            "empty label file. Any existing labels for these files are not "
+            "affected -- they are copied in as new images.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        imported, errors, label_count = import_images(
+            self.recipe, [Path(p) for p in paths], as_background=True
+        )
+        self._reset_recipe_image_index()
+        self._refresh_images(force=True)
+        self._update_dataset_summary()
+        msg = (
+            f"Imported {len(imported)} background image(s) into "
+            f"{self.recipe.group} / {self.recipe.model}.\n"
+            f"Marked {label_count} as containing no objects."
+        )
+        if errors:
+            msg += f"\n\nSkipped {len(errors)}:\n" + "\n".join(f"• {e}" for e in errors[:10])
+            QMessageBox.warning(self, "Import Backgrounds", msg)
+        else:
+            QMessageBox.information(self, "Import Backgrounds", msg)
+        self.status.showMessage(f"Imported {len(imported)} background image(s).", 8000)
 
     def change_data_folder(self) -> None:
         """Point the image library at another folder, e.g. a shared drive.
