@@ -522,8 +522,15 @@ def save_capture(
     """
     ts = time.strftime("%Y%m%d_%H%M%S")
     ms = int((time.time() % 1) * 1000)
-    base = f"{recipe.safe_name}_{ts}_{ms:03d}"
     folder = capture_folder(recipe)
+    # Two captures inside the same millisecond produced the same name, and the
+    # second silently overwrote the first -- image, and the label JSON keyed to
+    # it. Rare by hand, but reachable by holding the capture shortcut down.
+    base = f"{recipe.safe_name}_{ts}_{ms:03d}"
+    suffix = 1
+    while (folder / f"{base}.jpg").exists() or (folder / f"{base}_adjusted.jpg").exists():
+        base = f"{recipe.safe_name}_{ts}_{ms:03d}_{suffix}"
+        suffix += 1
 
     raw_path = None
     if save_raw or adjusted_bgr is None:
@@ -570,11 +577,15 @@ def import_images(
     recipe: Recipe,
     paths: list[Path | str],
     json_dir: Path | None = None,
+    as_background: bool = False,
 ) -> tuple[list[Path], list[str], int]:
     """Copy external images (and any sidecar label JSON) into a recipe.
 
     Each source image is decoded and re-encoded to JPEG under the recipe's
     normal naming convention so it shows up in the captured-image list.
+
+    ``as_background=True`` marks every imported image as a deliberate negative
+    (an empty conveyor, a bare fixture) instead of looking for sidecar labels.
 
     If ``json_dir`` is supplied, the matching ``.json`` label file is looked up
     there (parallel-directory layout).  Otherwise the JSON is expected to sit
@@ -601,6 +612,14 @@ def import_images(
             cv2.imwrite(str(dest), img, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
             imported.append(dest)
 
+            if as_background:
+                # Bulk negatives: an empty conveyor has nothing to label, so the
+                # annotation is written on import rather than making the operator
+                # open and mark hundreds of images by hand.
+                _write_background_label(dest, img)
+                label_count += 1
+                continue
+
             sidecar = find_sidecar_json(src, json_dir=json_dir)
             if sidecar is not None:
                 try:
@@ -612,6 +631,18 @@ def import_images(
         except Exception as exc:  # pragma: no cover - defensive
             errors.append(f"{src.name}: {exc}")
     return imported, errors, label_count
+
+
+def _write_background_label(image_path: Path, img_bgr: "np.ndarray") -> Path:
+    """Write a reviewed, zero-box annotation marking an image as a negative."""
+    from .review import make_background_record
+
+    h, w = img_bgr.shape[:2]
+    return save_annotations(
+        image_path, int(w), int(h), [], [],
+        review=make_background_record(),
+        background=True,
+    )
 
 
 def _write_imported_label(image_path: Path, img_bgr: "np.ndarray", data: dict[str, Any]) -> Path:
@@ -652,6 +683,7 @@ def save_annotations(
     class_names: list[str],
     review: dict[str, Any] | None = None,
     clear_review: bool = False,
+    background: bool | None = None,
 ) -> Path:
     """Save Label Studio annotations.
 
@@ -663,6 +695,12 @@ def save_annotations(
     is edited into a quantity mismatch; normal Save must then remove the
     old review marker so only Force Review can include the mismatch in
     training/export.
+
+    ``background=True`` records a deliberate negative image -- a conveyor,
+    an empty fixture -- which exports as an empty label file. It is an explicit
+    flag rather than "no boxes" so a half-finished annotation is never mistaken
+    for a background sample. Drawing any box clears it; ``background=None``
+    leaves an existing flag alone.
     """
     path = image_label_json_path(image_path)
     previous: dict[str, Any] = {}
@@ -707,6 +745,16 @@ def save_annotations(
     for key in source_keys:
         if key in previous:
             payload[key] = previous[key]
+
+    # Background marker. A box on the image contradicts the flag outright, so
+    # boxes always win -- otherwise an operator who marked a frame background
+    # and then labelled something would export it as a negative anyway.
+    if boxes:
+        payload["background"] = False
+    elif background is None:
+        payload["background"] = bool(previous.get("background", False))
+    else:
+        payload["background"] = bool(background)
     if review is None and not clear_review:
         for key in review_keys:
             if key in previous:

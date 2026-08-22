@@ -6,6 +6,7 @@ import shutil
 from pathlib import Path
 
 from .review import annotation_reviewed as _annotation_reviewed
+from .review import is_background_annotation as _is_background
 from .storage import CAPTURE_DIR, EXPORT_DIR, LABEL_DIR, infer_role_and_layout
 
 
@@ -165,7 +166,9 @@ def _collect_labeled_entries(recipe_safe_name: str, reviewed_only: bool = True):
         if not img.exists():
             continue
 
-        if not data.get("boxes", []):
+        # Background samples carry no boxes on purpose and export as an empty
+        # label file, which is exactly how YOLO consumes a negative.
+        if not data.get("boxes", []) and not _is_background(data):
             continue
 
         entries.append((recipe_safe_name, img, data))
@@ -208,6 +211,13 @@ def _class_names_for_entries(entries, class_mode: str) -> list[str]:
 
 
 def _write_dataset(out: Path, entries, class_mode: str, split_train: float, combined: bool) -> Path:
+    # Backgrounds alone cannot train anything -- there would be no classes at
+    # all -- so require at least one genuinely labeled image.
+    if not any(data.get("boxes") for _r, _i, data in entries):
+        raise FileNotFoundError(
+            "No labels found for export. Draw labels, save them, then export "
+            "again. Background-only images cannot train a model on their own."
+        )
     if out.exists():
         shutil.rmtree(out)
 
@@ -290,6 +300,7 @@ def _write_obb_dataset(out: Path, entries, class_mode: str, split_train: float, 
         shutil.rmtree(out)
 
     usable_entries = []
+    labeled_entries = 0
     for recipe_safe_name, img, data in entries:
         boxes = []
         for b in data.get("boxes", []):
@@ -299,9 +310,19 @@ def _write_obb_dataset(out: Path, entries, class_mode: str, split_train: float, 
             filtered = dict(data)
             filtered["boxes"] = boxes
             usable_entries.append((recipe_safe_name, img, filtered))
+            labeled_entries += 1
+        elif _is_background(data):
+            filtered = dict(data)
+            filtered["boxes"] = []
+            usable_entries.append((recipe_safe_name, img, filtered))
 
-    if not usable_entries:
-        raise FileNotFoundError("No labels found for OBB export. Draw battery/bung OBB labels, save labels, then export again.")
+    # Backgrounds alone cannot train anything -- there would be no classes at
+    # all -- so require at least one genuinely labeled image.
+    if not labeled_entries:
+        raise FileNotFoundError(
+            "No labels found for OBB export. Draw OBB labels, save labels, then "
+            "export again. Background-only images cannot train a model on their own."
+        )
 
     train, val = _split_entries(usable_entries, split_train)
     class_names = _class_names_for_entries(usable_entries, class_mode)

@@ -1,0 +1,16 @@
+{
+  "group": "General",
+  "model": "Backgrounds",
+  "category": "General",
+  "expected_bungs": 6,
+  "constrained": false,
+  "sealed": false,
+  "brightness": 0,
+  "contrast": 0,
+  "gamma": 1.0,
+  "clahe_enabled": false,
+  "clahe_clip": 2.0,
+  "clahe_grid": 8,
+  "sharpen": 0,
+  "notes": "General-purpose recipe with no checks. Use it for conveyor/background images and any free-form labeling that is not a battery/bung count."
+}

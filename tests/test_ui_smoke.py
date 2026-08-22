@@ -335,6 +335,36 @@ def test_no_button_label_clips_at_the_minimum_pane_width():
 
 
 
+def test_new_action_handlers_exist_and_are_wired():
+    """The buttons added for background images must be connected.
+
+    A typo in a clicked.connect target is invisible until an operator clicks it
+    and gets a hard crash, which is exactly how the findChildren regression
+    reached a packaged build.
+
+    The handlers themselves are not called here: both open a modal QMessageBox
+    on the empty-state path, and a modal dialog blocks forever under the
+    offscreen platform rather than being suppressed.
+    """
+    win = _window()
+    for name in ("mark_current_background", "import_background_images"):
+        assert callable(getattr(win, name, None)), f"MainWindow.{name} is missing"
+
+    labels = {b.text() for b in win.findChildren(QPushButton)}
+    for text in ("Mark Background", "Import Backgrounds..."):
+        assert text in labels, f"no {text!r} button was built"
+
+
+def test_background_status_reaches_the_dataset_summary():
+    """A background entry must be tallied, not silently dropped."""
+    win = _window()
+    totals = win._new_summary_totals()
+    win._accumulate_summary(totals, {"status": "background", "labeled": False})
+    assert totals["background"] == 1
+    assert totals["problems"] == 0, "a background is not a problem image"
+    win._set_dataset_summary_label(totals)
+
+
 if __name__ == "__main__":
     import traceback
 
