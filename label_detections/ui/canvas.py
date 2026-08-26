@@ -126,6 +126,10 @@ class ImageCanvas(QWidget):
         self.class_name = "battery"
         self.class_id = 0
         self.annotation_kind = "box"
+        # Blocked while a live camera is streaming (see set_drawing_enabled): a
+        # box drawn on a frame that is replaced 30 times a second belongs to no
+        # image and cannot be saved against one.
+        self.drawing_enabled = True
         self.zoom = 1.0
         self.pan_x = 0
         self.pan_y = 0
@@ -206,6 +210,17 @@ class ImageCanvas(QWidget):
         self._undo_stack.append(self._snapshot_boxes())
         self._restore_snapshot(self._redo_stack.pop())
         return True
+
+    def set_drawing_enabled(self, enabled: bool) -> None:
+        """Allow or block annotation. Pan and zoom are unaffected.
+
+        Off during live preview: the frame underneath is replaced many times a
+        second, so a box drawn on it belongs to no image and there is nothing to
+        save it against. Capture first, then draw on the still.
+        """
+        self.drawing_enabled = bool(enabled)
+        self.setCursor(Qt.ArrowCursor if enabled else Qt.OpenHandCursor)
+        self.update()
 
     def set_annotation_kind(self, kind: str) -> None:
         self.annotation_kind = str(kind or "box").lower()
@@ -345,6 +360,9 @@ class ImageCanvas(QWidget):
         self.update()
         self.boxes_changed.emit()
 
+    def _blocked(self) -> bool:
+        return not getattr(self, "drawing_enabled", True)
+
     def keyPressEvent(self, event) -> None:
         step = 10 if event.modifiers() & Qt.ShiftModifier else 1
         if event.key() == Qt.Key_Left:
@@ -477,6 +495,15 @@ class ImageCanvas(QWidget):
             self.pan_start = pos
             self.pan_origin = QPoint(self.pan_x, self.pan_y)
             self.setCursor(Qt.ClosedHandCursor)
+            return
+
+        if not getattr(self, "drawing_enabled", True):
+            # Left-drag pans instead, so the live view is still navigable.
+            if event.button() == Qt.LeftButton:
+                self.panning = True
+                self.pan_start = pos
+                self.pan_origin = QPoint(self.pan_x, self.pan_y)
+                self.setCursor(Qt.ClosedHandCursor)
             return
 
         handle = self._handle_at_screen_pos(pos)
@@ -720,7 +747,9 @@ class ImageCanvas(QWidget):
             p.drawRect(r)
             p.fillRect(QRect(10, 10, 185, 24), QColor(0, 0, 0, 150))
             p.setPen(QColor(203, 213, 225))
-            p.drawText(18, 28, f"Zoom {self.zoom:.2f}x | Tool {self.annotation_kind.upper()}")
+            state = ("LIVE - capture before drawing" if self._blocked()
+                     else f"Tool {self.annotation_kind.upper()}")
+            p.drawText(18, 28, f"Zoom {self.zoom:.2f}x | {state}")
 
             if self.show_annotations:
                 for i, b in enumerate(self.boxes):

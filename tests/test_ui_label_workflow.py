@@ -314,3 +314,185 @@ def test_the_action_is_reachable_without_opening_the_wizard():
     titles = {a.text() for a in win.actions()}
     assert "Define read-regions from this image" in titles
     assert "Place read-regions" in titles
+
+
+# --- capturing the reference from the camera --------------------------------
+
+def _fake_editor(monkeypatch, result=None):
+    """Stand in for the operator dragging regions on the flattened crop."""
+    import label_detections.ui.region_editor as region_editor
+
+    calls = {}
+
+    class FakeDialog:
+        def __init__(self, reference, codes, text_fields, anchor, parent=None):
+            calls["reference"] = reference
+            calls["opened"] = calls.get("opened", 0) + 1
+
+        def exec(self):
+            return True
+
+        def result_regions(self):
+            return result or {"codes": [], "text_fields": [], "anchor_region": []}
+
+    monkeypatch.setattr(region_editor, "RegionEditorDialog", FakeDialog)
+    return calls
+
+
+def test_capture_reference_saves_the_frame_and_arms_the_follow_through(monkeypatch):
+    """A picture of the label is training data whatever else it is used for."""
+    import numpy as np
+    from label_detections.core import storage
+
+    win = _window()
+    _define(win, "wf_capref")
+    win.set_active_label("wf_capref")
+    win.last_raw = np.zeros((200, 400, 3), dtype=np.uint8)
+
+    before = len(storage.list_images("wf_capref"))
+    win.capture_reference()
+    assert len(storage.list_images("wf_capref")) == before + 1
+    assert win._awaiting_reference_box is True
+    assert "draw the wf_capref box" in win.guidance_label.text()
+
+
+def test_drawing_the_box_after_a_reference_capture_opens_the_editor(monkeypatch):
+    """Capture, draw, draw regions -- no menu hunting in between."""
+    import numpy as np
+    from PySide6.QtWidgets import QApplication
+
+    calls = _fake_editor(monkeypatch)
+    win = _window()
+    _define(win, "wf_capflow")
+    win.set_active_label("wf_capflow")
+    win.last_raw = np.zeros((200, 400, 3), dtype=np.uint8)
+    win.capture_reference()
+
+    _draw(win, "spec_plate")
+    win._update_box_count()
+    QApplication.processEvents()          # the deferred open
+
+    assert calls.get("opened") == 1
+    assert win._awaiting_reference_box is False
+
+
+def test_a_box_of_another_family_does_not_trigger_it(monkeypatch):
+    import numpy as np
+    from PySide6.QtWidgets import QApplication
+
+    calls = _fake_editor(monkeypatch)
+    win = _window()
+    _define(win, "wf_capwrong", family="cert_mark")
+    win.set_active_label("wf_capwrong")
+    win.last_raw = np.zeros((200, 400, 3), dtype=np.uint8)
+    win.capture_reference()
+
+    _draw(win, "warning_label")
+    win._update_box_count()
+    QApplication.processEvents()
+
+    assert "opened" not in calls
+    assert win._awaiting_reference_box is True
+
+
+def test_switching_label_cancels_an_armed_reference_capture():
+    import numpy as np
+
+    win = _window()
+    _define(win, "wf_capcancel_a")
+    _define(win, "wf_capcancel_b")
+    win.set_active_label("wf_capcancel_a")
+    win.last_raw = np.zeros((200, 400, 3), dtype=np.uint8)
+    win.capture_reference()
+
+    win.set_active_label("wf_capcancel_b")
+    assert win._awaiting_reference_box is False
+
+
+def test_capture_reference_without_a_frame_says_so():
+    win = _window()
+    _define(win, "wf_noframe")
+    win.set_active_label("wf_noframe")
+    win.last_raw = None
+
+    shown = {}
+    import label_detections.ui.main_window as mw_mod
+    original = mw_mod.QMessageBox.information
+    mw_mod.QMessageBox.information = lambda parent, title, text, *a, **k: shown.update(
+        {"text": text})
+    try:
+        win.capture_reference()
+    finally:
+        mw_mod.QMessageBox.information = original
+    assert "live preview" in shown.get("text", "")
+
+
+# --- live preview is not a drawing surface ----------------------------------
+
+class _FakeCamera:
+    def __init__(self, open_):
+        self._open = open_
+
+    def is_open(self):
+        return self._open
+
+    def close(self):
+        self._open = False
+
+
+def test_drawing_is_blocked_while_a_camera_streams():
+    """A box on a frame replaced 30x a second belongs to no image."""
+    win = _window()
+    real = win.camera
+    try:
+        win.camera = _FakeCamera(True)
+        win._refresh_live_mode()
+        assert win.canvas.drawing_enabled is False
+        assert "Live" in win.mode_label.text()
+        assert "capture a frame before drawing" in win.guidance_label.text()
+    finally:
+        win.camera = real
+        win._refresh_live_mode()
+
+
+def test_drawing_comes_back_once_the_camera_stops():
+    win = _window()
+    real = win.camera
+    try:
+        win.camera = _FakeCamera(True)
+        win._refresh_live_mode()
+        win.camera.close()
+        win._refresh_live_mode()
+        assert win.canvas.drawing_enabled is True
+        assert "Labeling" in win.mode_label.text()
+    finally:
+        win.camera = real
+        win._refresh_live_mode()
+
+
+def test_a_blocked_canvas_ignores_a_draw_but_still_pans():
+    from PySide6.QtCore import QPoint, QPointF, Qt
+    from PySide6.QtGui import QMouseEvent
+
+    win = _window()
+    win.canvas.set_drawing_enabled(False)
+    try:
+        before = len(win.canvas.boxes)
+        event = QMouseEvent(QMouseEvent.Type.MouseButtonPress, QPointF(40, 40),
+                            Qt.LeftButton, Qt.LeftButton, Qt.NoModifier)
+        win.canvas.mousePressEvent(event)
+        assert len(win.canvas.boxes) == before
+        # Left-drag falls through to panning, so the view is still navigable.
+        assert win.canvas.panning is True
+    finally:
+        win.canvas.panning = False
+        win.canvas.set_drawing_enabled(True)
+
+
+def test_the_canvas_says_why_it_is_not_accepting_boxes():
+    win = _window()
+    win.canvas.set_drawing_enabled(False)
+    try:
+        assert win.canvas._blocked() is True
+    finally:
+        win.canvas.set_drawing_enabled(True)

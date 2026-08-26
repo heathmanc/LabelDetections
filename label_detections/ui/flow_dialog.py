@@ -30,6 +30,25 @@ from ..core.wizard import Flow, Page, Question
 LIBRARY_IDS_KEY = "__library_ids"
 
 
+def _short_header(question: Question) -> str:
+    """A column heading that fits. The full wording lives in the tooltip."""
+    label = str(question.label)
+    trimmed = label.split(" (")[0]
+    for long, short in (
+        ("Region on the label", "Region"),
+        ("Printed width", "Width mm"),
+        ("X-dimension / cell", "Module mm"),
+        ("Quiet zone", "Quiet mm"),
+        ("Content pattern", "Pattern"),
+        ("Print-grade it", "Grade"),
+        ("Max age", "Max age"),
+        ("Field name", "Field"),
+    ):
+        if trimmed.startswith(long):
+            return short
+    return trimmed
+
+
 # --- field editors ---------------------------------------------------------
 
 class FieldEditor(QWidget):
@@ -116,12 +135,18 @@ class FieldEditor(QWidget):
             layout.addStretch(1)
             self._w = None
         elif kind == "region":
-            self._parts = [self._number(False, normalised=True) for _ in range(4)]
-            for caption, widget in zip(("X", "Y", "W", "H"), self._parts):
-                layout.addWidget(QLabel(caption))
-                layout.addWidget(widget)
-            layout.addStretch(1)
-            self._w = None
+            # Read-only on purpose. A region is dragged on the artwork, and four
+            # editable spin boxes in a table row are both unusable at that width
+            # and an invitation to type coordinates nobody can get right.
+            self._w = QLineEdit()
+            self._w.setReadOnly(True)
+            self._w.setPlaceholderText("not drawn")
+            self._w.setToolTip(
+                "Fractions of the label, set by drawing on the artwork. Use "
+                "Define Regions while labeling, or Draw Regions if this label "
+                "already has artwork.")
+            self._region_value: list[float] = []
+            layout.addWidget(self._w)
         elif kind == "regions":
             self._w = QPushButton("Draw Regions on the Reference...")
             self._w.clicked.connect(self._open_region_editor)
@@ -137,6 +162,13 @@ class FieldEditor(QWidget):
 
         if q.help:
             self.setToolTip(q.help)
+        # A floor per kind: without it the size-to-content columns collapse a
+        # combo or a four-part region to a few unusable pixels.
+        self.setMinimumWidth({
+            "bool": 40, "int": 80, "float": 90, "count": 70,
+            "choice": 130, "label_picker": 150, "region": 190,
+            "size_mm": 160, "frame_size": 160, "text": 150, "textarea": 200,
+        }.get(kind, 120))
 
     def _number(self, integer: bool, normalised: bool = False):
         if integer:
@@ -252,11 +284,10 @@ class FieldEditor(QWidget):
         if kind == "regions":
             # The button owns no value of its own; it writes the tables directly.
             return self._answers.get(self.question.key, "")
-        if kind in ("size_mm", "frame_size", "region"):
-            values = [w.value() for w in self._parts]
-            if kind == "region" and values[2] <= 0 and values[3] <= 0:
-                return []          # an untouched region means "not set", not a zero one
-            return values
+        if kind == "region":
+            return list(self._region_value)
+        if kind in ("size_mm", "frame_size"):
+            return [w.value() for w in self._parts]
         return self._w.text()
 
     def setValue(self, value: Any) -> None:
@@ -282,7 +313,11 @@ class FieldEditor(QWidget):
         elif kind == "paths":
             self._w.clear()
             self._w.addItems([str(v) for v in value or []])
-        elif kind in ("size_mm", "frame_size", "region"):
+        elif kind == "region":
+            self._region_value = [float(v) for v in list(value or [])[:4]]
+            self._w.setText(", ".join(f"{v:.3f}" for v in self._region_value)
+                            if len(self._region_value) == 4 else "")
+        elif kind in ("size_mm", "frame_size"):
             for widget, item in zip(self._parts, list(value or [])):
                 widget.setValue(type(widget.value())(item or 0))
         elif kind == "regions":
@@ -292,52 +327,96 @@ class FieldEditor(QWidget):
 # --- table editor ----------------------------------------------------------
 
 class TableEditor(QWidget):
-    """Repeating rows -- the codes on a label, the labels on a camera."""
+    """Repeating rows -- the codes on a label, the text fields on it.
+
+    Each row carries its own remove button rather than relying on the table's
+    selection. Every cell holds an editor widget, so clicking one focuses that
+    widget and the table's ``currentRow()`` stays at -1 forever -- which made a
+    single shared Remove button a permanent no-op.
+    """
 
     def __init__(self, question: Question, answers: dict[str, Any], parent=None):
         super().__init__(parent)
         self.question = question
         self._answers = answers
-        self._rows: list[dict[str, Any]] = []
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        self.table = QTableWidget(0, len(question.columns))
-        self.table.setHorizontalHeaderLabels([c.label for c in question.columns])
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self.table.verticalHeader().setVisible(False)
-        self.table.setMinimumHeight(150)
+        layout.setSpacing(4)
+
+        self.table = QTableWidget(0, len(question.columns) + 1)
+        self.table.setHorizontalHeaderLabels(
+            [""] + [_short_header(c) for c in question.columns])
+        for index, column in enumerate(question.columns, start=1):
+            item = self.table.horizontalHeaderItem(index)
+            if item is not None:
+                item.setToolTip(column.help or column.label)
+
+        header = self.table.horizontalHeader()
+        # Size to content and scroll, rather than stretching every column into
+        # the same narrow slot: eight stretched columns elide their own headers
+        # and crush their editors to unusable widths.
+        header.setSectionResizeMode(QHeaderView.ResizeToContents)
+        header.setStretchLastSection(True)
+        header.setSectionResizeMode(0, QHeaderView.Fixed)
+        self.table.setColumnWidth(0, 30)
+        # Row numbers, so a "row 2" validation error can be found.
+        self.table.verticalHeader().setVisible(True)
+        self.table.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
+        self.table.setMinimumHeight(170)
         layout.addWidget(self.table)
 
         buttons = QHBoxLayout()
         add = QPushButton("Add row")
-        add.clicked.connect(self.add_row)
-        remove = QPushButton("Remove row")
-        remove.clicked.connect(self._remove_row)
+        add.clicked.connect(lambda: self.add_row())
         buttons.addWidget(add)
-        buttons.addWidget(remove)
+        self.hint = QLabel("Use the ✕ on a row to remove it.")
+        self.hint.setStyleSheet("color: #9aa4b2; font-size: 8pt;")
+        buttons.addWidget(self.hint)
         buttons.addStretch(1)
         layout.addLayout(buttons)
 
     def add_row(self, values: dict[str, Any] | None = None) -> None:
         row = self.table.rowCount()
         self.table.insertRow(row)
-        for column_index, column in enumerate(self.question.columns):
+
+        remove = QPushButton("✕")
+        remove.setToolTip("Remove this row")
+        remove.setFixedWidth(26)
+        remove.setProperty("rightPanelButton", True)
+        # Bound to the button, not to a row index: indexes shift as rows above
+        # are removed, and a stale index deletes the wrong row.
+        remove.clicked.connect(lambda _checked=False, b=remove: self._remove_row_of(b))
+        self.table.setCellWidget(row, 0, remove)
+
+        for column_index, column in enumerate(self.question.columns, start=1):
             editor = FieldEditor(column, self._answers)
             editor.setValue((values or {}).get(column.key, column.blank()))
             self.table.setCellWidget(row, column_index, editor)
-        self.table.resizeRowsToContents()
+        # An explicit height rather than resizeRowsToContents: the cell widgets
+        # have their own margins and the computed height came out a few pixels
+        # short, so consecutive rows visibly touched.
+        self.table.setRowHeight(row, 34)
+        self._refresh_hint()
 
-    def _remove_row(self) -> None:
-        row = self.table.currentRow()
-        if row >= 0:
-            self.table.removeRow(row)
+    def _remove_row_of(self, button: QPushButton) -> None:
+        for row in range(self.table.rowCount()):
+            if self.table.cellWidget(row, 0) is button:
+                self.table.removeRow(row)
+                self._refresh_hint()
+                return
+
+    def _refresh_hint(self) -> None:
+        count = self.table.rowCount()
+        self.hint.setText(
+            "No rows yet." if not count else
+            f"{count} row(s). Use the ✕ on a row to remove it.")
 
     def value(self) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
         for row in range(self.table.rowCount()):
             entry: dict[str, Any] = {}
-            for column_index, column in enumerate(self.question.columns):
+            for column_index, column in enumerate(self.question.columns, start=1):
                 editor = self.table.cellWidget(row, column_index)
                 if editor is not None:
                     entry[column.key] = editor.value()
@@ -348,6 +427,7 @@ class TableEditor(QWidget):
         self.table.setRowCount(0)
         for row in value or []:
             self.add_row(row)
+        self._refresh_hint()
 
 
 # --- the dialog ------------------------------------------------------------

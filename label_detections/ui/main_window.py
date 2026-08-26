@@ -331,6 +331,9 @@ class MainWindow(QMainWindow):
         self._dataset_index_dirty = True
         self._image_paths_cache: list[Path] = []
         self._image_status_cache: dict[str, dict] = {}
+        # Set by Capture Reference: the next label box drawn opens the region
+        # editor on it, so the whole flow is capture, draw, draw regions.
+        self._awaiting_reference_box = False
 
         # One label at a time. `label_id` is the dataset being worked on -- the
         # whole app is scoped to it, because a label is trained on its own
@@ -1910,6 +1913,7 @@ class MainWindow(QMainWindow):
         is a mislabel that survives all the way into training.
         """
         self.label_id = str(label_id)
+        self._disarm_reference_capture()
         label = self.library.get(self.label_id)
         if label is not None:
             self.set_class_by_name(str(label.family))
@@ -2237,13 +2241,20 @@ class MainWindow(QMainWindow):
         cap_raw.clicked.connect(lambda: self.capture_frame(save_adjusted=False))
         cap_adj = QPushButton("Capture Adjusted")
         cap_adj.clicked.connect(lambda: self.capture_frame(save_adjusted=True))
+        cap_ref = QPushButton("Capture Reference")
+        cap_ref.setToolTip(
+            "Capture a frame to define this label's read-regions from. It is saved "
+            "into the dataset like any other capture -- then draw the label's box "
+            "and it opens flattened, straight-on, to draw the regions on.")
+        cap_ref.clicked.connect(self.capture_reference)
 
         control_box = QGroupBox("Actions")
         control_layout = QGridLayout(control_box)
         control_layout.setContentsMargins(8, 8, 8, 8)
         control_layout.setHorizontalSpacing(6)
         control_layout.setVerticalSpacing(4)
-        control_buttons = [self.test_cam_btn, self.open_cam_btn, self.close_cam_btn, cap_raw, cap_adj]
+        control_buttons = [self.test_cam_btn, self.open_cam_btn, self.close_cam_btn,
+                           cap_raw, cap_adj, cap_ref]
         for i, btn in enumerate(control_buttons):
             btn.setProperty("compactCaptureButton", True)
             btn.setMinimumHeight(24)
@@ -3488,11 +3499,16 @@ class MainWindow(QMainWindow):
         # Force the first tick after (re)opening to process a frame.
         self._last_frame_seq = None
         self.timer.start(16)
+        # Streaming now: drawing is blocked until a frame is captured, because a
+        # box drawn on a frame that is replaced 30 times a second belongs to no
+        # image and cannot be saved against one.
+        self._refresh_live_mode()
         self.status.showMessage(self.camera.last_result.message, 8000)
 
     def close_camera(self) -> None:
         self.timer.stop()
         self.camera.close()
+        self._refresh_live_mode()
         self.status.showMessage("Live view stopped", 5000)
 
     def _adjustment_changed(self, *args) -> None:
@@ -3584,6 +3600,37 @@ class MainWindow(QMainWindow):
             self.status.showMessage(f"Live view: display {self._preview_fps:.1f} FPS, camera read {cam_fps:.1f} FPS", 1200)
 
 
+    def _refresh_live_mode(self) -> None:
+        """One source of truth: is a camera streaming right now?
+
+        Derived rather than tracked, because every path that could get it wrong
+        (capture, open an image, stop the camera, a failed open) would otherwise
+        need its own flag update.
+        """
+        try:
+            live = bool(self.camera.is_open())
+        except Exception:
+            live = False
+        self._set_live_mode(live)
+
+    def _set_live_mode(self, live: bool) -> None:
+        """Block annotation while a camera is streaming, and say why.
+
+        Not a tab check: what matters is whether the frame under the cursor is a
+        still. Capturing or opening a saved image ends live mode even though the
+        Live Capture tab is still in front.
+        """
+        if hasattr(self.canvas, "set_drawing_enabled"):
+            self.canvas.set_drawing_enabled(not live)
+        if hasattr(self, "mode_label"):
+            self.mode_label.setText("Mode: Live preview" if live else "Mode: Labeling")
+        if hasattr(self, "guidance_label") and not getattr(self, "_awaiting_reference_box", False):
+            self.guidance_label.setText(
+                "Live preview — capture a frame before drawing. A box drawn on a "
+                "live frame belongs to no image."
+                if live else
+                "OBB labels: drag to draw, then adjust the four corner handles.")
+
     def capture_frame(self, save_adjusted: bool) -> None:
         if self.last_raw is None:
             QMessageBox.information(self, "Capture", "No frame available yet. Open live view first.")
@@ -3602,6 +3649,10 @@ class MainWindow(QMainWindow):
         self.current_image_path = adj_path if adj_path else raw_path
         self.canvas.load_image(self.current_image_path)
         self.canvas.clear_boxes()
+        # Capturing produces a still, so drawing is available again even though
+        # the Live Capture tab is still in front.
+        self.camera.close()
+        self._refresh_live_mode()
         # Name which variant landed on disk: the live view always renders the
         # adjusted frame, so a raw capture can look darker than what was on
         # screen and the difference is otherwise invisible.
@@ -3610,6 +3661,56 @@ class MainWindow(QMainWindow):
             f"Captured {kind}: {self.current_image_path.name}", 6000
         )
 
+    def capture_reference(self) -> None:
+        """Capture a frame in order to define this label's read-regions.
+
+        The frame is saved into the dataset like any other capture -- a picture
+        of the label is training data whatever else it is also used for. What
+        this adds is the follow-through: draw the label's box and the region
+        editor opens on it, flattened, without anyone hunting for a menu.
+        """
+        label = self.library.get(self.label_id) if self.label_id else None
+        if label is None:
+            QMessageBox.information(
+                self, "Capture Reference",
+                "Open a label first -- read-regions belong to a label.")
+            return
+        if self.last_raw is None:
+            QMessageBox.information(
+                self, "Capture Reference",
+                "No frame yet. Open the live preview, frame the label, and try again.")
+            return
+
+        adjusted = bool(getattr(self, "capture_adjusted_default", False))
+        self.capture_frame(save_adjusted=adjusted)
+        # Armed rather than modal: the operator still has to say where the label
+        # is, and a dialog sitting over the canvas is the worst possible place
+        # to ask for that.
+        self._awaiting_reference_box = True
+        if hasattr(self, "guidance_label"):
+            self.guidance_label.setText(
+                f"Reference capture — draw the {self.label_id} box and it opens "
+                "flattened to draw regions on.")
+        self.status.showMessage(
+            "Reference captured. Draw the label's box to define its read-regions.",
+            10000)
+
+    def _reference_box_drawn(self) -> bool:
+        """True when an armed reference capture now has its label box."""
+        if not getattr(self, "_awaiting_reference_box", False):
+            return False
+        label = self.library.get(self.label_id) if self.label_id else None
+        if label is None:
+            self._awaiting_reference_box = False
+            return False
+        family = str(getattr(label, "family", "") or "")
+        return any(str(getattr(b, "label", "")) == family for b in self.canvas.boxes)
+
+    def _disarm_reference_capture(self) -> None:
+        self._awaiting_reference_box = False
+        if hasattr(self, "guidance_label"):
+            self.guidance_label.setText(
+                "OBB labels: drag to draw, then adjust the four corner handles.")
     def _save_test_settings(self) -> None:
         """Persist the Model Test tab so nothing is re-entered next launch."""
         if not hasattr(self, "test_model_edit"):
@@ -4467,6 +4568,7 @@ class MainWindow(QMainWindow):
         self._load_image_path(dataset_folder(self.label_id) / name)
 
     def _load_image_path(self, path: Path) -> None:
+        # A still is on screen from here on, so drawing comes back.
         self.close_camera()
         if not self.canvas.load_image(path):
             QMessageBox.warning(self, "Image", "Could not load image.")
@@ -5004,7 +5106,7 @@ class MainWindow(QMainWindow):
             return
         self._open_region_editor(label, references[0])
     def _update_box_count(self) -> None:
-        """Refresh the on-canvas tallies for the label being trained.
+        """Refresh the on-canvas tallies, and follow through on a reference capture.
 
         Two numbers, because they answer different questions: how many of *this*
         label are drawn (is this image usable for its dataset at all), and what
@@ -5032,6 +5134,13 @@ class MainWindow(QMainWindow):
         # Editing on-screen boxes does not change the on-disk dataset, so the
         # summary is refreshed by save/review/delete/capture and label changes
         # instead of walking every sidecar on each box draw or nudge.
+
+        if self._reference_box_drawn():
+            self._disarm_reference_capture()
+            # Deferred: this runs inside the canvas's boxes_changed signal, and
+            # opening a modal from a signal handler while the mouse is still
+            # down leaves the canvas mid-drag.
+            QTimer.singleShot(0, self.define_read_regions)
     def clear_boxes_unsaved(self) -> None:
         """Clear the editable canvas only; never overwrite or delete saved JSON."""
         if not self.canvas.boxes:
