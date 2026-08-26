@@ -5779,12 +5779,6 @@ class MainWindow(QMainWindow):
         self.clahe_clip_slider.setValue(20)
         self.clahe_grid_slider.setValue(8)
 
-    def _export_mode(self) -> str:
-        # Always export the annotation class names as-is. Generic/model-specific
-        # remaps were removed; the exporter still accepts class_mode for the
-        # legacy code path, so we pin it to label_names.
-        return "label_names"
-
     def _export_task(self) -> str:
         return self.export_task_combo.currentData() if hasattr(self, "export_task_combo") else "obb"
 
@@ -5796,42 +5790,44 @@ class MainWindow(QMainWindow):
         return export_report.count_summary(out)
 
     def export_yolo(self) -> None:
-        mode = self._export_mode()
+        """Export just the active label's dataset, for checking it in isolation."""
         task = self._export_task()
         reviewed_only = self._export_reviewed_only()
+        if not self.label_id:
+            QMessageBox.information(self, "Export", "Open a label first.")
+            return
         try:
-            if task == "obb":
-                out = export_label_yolo(self.label_id, task="obb", reviewed_only=reviewed_only)
-                train_hint = "yolo obb train model=yolo11s-obb.pt data=data.yaml ..."
-            else:
-                out = export_label_yolo(self.label_id, task="detect", reviewed_only=reviewed_only)
-                train_hint = "yolo detect train model=yolo11s.pt data=data.yaml ..."
+            out = export_label_yolo(self.label_id, task=task, reviewed_only=reviewed_only)
         except Exception as e:
             QMessageBox.warning(self, "Export", str(e))
             return
-        data_yaml = out / "data.yaml"
+        train_hint = ("yolo obb train model=yolo11s-obb.pt data=data.yaml ..."
+                      if task == "obb" else
+                      "yolo detect train model=yolo11s.pt data=data.yaml ...")
         summary = self._export_count_summary(out)
         QMessageBox.information(
             self,
             "Export complete",
-            f"YOLO dataset exported to:\n{out}\n\nTraining file:\n{data_yaml}\n\n"
-            f"Export counts:\n{summary}\n\n"
-            f"Task:\n{task}\nClasses:\nannotation names as-is\nReview filter:\nreviewed only\n\nSuggested command:\n{train_hint}"
+            f"YOLO dataset exported to:\n{out}\n\nTraining file:\n{out / 'data.yaml'}\n\n"
+            f"{summary}\n\n"
+            f"Task: {task}\nClasses: detector families\nReview filter: reviewed only\n\n"
+            f"This is one label on its own. Export All is the normal path -- one "
+            f"detector over every family.\n\nSuggested command:\n{train_hint}"
         )
         self.status.showMessage(f"Exported YOLO {task} dataset: {out}", 8000)
-
-
     def export_all_yolo(self) -> None:
-        mode = self._export_mode()
+        """Export every label's dataset into one training set.
+
+        This is the normal export: labels are gathered one at a time but trained
+        together, and a model trained on a single family has nothing to tell it
+        apart from.
+        """
         task = self._export_task()
         reviewed_only = self._export_reviewed_only()
         try:
-            if task == "obb":
-                out = export_all_labels_yolo(class_mode=mode, reviewed_only=reviewed_only)
-            else:
-                out = export_all_labels_yolo(class_mode=mode, reviewed_only=reviewed_only)
+            out = export_all_labels_yolo(task=task, reviewed_only=reviewed_only)
         except Exception as e:
-            QMessageBox.warning(self, "Export All Recipes", str(e))
+            QMessageBox.warning(self, "Export All Labels", str(e))
             return
         data_yaml = out / "data.yaml"
         manifest = out / "manifest.csv"
@@ -5839,12 +5835,13 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self,
             "Export All complete",
-            f"Combined YOLO dataset exported to:\n{out}\n\nTraining file:\n{data_yaml}\nManifest:\n{manifest}\n\n"
-            f"Export counts:\n{summary}\n\n"
-            f"Task:\n{task}\nClasses:\nannotation names as-is\nReview filter:\nreviewed only"
+            f"Combined YOLO dataset exported to:\n{out}\n\n"
+            f"Training file:\n{data_yaml}\nManifest:\n{manifest}\n"
+            f"Split report:\n{out / 'split_report.txt'}\n\n"
+            f"{summary}\n\n"
+            f"Task: {task}\nClasses: detector families\nReview filter: reviewed only"
         )
         self.status.showMessage(f"Exported combined YOLO {task} dataset: {out}", 8000)
-
 def main() -> None:
     app = QApplication(sys.argv)
     # Windows enables the combo-box open animation by default (it follows the

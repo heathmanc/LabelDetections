@@ -43,10 +43,12 @@ def _int(row: dict, key: str) -> int:
 
 
 def count_summary(out: Path) -> str:
-    """Build an operator-readable breakdown of what an export wrote, from its
-    manifest.csv: image counts per split/recipe, object totals
-    (battery/bung/retainer), and the exported class list, so the operator can
-    confirm the export matches expectations before training."""
+    """An operator-readable breakdown of what an export actually wrote.
+
+    Read back from the dataset's own manifest.csv rather than from whatever the
+    exporter believed it was doing, so a mismatch between the two is visible
+    before training rather than after.
+    """
     out = Path(out)
     manifest = out / "manifest.csv"
     if not manifest.exists():
@@ -58,44 +60,54 @@ def count_summary(out: Path) -> str:
     if not rows:
         return "No labeled images were written to this dataset."
 
-    # The detect exporter names its per-image label column box_count, the OBB
-    # exporter uses obb_count. Accept either.
-    label_key = "obb_count" if "obb_count" in rows[0] else "box_count"
-
     split_images = {"train": 0, "val": 0}
-    per_recipe: dict[str, int] = {}
-    totals = {"labels": 0, "battery": 0, "bung": 0, "retainer": 0}
+    per_label: dict[str, int] = {}
+    groups: set[str] = set()
+    total_boxes = 0
     empty_images = 0
+
     for row in rows:
         split = str(row.get("split", "")).strip()
         if split in split_images:
             split_images[split] += 1
-        recipe = str(row.get("recipe", "")).strip() or "(unknown)"
-        per_recipe[recipe] = per_recipe.get(recipe, 0) + 1
-        n_labels = _int(row, label_key)
-        totals["labels"] += n_labels
-        totals["battery"] += _int(row, "battery_count")
-        totals["bung"] += _int(row, "bung_count")
-        totals["retainer"] += _int(row, "retainer_count")
-        if n_labels == 0:
+        label_id = str(row.get("label_id", "")).strip() or "(unknown)"
+        per_label[label_id] = per_label.get(label_id, 0) + 1
+        group = str(row.get("group", "")).strip()
+        if group:
+            groups.add(group)
+        boxes = _int(row, "boxes")
+        total_boxes += boxes
+        if boxes == 0:
             empty_images += 1
 
-    total_images = len(rows)
     lines = [
-        f"Images written: {total_images}  (train {split_images['train']}, val {split_images['val']})",
-        f"Labels written: {totals['labels']}",
-        f"  Batteries: {totals['battery']}",
-        f"  Bungs:     {totals['bung']}",
-        f"  Retainers: {totals['retainer']}",
+        f"Images written: {len(rows)}  (train {split_images['train']}, "
+        f"val {split_images['val']})",
+        f"Boxes written: {total_boxes}",
     ]
+    if per_label:
+        lines.append("Images per label:")
+        for label_id in sorted(per_label):
+            lines.append(f"  {label_id}: {per_label[label_id]}")
     if empty_images:
-        lines.append(f"Images with no usable labels: {empty_images}")
-    if len(per_recipe) > 1:
-        lines.append("Images per recipe:")
-        for recipe in sorted(per_recipe):
-            lines.append(f"  {recipe}: {per_recipe[recipe]}")
+        # Backgrounds export as an empty label file on purpose, so this is a
+        # count worth showing rather than a warning.
+        lines.append(f"Images with no boxes (backgrounds): {empty_images}")
+    if groups:
+        lines.append(f"Capture groups: {len(groups)} (never split across train/val)")
 
     classes = class_names(out)
     if classes:
-        lines.append(f"Classes ({len(classes)}): " + ", ".join(classes))
+        lines.append(f"Detector families ({len(classes)}): " + ", ".join(classes))
+
+    split_report = out / "split_report.txt"
+    if split_report.exists():
+        try:
+            warnings = [line for line in split_report.read_text(encoding="utf-8").splitlines()
+                        if line.startswith("WARNING:")]
+        except Exception:
+            warnings = []
+        if warnings:
+            lines.append("")
+            lines.extend(warnings)
     return "\n".join(lines)
