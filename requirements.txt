@@ -1,0 +1,18 @@
+# The core package (label_detections/core) is stdlib-only on purpose: the
+# schemas, the review gate, the dataset split and the comparison engine are all
+# unit testable with nothing installed. Everything below is for the UI and the
+# vision work layered on top of it.
+
+PySide6>=6.6
+opencv-python>=4.8
+numpy>=1.24
+ultralytics>=8.3.0
+PyYAML>=6.0
+
+# Camera. Match the Basler Pylon runtime installed outside Python.
+pypylon>=3.0
+
+# Code reading. zxing-cpp covers 1D, QR, DataMatrix, Aztec and PDF417 in one
+# library; pylibdmtx is the fallback for beaten-up DataMatrix that it refuses.
+zxing-cpp>=2.2
+pylibdmtx>=0.1.10

@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# The operator's image library and recipes. Never committed: it is production
+# data, it is large, and its location is configurable per install.
+data/
+
+build/
+dist/
+*.spec.bak
+.DS_Store
