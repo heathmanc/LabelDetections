@@ -138,9 +138,19 @@ capture afterwards:
 frame, stops the preview, opens it, and waits for you to draw the label's box —
 then the region editor opens on it by itself.
 
+**A label's artwork is defined once.** Once it has some, Define Regions becomes
+**Edit Regions** and opens that same artwork — pressing it on a different
+capture will not quietly make new artwork out of whatever is on screen.
+
+That is not fussiness. Regions are fractions of the label, so re-flattening a
+second shot whose outline is drawn even slightly differently moves *every*
+region on the label, against images that were already reviewed. Replacing
+artwork is therefore a deliberate act: **Tools → Replace label artwork…**, which
+names the cost, and carries the existing regions onto the new artwork so they
+can be checked.
+
 The capture the artwork was flattened from is marked **◆ REFERENCE** in the
-image list, because redefining regions from a different shot silently moves
-every region on the label.
+image list, so which shot it was stays visible.
 
 That flattened crop is a *better* reference than vendor artwork anyway: it is
 this label, under this line's lighting, through this lens.

@@ -536,6 +536,13 @@ class MainWindow(QMainWindow):
         edit_regions_action.triggered.connect(self._guarded(self.edit_read_regions))
         tools_menu.addAction(edit_regions_action)
 
+        replace_artwork_action = QAction("Replace label artwork...", self)
+        replace_artwork_action.setToolTip(
+            "Re-flatten this label's artwork from the box on this image. Every "
+            "region is positioned against it, so this is behind a confirmation.")
+        replace_artwork_action.triggered.connect(self._guarded(self.replace_label_artwork))
+        tools_menu.addAction(replace_artwork_action)
+
         regions_action = QAction("Place read-regions", self)
         regions_action.setShortcut("Ctrl+R")
         regions_action.setToolTip(
@@ -584,7 +591,7 @@ class MainWindow(QMainWindow):
             unreviewed_action, mark_reviewed_action, force_review_action,
             capture_action, auto_label_action, validate_action,
             prelabel_action, next_queue_action, shortcuts_action, regions_action,
-            define_regions_action, edit_regions_action,
+            define_regions_action, edit_regions_action, replace_artwork_action,
         ):
             self.addAction(action)
 
@@ -1858,6 +1865,24 @@ class MainWindow(QMainWindow):
 
         self._refresh_active_label_panel()
 
+    def _refresh_regions_button(self) -> None:
+        """Say which of the two things the button will do, before it is pressed."""
+        if not hasattr(self, "define_regions_btn"):
+            return
+        label = self.library.get(self.label_id) if self.label_id else None
+        has_artwork = label is not None and self._existing_artwork(label) is not None
+        self.define_regions_btn.setText(
+            "Edit Regions..." if has_artwork else "Define Regions...")
+        self.define_regions_btn.setToolTip(
+            "Open this label's artwork and adjust its read-regions. The artwork "
+            "is kept -- to re-flatten it from this image, use "
+            "Tools > Replace label artwork."
+            if has_artwork else
+            "Flatten the label box on this image into straight-on artwork and draw "
+            "the areas to read inside it -- a barcode, a serial, a date code. "
+            "Stored as fractions of the label, so they then apply to every image "
+            "of it. (Ctrl+Shift+R)")
+
     def _refresh_active_label_panel(self) -> None:
         if not hasattr(self, "label_id_label"):
             return
@@ -1887,6 +1912,7 @@ class MainWindow(QMainWindow):
             bits.append(label.surface)
         self.label_meta_label.setText(" · ".join(bits) or str(label.name or "—"))
 
+        self._refresh_regions_button()
         statuses = list(persistence.dataset_statuses(label.label_id).values())
         self.label_progress_label.setText(
             review_logic.dataset_summary(
@@ -2426,13 +2452,10 @@ class MainWindow(QMainWindow):
         copy_prev.clicked.connect(self.copy_previous_labels)
         qa_btn = QPushButton("Find Problem")
         qa_btn.clicked.connect(self.find_next_problem_image)
-        define_regions_btn = QPushButton("Define Regions...")
-        define_regions_btn.setToolTip(
-            "Flatten the label box on this image into straight-on artwork and draw "
-            "the areas to read inside it -- a barcode, a serial, a date code. "
-            "Stored as fractions of the label, so they then apply to every image "
-            "of it. No external artwork file needed. (Ctrl+Shift+R)")
-        define_regions_btn.clicked.connect(self.define_read_regions)
+        self.define_regions_btn = QPushButton("Define Regions...")
+        self.define_regions_btn.clicked.connect(self.define_read_regions)
+        define_regions_btn = self.define_regions_btn
+        self._refresh_regions_button()
         regions_btn = QPushButton("Place Regions")
         regions_btn.setToolTip(
             "Fill in this label's read-regions -- barcodes, text fields, the match "
@@ -3407,7 +3430,10 @@ class MainWindow(QMainWindow):
                 self._accumulate_summary(totals, entry)
                 if review_only and not entry.get("needs_review", False):
                     continue
-                self.image_list.addItem(entry.get("prefix", "") + p.name)
+                item = QListWidgetItem(entry.get("prefix", "") + p.name)
+                # The name, not the decorated text: prefixes stack and change.
+                item.setData(Qt.ItemDataRole.UserRole, p.name)
+                self.image_list.addItem(item)
         finally:
             self.image_list.setUpdatesEnabled(True)
         self._set_dataset_summary_label(totals)
@@ -3722,6 +3748,17 @@ class MainWindow(QMainWindow):
             QMessageBox.information(
                 self, "Capture Reference",
                 "Open a label first -- read-regions belong to a label.")
+            return
+        if self._existing_artwork(label) is not None:
+            # A label's artwork is defined once. Shooting another reference for
+            # it is the replace path, and that is behind a confirmation because
+            # every region is positioned against the artwork it replaces.
+            QMessageBox.information(
+                self, "Capture Reference",
+                f"'{self.label_id}' already has artwork, and its read-regions are "
+                "positioned on it.\n\n"
+                "Use Edit Regions to adjust them, or Tools > Replace label artwork "
+                "if the printed label itself has changed.")
             return
         if self.last_raw is None:
             QMessageBox.information(
@@ -4618,7 +4655,7 @@ class MainWindow(QMainWindow):
         item = self.image_list.currentItem()
         if not item:
             return
-        name = self._image_name_from_list_item(item.text()) if hasattr(self, "_image_name_from_list_item") else item.text()
+        name = self._image_name_from_list_item(item)
         self._load_image_path(dataset_folder(self.label_id) / name)
 
     def _load_image_path(self, path: Path) -> None:
@@ -4666,7 +4703,7 @@ class MainWindow(QMainWindow):
         try:
             for i in range(list_widget.count()):
                 item = list_widget.item(i)
-                if self._image_name_from_list_item(item.text()) == target:
+                if self._image_name_from_list_item(item) == target:
                     list_widget.setCurrentRow(i)
                     list_widget.scrollToItem(item)
                     return
@@ -4677,23 +4714,37 @@ class MainWindow(QMainWindow):
             list_widget.blockSignals(blocked)
 
 
-    def _image_name_from_list_item(self, text: str) -> str:
-        # Current list format uses readable status prefixes like
-        # "✓ JSON OK  image.jpg" / "□ NO JSON  image.jpg". Older v0.9.x
-        # builds used a simple two-character prefix. Support both so saved
-        # projects remain navigable after upgrades.
-        if "  " in text:
-            return text.split("  ", 1)[1]
-        if text[:2] in ("✓ ", "⚠ ", "□ ", "◇ "):
-            return text[2:]
-        return text
+    def _image_name_from_list_item(self, item_or_text) -> str:
+        """The file name behind a list row.
 
+        Rows carry their file name in a data role, because parsing it back out
+        of the display text is what broke: prefixes stack ("REFERENCE" in front
+        of "REVIEWED OK"), and splitting on the first double space handed the
+        rest of the prefix back as part of the name -- so opening that row tried
+        to read a file called "REVIEWED OK  capture.jpg".
+
+        The text parsing survives only as a fallback for rows built elsewhere,
+        and now takes the LAST prefix separator rather than the first.
+        """
+        if isinstance(item_or_text, QListWidgetItem):
+            stored = item_or_text.data(Qt.ItemDataRole.UserRole)
+            if stored:
+                return str(stored)
+            text = item_or_text.text()
+        else:
+            text = str(item_or_text)
+
+        if "  " in text:
+            return text.rsplit("  ", 1)[1]
+        if text[:2] in ("✓ ", "⚠ ", "□ ", "◇ ", "▨ ", "◆ ", "🟡"):
+            return text[2:].lstrip()
+        return text
     def delete_selected_image(self) -> None:
         item = self.image_list.currentItem() if hasattr(self, "image_list") else None
         path = None
 
         if item:
-            name = self._image_name_from_list_item(item.text())
+            name = self._image_name_from_list_item(item)
             path = dataset_folder(self.label_id) / name
         elif self.current_image_path:
             path = self.current_image_path
@@ -5041,22 +5092,32 @@ class MainWindow(QMainWindow):
         self.status.showMessage(
             f"Placed {placed} read-region(s) from {self.label_id}'s artwork", 5000)
 
-    def define_read_regions(self) -> None:
-        """Define this label's read-regions from the label box on screen.
+    def define_read_regions(self, *, replace: bool = False) -> None:
+        """Draw this label's read-regions, on artwork it keeps for good.
 
-        No external artwork needed. The tool is already collecting pictures of
-        the label, and the operator has already drawn its four corners on one --
-        so that box, flattened, *is* the artwork. It gets warped straight-on,
-        saved as the label's reference, and opened to draw on.
+        A label gets its artwork once. The first time, the box on screen is
+        flattened straight-on and kept; from then on this opens that same
+        artwork, and drawing on a different capture is refused.
 
-        What comes back is stored as fractions of the label, so it then applies
-        to every other image of it, at any angle and any distance.
+        The refusal matters because regions are fractions of the label. Flatten
+        a second shot whose outline is drawn even slightly differently and every
+        region on the label moves, quietly, against images that were already
+        reviewed. Replacing artwork is a deliberate act -- ``replace=True``,
+        behind a confirmation -- not a side effect of pressing the same button
+        again on a different image.
         """
         label = self.library.get(self.label_id) if self.label_id else None
         if label is None:
             QMessageBox.information(
                 self, "Read-Regions",
                 "Open a label first -- read-regions belong to a label, not to an image.")
+            return
+
+        existing = self._existing_artwork(label)
+        if existing is not None and not replace:
+            # Already has artwork: edit the regions on it rather than making
+            # new artwork out of whatever happens to be on screen.
+            self._open_region_editor(label, existing)
             return
 
         box = self._label_box_for_regions(label)
@@ -5086,6 +5147,51 @@ class MainWindow(QMainWindow):
         self._open_region_editor(label, str(reference),
                                  source=str(self.current_image_path or ""))
 
+    def _existing_artwork(self, label) -> str | None:
+        """This label's artwork, if it has any that is still on disk.
+
+        A reference whose file has gone is treated as none: recovering from a
+        deleted file is not the same act as replacing artwork that exists, and
+        should not need a confirmation.
+        """
+        for reference in label.reference_images:
+            if reference and Path(reference).is_file():
+                return str(reference)
+        return None
+
+    def replace_label_artwork(self) -> None:
+        """Deliberately re-flatten this label's artwork from the current box.
+
+        Needed when the artwork itself changes -- a new print revision, a
+        materially better shot. The existing regions are carried over and shown
+        on the new artwork so they can be checked, because the one thing that
+        silently breaks here is an outline drawn differently from last time.
+        """
+        label = self.library.get(self.label_id) if self.label_id else None
+        if label is None:
+            QMessageBox.information(self, "Replace Artwork", "Open a label first.")
+            return
+        if self._existing_artwork(label) is None:
+            # Nothing to replace: this is just the first definition.
+            self.define_read_regions()
+            return
+
+        drawn = len(label.regions())
+        reply = QMessageBox.question(
+            self, "Replace Artwork",
+            f"'{self.label_id}' already has artwork, and {drawn} region(s) are "
+            "positioned on it.\n\n"
+            "Replacing it re-flattens the artwork from the box on this image. "
+            "Regions are fractions of the label, so if you outline it even "
+            "slightly differently than last time, every one of them moves -- "
+            "against images that were already reviewed.\n\n"
+            "The existing regions are carried over and shown on the new artwork "
+            "so you can check them.\n\nReplace it?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        self.define_read_regions(replace=True)
     def _label_box_for_regions(self, label):
         """The on-canvas box to flatten: the selection, else the only candidate."""
         family = str(getattr(label, "family", "") or "")
@@ -5148,26 +5254,28 @@ class MainWindow(QMainWindow):
         count = len(drawn["codes"]) + len(drawn["text_fields"]) + \
             (1 if drawn["anchor_region"] else 0)
         self._refresh_active_label_panel()
+        self._refresh_regions_button()
         self.place_regions_on_canvas()
         self.status.showMessage(
             f"Saved {count} read-region(s) on {self.label_id}. They now apply to "
             "every image of it.", 8000)
 
     def edit_read_regions(self) -> None:
-        """Re-open the regions of the active label on its saved reference."""
+        """Open this label's regions on the artwork it already has."""
         label = self.library.get(self.label_id) if self.label_id else None
         if label is None:
             QMessageBox.information(self, "Read-Regions", "Open a label first.")
             return
-        references = [r for r in label.reference_images if Path(r).is_file()]
-        if not references:
+        existing = self._existing_artwork(label)
+        if existing is None:
             QMessageBox.information(
                 self, "Read-Regions",
-                f"'{self.label_id}' has no reference artwork yet.\n\n"
+                f"'{self.label_id}' has no artwork yet.\n\n"
                 "Open one of its images, draw the label box, then use "
-                "Define Read-Regions -- the box gets flattened into the artwork.")
+                "Define Regions -- the box gets flattened into the artwork.")
             return
-        self._open_region_editor(label, references[0])
+        self._open_region_editor(label, existing)
+
     def _update_box_count(self) -> None:
         """Refresh the on-canvas tallies, and follow through on a reference capture.
 

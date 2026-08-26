@@ -576,23 +576,209 @@ def test_the_image_the_artwork_came_from_is_marked_in_the_list(monkeypatch):
     assert "◆ REFERENCE" not in win._cached_image_status(plain)["prefix"]
 
 
-def test_the_marker_moves_when_the_artwork_is_redefined(monkeypatch):
+def _with_artwork(win, label_id, monkeypatch, name="first.jpg"):
+    """Get a label to the state of having artwork, and return the source image."""
+    _define(win, label_id)
+    win.set_active_label(label_id)
+    source = _capture(win, label_id, name)
+    win.canvas.boxes.clear()
+    _draw(win, "spec_plate")
+    calls = _fake_editor(monkeypatch)
+    win.define_read_regions()
+    assert calls.get("opened") == 1
+    return source, calls
+
+
+def test_a_second_define_edits_the_existing_artwork_instead_of_making_new(monkeypatch):
+    """Artwork is defined once. Regions are fractions of it, so re-flattening a
+    different shot moves every one of them against images already reviewed."""
     from label_detections.core import persistence
+
+    win = _window()
+    first, calls = _with_artwork(win, "wf_once", monkeypatch)
+    artwork = persistence.load_library().get("wf_once").reference_images[0]
+
+    second = _capture(win, "wf_once", "second.jpg")
+    win.canvas.boxes.clear(); _draw(win, "spec_plate")
+    win.define_read_regions()
+
+    assert calls["opened"] == 2                       # it opened, ...
+    assert calls["reference"] == artwork              # ... on the SAME artwork
+    label = persistence.load_library().get("wf_once")
+    assert Path(label.reference_source) == first      # the source did not move
+    assert "◆ REFERENCE" in win._cached_image_status(first)["prefix"]
+    assert "◆ REFERENCE" not in win._cached_image_status(second)["prefix"]
+
+
+def test_replacing_artwork_asks_first_and_says_what_it_costs(monkeypatch):
+    win = _window()
+    _with_artwork(win, "wf_replace_no", monkeypatch)
+    _capture(win, "wf_replace_no", "second.jpg")
+    win.canvas.boxes.clear(); _draw(win, "spec_plate")
+
+    asked = {}
+    import label_detections.ui.main_window as mw_mod
+    original = mw_mod.QMessageBox.question
+    mw_mod.QMessageBox.question = lambda parent, title, text, *a, **k: (
+        asked.update({"text": text}) or mw_mod.QMessageBox.No)
+    try:
+        win.replace_label_artwork()
+    finally:
+        mw_mod.QMessageBox.question = original
+
+    assert "every one of them moves" in asked.get("text", "")
+    assert "already reviewed" in asked.get("text", "")
+
+
+def test_confirming_the_replace_moves_the_artwork_and_the_marker(monkeypatch):
+    from label_detections.core import persistence
+
+    win = _window()
+    first, calls = _with_artwork(win, "wf_replace_yes", monkeypatch)
+    second = _capture(win, "wf_replace_yes", "second.jpg")
+    win.canvas.boxes.clear(); _draw(win, "spec_plate")
+
+    import label_detections.ui.main_window as mw_mod
+    original = mw_mod.QMessageBox.question
+    mw_mod.QMessageBox.question = lambda *a, **k: mw_mod.QMessageBox.Yes
+    try:
+        win.replace_label_artwork()
+    finally:
+        mw_mod.QMessageBox.question = original
+
+    label = persistence.load_library().get("wf_replace_yes")
+    assert Path(label.reference_source) == second
+    # The old marker must not linger: the status cache keys on it for this reason.
+    assert "◆ REFERENCE" not in win._cached_image_status(first)["prefix"]
+    assert "◆ REFERENCE" in win._cached_image_status(second)["prefix"]
+
+
+def test_replacing_carries_the_existing_regions_onto_the_new_artwork(monkeypatch):
+    """The one thing that silently breaks is an outline drawn differently."""
+    from label_detections.core import persistence
+    from label_detections.core.labels import CodeSpec
+
+    win = _window()
+    _with_artwork(win, "wf_replace_carry", monkeypatch)
+    library = persistence.load_library()
+    label = library.get("wf_replace_carry")
+    label.codes = [CodeSpec(role="serial", region=[0.5, 0.25, 0.2, 0.2])]
+    library.add(label, replace=True); persistence.save_library(library)
+    win.library = persistence.load_library()
+
+    _capture(win, "wf_replace_carry", "second.jpg")
+    win.canvas.boxes.clear(); _draw(win, "spec_plate")
+
+    seen = {}
+    import label_detections.ui.region_editor as region_editor
+
+    class Capturing:
+        def __init__(self, reference, codes, text_fields, anchor, parent=None):
+            seen["codes"] = codes
+
+        def exec(self):
+            return False        # cancelled: nothing should be written
+
+    monkeypatch.setattr(region_editor, "RegionEditorDialog", Capturing)
+    import label_detections.ui.main_window as mw_mod
+    original = mw_mod.QMessageBox.question
+    mw_mod.QMessageBox.question = lambda *a, **k: mw_mod.QMessageBox.Yes
+    try:
+        win.replace_label_artwork()
+    finally:
+        mw_mod.QMessageBox.question = original
+
+    assert seen["codes"][0]["region"] == [0.5, 0.25, 0.2, 0.2]
+
+
+def test_capture_reference_refuses_once_a_label_has_artwork(monkeypatch):
+    import numpy as np
+
+    win = _window()
+    _with_artwork(win, "wf_capref_once", monkeypatch)
+    win.last_raw = np.zeros((120, 200, 3), dtype=np.uint8)
+
+    shown = {}
+    import label_detections.ui.main_window as mw_mod
+    original = mw_mod.QMessageBox.information
+    mw_mod.QMessageBox.information = lambda parent, title, text, *a, **k: shown.update(
+        {"text": text})
+    try:
+        win.capture_reference()
+    finally:
+        mw_mod.QMessageBox.information = original
+
+    assert "already has artwork" in shown.get("text", "")
+    assert win._awaiting_reference_box is False
+
+
+def test_artwork_deleted_from_disk_can_be_defined_again(monkeypatch):
+    """Recovering from a missing file is not the same act as replacing artwork."""
+    from label_detections.core import persistence
+
+    win = _window()
+    _with_artwork(win, "wf_recover", monkeypatch)
+    label = persistence.load_library().get("wf_recover")
+    Path(label.reference_images[0]).unlink()
+    win.library = persistence.load_library()
+
+    assert win._existing_artwork(win.library.get("wf_recover")) is None
+
+
+# --- the list row must not become a file path -------------------------------
+
+def test_a_stacked_prefix_does_not_leak_into_the_file_name():
+    """The bug this pins: "◆ REFERENCE  ✓ REVIEWED OK  x.jpg" split on the FIRST
+    double space handed back "✓ REVIEWED OK  x.jpg" as the name, and opening
+    that row tried to read a file by that name."""
+    win = _window()
+    assert win._image_name_from_list_item(
+        "◆ REFERENCE  ✓ REVIEWED OK  2220-9199_20260826_161029_729.jpg"
+    ) == "2220-9199_20260826_161029_729.jpg"
+    assert win._image_name_from_list_item("✓ REVIEWED OK  a.jpg") == "a.jpg"
+    assert win._image_name_from_list_item("□ NO JSON  b.jpg") == "b.jpg"
+    assert win._image_name_from_list_item("🟡 REVIEW 1x  c.jpg") == "c.jpg"
+    assert win._image_name_from_list_item("plain.jpg") == "plain.jpg"
+
+
+def test_rows_carry_their_file_name_rather_than_it_being_parsed_back(monkeypatch):
+    """Prefixes stack and change; the name behind a row must not depend on them."""
+    from PySide6.QtCore import Qt
 
     _fake_editor(monkeypatch)
     win = _window()
-    _define(win, "wf_marker_move")
-    win.set_active_label("wf_marker_move")
-    first = _capture(win, "wf_marker_move", "first.jpg")
+    _define(win, "wf_rowname")
+    win.set_active_label("wf_rowname")
+    source = _capture(win, "wf_rowname", "row_name.jpg")
+    win.canvas.boxes.clear(); _draw(win, "spec_plate")
+    win.define_read_regions()          # gives this row the REFERENCE prefix too
+
+    win._image_status_cache.clear()
+    win._refresh_images(force=True)
+    row = next(win.image_list.item(i) for i in range(win.image_list.count())
+               if "row_name.jpg" in win.image_list.item(i).text())
+    assert "◆ REFERENCE" in row.text()
+    assert row.data(Qt.ItemDataRole.UserRole) == "row_name.jpg"
+    assert win._image_name_from_list_item(row) == "row_name.jpg"
+
+
+def test_opening_a_marked_row_loads_the_real_image(monkeypatch):
+    """End to end: the failure was an unreadable path, so open one and check."""
+    _fake_editor(monkeypatch)
+    win = _window()
+    _define(win, "wf_openrow")
+    win.set_active_label("wf_openrow")
+    source = _capture(win, "wf_openrow", "open_me.jpg")
     win.canvas.boxes.clear(); _draw(win, "spec_plate")
     win.define_read_regions()
 
-    second = _capture(win, "wf_marker_move", "second.jpg")
-    win.canvas.boxes.clear(); _draw(win, "spec_plate")
-    win.define_read_regions()
+    win.current_image_path = None
+    win._image_status_cache.clear()
+    win._refresh_images(force=True)
+    row = next(win.image_list.item(i) for i in range(win.image_list.count())
+               if "open_me.jpg" in win.image_list.item(i).text())
+    win.image_list.setCurrentItem(row)
+    win._load_selected_image()
 
-    win.library = persistence.load_library()
-    assert Path(win.library.get("wf_marker_move").reference_source) == second
-    # The old marker must not linger: the cache keys on it for this reason.
-    assert "◆ REFERENCE" not in win._cached_image_status(first)["prefix"]
-    assert "◆ REFERENCE" in win._cached_image_status(second)["prefix"]
+    assert win.current_image_path == source
+    assert win.canvas.image_w > 0        # it actually decoded
