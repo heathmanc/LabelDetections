@@ -1,266 +1,231 @@
 # LabelVision Studio
 
-Battery side-label inspection: a label library, per-label training datasets,
-and the recipes the vision program runs.
+Capture, label and train battery side-label detection — **one label at a time**.
 
-Built alongside [BungVision Label Studio](https://github.com/heathmanc/bunglabel),
-which inspects bungs on battery lids. The data-root resolution, the review-marker
-discipline and the reviewed-only export rule are ported from it. Everything
-about the *data model* is different, for the reasons below.
+A fork of [BungVision Label Studio](https://github.com/heathmanc/bunglabel).
+The application it inherits — camera capture, the OBB canvas, model test,
+training, evaluation, the Windows build and installer — carried over close to
+intact. What was replaced is the data model, because bungs and labels are not
+the same problem.
+
+**There is no recipe authoring here.** Which labels a battery must carry, and
+where each one belongs, is the vision front end's business — authored and
+stored there. This tool's whole job is producing a trained label.
 
 ---
 
-## 1. The three pieces, and why they are separate
+## 1. What changed from bunglabel
 
-| Piece | Answers | Changes when |
+| | bunglabel | LabelVision Studio |
 |---|---|---|
-| **Label library** | What does this label look like? What does it carry? | A new label SKU or artwork revision |
-| **Per-label dataset** | What does this label look like in real life? | You gather and label more images of it |
-| **Recipe** | Which labels must be on this battery, and where? | A product's bill of labels changes |
+| A dataset is | one recipe's captures | one **label's** images |
+| The review gate asks | does every battery hold N bungs? | does this image carry the label it was collected for? |
+| Classes are | battery / bung / retainer | ~7 coarse **families**, stable for years |
+| Identity comes from | the class | the **library**, resolved after detection |
+| The train/val split | shuffles images | never separates a capture group |
+| Recipes | authored here | authored in the front end |
 
-A label is trained **one at a time**, against its own dataset, on its own
-schedule. A recipe only assembles labels that already exist, so a new recipe
-costs minutes and needs no model work at all. Adding a label SKU is a library
-row plus a dataset — never a retrain of everything else.
-
-The thing this arrangement is designed to avoid: making every individual label
-artwork its own detector class. That is the obvious first move and it is the
-one that kills these projects, because every new SKU and every artwork revision
-then means re-labeling and retraining the whole model.
-
-### Two-stage identity
-
-`label` / `class_id` on a box is the coarse **detector family** the model was
-trained to find (`spec_plate`, `warning_label`, `cert_mark`, `trace_tag`, …).
-`label_id` is the **library identity** — which exact label this is, resolved
-after detection by decoding its code and matching its reference artwork.
-
-They are separate fields that never learn about each other. Conflating them is
-what forces the retrain.
+Carried over unchanged: the data-root resolution with its network-share
+fallback, the review-marker discipline, reviewed-only export, force review,
+background samples, the active-learning queue, bulk relabel, undo/redo, and
+every UI constraint in §11–12 of the old README (compact 1920×1080 layout,
+cached recipe index, no autosave on mouse-move).
 
 ---
 
-## 2. Recipes and ROIs
+## 2. The two-stage idea
 
-A recipe is one view per camera. Each view carries a bill of labels, and each
-line of the bill has an **ROI**: a normalised `[x, y, w, h]` rectangle in that
-camera's frame, every value 0..1.
+Do **not** make each label artwork its own detector class. That is the obvious
+first move and it is the one that kills these projects: every new SKU and every
+artwork revision then means re-labeling and retraining the whole model.
 
-Normalised rather than pixels on purpose — a camera swap or a resolution change
-re-scales every ROI for free, where a pixel rect silently starts pointing at the
-wrong part of the battery.
-
-The ROI does two jobs at once:
-
-* **scopes the search** — the runtime looks for the spec plate only where the
-  spec plate belongs;
-* **locates the result** — a label found in the wrong place is a placement
-  failure, not a pass.
+Instead a box carries two fields that never learn about each other:
 
 ```json
-{
-  "group": "AGM", "model": "31-AGM-950", "revision": "C", "constrained": true,
-  "views": [
-    { "view": "side_a", "camera": "cam1", "frame_size": [2592, 1944],
-      "unexpected_severity": "warn",
-      "labels": [
-        { "label_id": "spec_plate_31agm", "roi": [0.05, 0.10, 0.30, 0.40],
-          "count": 1, "severity": "fail", "roi_tol": 0.02 },
-        { "label_id": "warning_en", "roi": [0.50, 0.10, 0.20, 0.30],
-          "count": 1, "severity": "fail", "roi_tol": 0.02 }
-      ],
-      "forbidden": ["spec_plate_27agm"] },
-    { "view": "side_b", "camera": "cam2", "frame_size": [2592, 1944],
-      "labels": [
-        { "label_id": "trace_tag", "roi": [0.10, 0.10, 0.40, 0.40],
-          "count": 1, "severity": "fail" } ] }
-  ],
-  "cross_checks": [
-    { "type": "equal",
-      "left":  "side_a.spec_plate_31agm.serial",
-      "right": "side_b.trace_tag.serial", "severity": "fail" }
-  ]
-}
+{ "label": "spec_plate",              // detector FAMILY -- what the model finds
+  "label_id": "spec_plate_31agm",     // library IDENTITY -- which exact label
+  "kind": "obb", "points": [[…],[…],[…],[…]],
+  "regions": [
+    { "role": "code", "code_role": "serial", "symbology": "datamatrix",
+      "decoded": "SN0000142771", "decode_ok": true }
+  ] }
 ```
 
-Three things in there are worth more than they look.
+The model learns `spec_plate`. Which spec plate a detection *is* gets resolved
+afterwards by decoding its code and matching its artwork against the library.
+So adding a label SKU is a library row plus its own dataset — never a retrain
+of everything else. Adding a genuinely new *kind* of label is one new family
+and one retrain.
 
-**The forbidden list.** Most wrong-label escapes are not a *missing* label —
-they are the neighbouring model's label, which is present, correct-looking, and
-completely wrong. Nothing in the required bill notices it.
-
-**Cross-checks.** With one camera per side, no single image ever sees two labels
-that must agree. The check has to live at the battery, which is why it sits
-above the views rather than inside one.
-
-**`constrained: false`.** Turns the bill off entirely — free-form, everything
-passes. Ported from BungVision's escape hatch, for background captures and
-anything that is not an inspection.
+The seven shipped families: `battery_side`, `spec_plate`, `warning_label`,
+`cert_mark`, `trace_tag`, `promo_label`, `code_patch`.
 
 ---
 
-## 3. Detection can only report what *is* there
+## 3. Working on one label
 
-"Missing spec plate" is not a detection. It is the absence of one, and the only
-thing that can name that absence is the recipe.
+1. **Label tab → Add Label…** The wizard asks what the label is: size in mm,
+   reference images, surface, rotation policy, any barcodes and *where they sit
+   on the artwork*, text fields, look-alikes, how many images to gather.
+2. Capture or import images into that label's dataset.
+3. Draw its oriented box. Drawing under the label's own family stamps the
+   identity automatically — the Class combo follows the label you opened,
+   because a box drawn under the wrong family is a mislabel that survives all
+   the way into training.
+4. **Save** approves an image that carries the label. An image that does not is
+   saved un-reviewed: editing is not approving.
+5. **Mark Background** for negatives — a bare fixture, a battery without this
+   label. They teach the model where *not* to fire.
+6. **Force Review** for deliberate defect examples. It asks what is wrong
+   (`torn_or_wrinkled`, `smeared_code`, `wrong_revision`, …) and records the
+   answer, so "do I have enough torn-label examples yet?" is answerable.
+7. **Dataset Health** shows every label against its own target.
+8. **Export All**, then **Train**.
 
-So `core/compare.py` loops over **requirements**, not over detections;
-detections that no requirement claimed are swept up afterwards as `unexpected`
-or `unidentified`. An unidentified detection is never silently dropped — it is
-either a new SKU nobody added to the library or a genuine wrong-label defect,
-and both need eyes.
+### Labels train together
 
-Reason codes are stable strings, because they end up in production logs and get
-counted in Pareto charts six months later:
-
-```
-missing  wrong_count  forbidden  unexpected  unidentified  out_of_roi
-rotated  wrong_shape  code_missing  code_unreadable  code_pattern
-cross_check  no_frame_size  not_in_library  low_confidence
-```
+They are *gathered* one at a time; they are *trained* together — one detector
+over all the families. A model trained on a single class has nothing to tell it
+apart from. `Export Dataset` does one label in isolation for a spot check;
+`Export All` is the normal path.
 
 ---
 
-## 4. Adding a label: what gets asked, and why
+## 4. Why the add-a-label questions are what they are
 
 `python -m label_detections.preview labels` prints the whole questionnaire.
-The questions that earn their keep:
+The ones that earn their keep:
 
 | Question | Why |
 |---|---|
-| **Physical size (mm)** | Gives every detection a real-world scale. A box that swallowed two labels has a badly wrong aspect ratio and is caught as a misdetection instead of reported as a defect on the battery. |
-| **Variable data + anchor region** | A label carrying a per-unit serial matches against its unchanging artwork only. Without this, every unit looks like a mismatch. |
-| **Code region on the artwork** | The runtime crops straight to the barcode from the full-resolution frame instead of searching for it. This is the difference between decoding a 10-mil DataMatrix and not. |
+| **Physical size (mm)** | Gives every detection a real-world scale. A box that swallowed two labels has a badly wrong aspect ratio and is caught as a misdetection instead of reported as a defect. |
+| **Variable data + anchor** | A label carrying a per-unit serial matches against its unchanging artwork only. Without this, every unit looks like a mismatch. |
+| **Code region on the artwork** | The runtime crops straight to the barcode from the full-resolution frame instead of searching for it — the difference between decoding a 10-mil DataMatrix and not. `core/annotations.py::apply_reference_regions` places the box by homography, so drawing four corners yields the barcode box for free. |
 | **X-dimension** | Turns "is the camera sharp enough?" into a number, quoted back in the wizard, before anyone runs a trial. |
-| **Surface (matte/gloss/foil)** | Decides whether reference matching works at all, and whether the line needs cross-polarised lighting. |
-| **Rotation policy + tolerance** | `fixed`, `flip_ok` or `any`, so an upside-down label is a defect on the labels where that matters and noise on the ones where it does not. |
-| **Looks like these labels** | The look-alikes. Their images become hard negatives when this label trains — and they are exactly what belongs on a recipe's forbidden list. |
-| **Severity if missing** | Asked once, here, rather than re-litigated in every recipe. |
+| **Surface** | Gloss and foil glare. Decides whether artwork matching works at all and whether the line needs cross-polarised lighting. |
+| **Looks like these labels** | The look-alikes. Their images are the hard negatives that stop the two being swapped. |
+
+The wizard is **data**: pages of questions with kinds, validators and
+`visible_when` conditions, in `core/label_wizard.py`. Adding a question is a
+one-line change and nothing in `ui/` moves. Conditional questions matter more
+than they look — asking every question every time is how operators learn to
+click Next without reading.
 
 ---
 
-## 5. Repository layout
+## 5. Layout
 
 ```text
 label_detections/
-├── core/                  stdlib only -- no Qt, no OpenCV, no filesystem in the logic
-│   ├── geometry.py        OBB maths, homography, reference-artwork placement
-│   ├── labels.py          the label library schema
-│   ├── recipes.py         bill of labels, ROIs, cross-checks
-│   ├── annotations.py     nested sidecar model (boxes -> regions)
-│   ├── compare.py         the inspection engine
-│   ├── review.py          review markers and the per-image gate
-│   ├── dataset.py         group-aware train/val split, coverage reporting
-│   ├── storage.py         data-root resolution and per-label paths
-│   ├── persistence.py     atomic reads/writes for library, recipes, sidecars
-│   ├── wizard.py          declarative questionnaire framework
-│   ├── label_wizard.py    the add-a-label question set
-│   └── recipe_wizard.py   the build-a-recipe question set
-├── ui/
-│   ├── flow_dialog.py     generic Qt renderer for any Flow
-│   ├── wizards.py         the two entry points
-│   └── launcher.py        home window: labels, recipes, both wizards
-├── app.py / preview.py
-tests/                     159 tests, stdlib + pytest only
+├── core/                  stdlib only -- no Qt, no OpenCV in the logic
+│   ├── labels.py          the label library schema          [new]
+│   ├── annotations.py     nested sidecars (boxes -> regions) [new]
+│   ├── review.py          markers + the per-image gate      [rewritten]
+│   ├── dataset.py         group-aware split, coverage       [new]
+│   ├── yolo_export.py     per-label export                  [rewritten]
+│   ├── dataset_health.py  readiness tallies                 [rewritten]
+│   ├── active_learning.py queue scoring                     [rewritten]
+│   ├── storage.py         data root + per-label paths       [ported + new]
+│   ├── geometry.py        OBB maths, homography             [superset]
+│   ├── persistence.py     atomic library/sidecar IO         [new]
+│   ├── wizard.py          questionnaire framework           [new]
+│   ├── label_wizard.py    the add-a-label question set      [new]
+│   ├── imageio.py         capture writing, image import     [ported]
+│   ├── camera.py          Basler/Pylon + V4L2               [ported as-is]
+│   ├── training.py, evaluation.py, export_report.py, relabel.py, class_stats.py
+│   └──                                                       [ported as-is]
+└── ui/
+    ├── main_window.py     the app                           [migrated]
+    ├── canvas.py          OBB canvas, now identity-aware    [ported + extended]
+    ├── flow_dialog.py     generic renderer for any Flow     [new]
+    └── wizards.py         the add-a-label entry point       [new]
 ```
 
-`core/` has no Qt and no OpenCV anywhere in it. That is not tidiness — it is
-what lets the decision that fails a battery be tested exhaustively instead of
-observed on a conveyor.
+`core/` has no Qt and no OpenCV anywhere in it. Not tidiness — it is what lets
+the decision that rejects an image be tested exhaustively instead of observed
+on a conveyor.
 
-The wizards are **data**. A page is a list of questions; a question has a kind,
-a validator and a `visible_when`. Adding a question is a one-line change in
-`core/label_wizard.py` or `core/recipe_wizard.py`, and nothing in `ui/` moves.
-Conditional questions matter more than they look: asking every question every
-time is how operators learn to click Next without reading.
+**225 tests.** The core suite needs nothing but pytest; the UI tests build the
+real `MainWindow` under the offscreen platform plugin, which is what caught the
+lost `@staticmethod` decorators and the canvas dropping `label_id` during this
+migration.
 
 ---
 
-## 6. Running it
+## 6. The split bug worth knowing about
+
+`core/dataset.py` splits by **group**, never by image.
+
+Label images arrive in bursts: several frames of the same physical label from
+one fixture, a batch from one print run. Those frames share lighting, wear and
+print drift. Shuffle images individually — which is what bunglabel's
+`yolo_export._split_entries` did, correctly, for its single-camera case — and
+siblings land on both sides. Validation then measures memorisation and reports
+it as accuracy.
+
+Entries carry `session` and `source`; one with neither becomes its own group,
+degrading to the old behaviour rather than silently doing something surprising.
+The seed is explicit, so two training runs are comparable. Any label missing
+from validation is repaired by moving the smallest group containing it. Every
+export ships a `split_report.txt` so a reviewer can check all of that before
+trusting a number.
+
+---
+
+## 7. Running it
 
 ```bash
 pip install -r requirements.txt
 python main.py
 ```
 
-Without PySide6, the questionnaires still print:
+Without PySide6 the questionnaire still prints:
 
 ```bash
 python -m label_detections.preview labels
-python -m label_detections.preview recipe
 ```
 
-Tests need nothing but pytest:
+Tests:
 
 ```bash
 pip install pytest
-python -m pytest tests -q
+QT_QPA_PLATFORM=offscreen python -m pytest tests -q
 ```
 
-Data lives under `data/`, resolved in this order: `LABELVISION_DATA_DIR`, then
-the operator-chosen folder, then beside the app. A configured network share
-that is offline falls back to the default rather than making the app
-unlaunchable.
+Data lives under `data/`, resolved in this order: `LABELVISION_DATA_DIR`, the
+operator-chosen folder, then beside the app. A configured network share that is
+offline falls back to the default rather than making the app unlaunchable.
 
 ```text
 data/
 ├── captures/<label_id>/*.jpg     one dataset per label
-├── labels/<label_id>/*.json      annotation sidecars, matched by stem
+├── labels/<label_id>/*.json      sidecars, matched by stem
 ├── library/labels.json           every label definition
-├── recipes/<recipe>.json         the vision program's bills of labels
+├── library/classes.json          the detector families
 └── exports/
 ```
 
 ---
 
-## 7. Two rules carried over from BungVision
+## 8. Two rules inherited, and worth keeping
 
 **Only a review marker this tool wrote counts as reviewed.** Runtime and
 third-party JSON is full of generic `reviewed: true` and `review_status: ok`
-fields that mean something else entirely. Letting those through is how
-unchecked data ends up teaching the model.
+fields that mean something else. Letting those through is how unchecked data
+ends up teaching the model.
 
-**Editing is not approving.** If labels change after an image was approved, the
-marker is cleared. A stale approval — reviewed, then edited into a mismatch,
-then saved — is the bug that cost BungVision a release.
-
-Force Review is kept, and now requires a `defect_reason`
-(`missing_label`, `wrong_label`, `wrong_revision`, `rotated`, `misplaced`,
-`torn_or_wrinkled`, `smeared_code`, `unreadable_code`, `duplicate_label`,
-`other`). Deliberate defect examples are some of the most valuable training data
-there is, and "show me every wrong_revision example" is unanswerable if every
-forced image just says "mismatch".
-
----
-
-## 8. The split bug worth knowing about
-
-`core/dataset.py` splits by **group**, never by image.
-
-Label images arrive in bursts: several frames of the same physical label from
-one fixture, a handful off one pallet, a batch from one print run. Those frames
-share lighting, wear, print drift and placement. Shuffle images individually —
-which is what BungVision's `yolo_export._split_entries` does, and it was correct
-for its single-camera case — and siblings land on both sides of the split.
-Validation then measures memorisation and reports it as accuracy.
-
-Entries carry `session` and `source`; an entry with neither becomes its own
-group, which degrades to the old behaviour rather than silently doing something
-surprising. The seed is explicit, so the same images give the same split and two
-training runs are actually comparable. Any label missing from validation is
-repaired by moving the smallest group that contains it — a model validated
-without a single example of a label has said nothing about that label.
+**Editing is not approving.** If an image no longer carries the label it was
+collected for, saving clears the marker. A stale approval — reviewed, then
+edited, then saved — is the bug that cost bunglabel a release, and
+`test_ui_label_workflow.py` pins it.
 
 ---
 
 ## 9. Not built yet
 
-- The labeling canvas: draw a label OBB, decode-on-draw, reference-anchored
-  sub-regions (`core/annotations.py::apply_reference_regions` is the logic —
-  it already places a barcode box from the artwork the moment four corners
-  exist).
-- Camera capture. `bunglabel/core/camera.py` ports over close to as-is.
-- YOLO export, training and evaluation. `core/dataset.py` produces the split
-  and the coverage report; the writer is still to come.
-- Reference matching and OCR.
+- Decode-on-draw: run the barcode decoder the moment a code region exists, so
+  labeling is self-verifying. `core/labels.py::CodeSpec` already carries the
+  symbology and X-dimension; the decoder call is the missing piece.
+- Reference matching and OCR — the identity half of stage two.
 - Synthetic sample generation from artwork.
+- Auto-identify on draw (the matcher pre-filling `label_id`).

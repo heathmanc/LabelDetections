@@ -5,7 +5,6 @@ import json
 from label_detections.core import persistence as io
 from label_detections.core import storage
 from label_detections.core.labels import CodeSpec, LabelDef, LabelLibrary
-from label_detections.core.recipes import LabelRequirement, Recipe, ViewSpec
 
 
 def test_library_round_trips_through_disk(tmp_path):
@@ -38,24 +37,8 @@ def test_add_label_persists_and_refuses_a_duplicate(tmp_path):
     assert io.load_library(tmp_path).get("sp").name == "new"
 
 
-def test_recipe_round_trips_and_lists(tmp_path):
-    recipe = Recipe(group="AGM", model="31-950", views=[
-        ViewSpec(view="side_a", labels=[LabelRequirement("sp", roi=[0.1, 0.1, 0.2, 0.2])])])
-    io.save_recipe(recipe, tmp_path)
-    assert (tmp_path / "AGM__31-950.json").is_file()
-    listed = io.list_recipes(tmp_path)
-    assert len(listed) == 1
-    assert listed[0].view("side_a").labels[0].roi == [0.1, 0.1, 0.2, 0.2]
-
-
-def test_one_corrupt_recipe_does_not_hide_the_others(tmp_path):
-    io.save_recipe(Recipe(group="A", model="1"), tmp_path)
-    (tmp_path / "broken.json").write_text("nope", encoding="utf-8")
-    assert [r.model for r in io.list_recipes(tmp_path)] == ["1"]
-
-
 def test_writes_are_atomic_and_leave_no_temp_file(tmp_path):
-    io.save_recipe(Recipe(group="A", model="1"), tmp_path)
+    io.save_library(LabelLibrary([LabelDef(label_id="sp")]), tmp_path)
     assert not list(tmp_path.glob("*.tmp"))
 
 

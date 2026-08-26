@@ -1,8 +1,12 @@
-"""Entry points for the two wizards, and what happens when they finish.
+"""The add-a-label wizard, and what happens when it finishes.
 
-Thin on purpose: both are the same ``FlowDialog`` pointed at a different flow,
-and the only real work here is persisting the result and reporting what the
-saved thing still needs before it can run.
+Thin on purpose: the dialog is the generic ``FlowDialog`` pointed at
+``core.label_wizard.FLOW``, and the only real work here is persisting the
+result and saying what the new label still needs.
+
+There is deliberately no recipe wizard. Which labels a battery must carry, and
+where each one belongs, is authored in the front end -- this tool's whole job
+is producing a trained label.
 """
 from __future__ import annotations
 
@@ -10,14 +14,29 @@ from pathlib import Path
 
 from PySide6.QtWidgets import QMessageBox
 
-from ..core import label_wizard, persistence, recipe_wizard
+from ..core import label_wizard, persistence
 from ..core.labels import LabelDef
-from ..core.recipes import Recipe
 from .flow_dialog import FlowDialog
 
 
+def _answers_from_label(label: LabelDef) -> dict:
+    """Seed the wizard from an existing label, so editing reuses the same flow.
+
+    A separate edit dialog would drift from the wizard within two releases;
+    round-tripping through the same questions keeps them honest.
+    """
+    data = label.to_dict()
+    answers = dict(label_wizard.FLOW.defaults())
+    for question in label_wizard.FLOW.questions():
+        if question.key in data:
+            answers[question.key] = data[question.key]
+    answers["codes"] = [dict(c) for c in data.get("codes", [])]
+    answers["text_fields"] = [dict(t) for t in data.get("text_fields", [])]
+    return answers
+
+
 def add_label(parent=None, root: Path | None = None) -> LabelDef | None:
-    """Run the add-a-label wizard and save the result into the library."""
+    """Run the wizard and save the result into the library."""
     library = persistence.load_library(root)
     dialog = FlowDialog(label_wizard.FLOW, library=library, parent=parent)
     if not dialog.exec():
@@ -28,8 +47,8 @@ def add_label(parent=None, root: Path | None = None) -> LabelDef | None:
         replace = QMessageBox.question(
             parent, "Label exists",
             f"'{label.label_id}' is already in the library.\n\n"
-            "Replace it? Existing annotations keep their label id, so they will "
-            "follow the new definition.",
+            "Replace its definition? Captured images and saved labels keep the "
+            "same id, so they follow the new definition.",
         )
         if replace != QMessageBox.Yes:
             return None
@@ -42,33 +61,32 @@ def add_label(parent=None, root: Path | None = None) -> LabelDef | None:
         parent, "Label added",
         f"'{label.label_id}' is in the library.\n\n"
         f"Next: gather about {label.train_target} images of it into its dataset, "
-        "label them, and train. Nothing else has to be retrained.",
+        "label them, and train. No other label has to be retrained.",
     )
     return label
 
 
-def new_recipe(parent=None, existing: Recipe | None = None,
-               root: Path | None = None) -> Recipe | None:
-    """Run the recipe wizard, seeded from ``existing`` when editing."""
+def edit_label(parent=None, label: LabelDef | None = None,
+               root: Path | None = None) -> LabelDef | None:
+    """Re-open an existing label's definition in the same wizard."""
+    if label is None:
+        return None
     library = persistence.load_library(root)
-    answers = recipe_wizard.answers_from_recipe(existing) if existing else None
-    flow = recipe_wizard.FLOW
-    # Bind the library in so the summary page can say which labels are not
-    # trained yet -- the one thing that stops a finished recipe from running.
-    flow.review = lambda given: recipe_wizard.review_answers(given, library)
-
-    dialog = FlowDialog(flow, answers=answers, library=library, parent=parent)
+    dialog = FlowDialog(label_wizard.FLOW, answers=_answers_from_label(label),
+                        library=library, parent=parent)
     if not dialog.exec():
         return None
 
-    recipe: Recipe = dialog.result_object
-    persistence.save_recipe(recipe, root)
-
-    untrained = sorted(i for i in recipe.label_ids() if i not in library)
-    message = f"Saved recipe '{recipe.safe_name}'."
-    if untrained:
-        message += ("\n\nThese labels are not in the library yet, so the recipe cannot "
-                    "run until each has been added and trained:\n  "
-                    + "\n  ".join(untrained))
-    QMessageBox.information(parent, "Recipe saved", message)
-    return recipe
+    updated: LabelDef = dialog.result_object
+    if updated.label_id != label.label_id:
+        # Renaming would orphan the dataset folder, which is the one mistake
+        # here that quietly loses work.
+        QMessageBox.warning(
+            parent, "Label id changed",
+            f"The label id changed from '{label.label_id}' to '{updated.label_id}'.\n\n"
+            f"'{label.label_id}' and its images are left alone; the new id starts "
+            "with an empty dataset.",
+        )
+    library.add(updated, replace=True)
+    persistence.save_library(library, root)
+    return updated

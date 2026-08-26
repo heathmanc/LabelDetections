@@ -10,10 +10,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from label_detections.core import annotations as ann
 from label_detections.core.labels import CodeSpec, LabelDef, LabelLibrary, TextField
-from label_detections.core.recipes import CrossCheck, LabelRequirement, Recipe, ViewSpec
 
-# Every test frame is 1000 x 500, so a normalised ROI of [0.1, 0.2, 0.2, 0.4]
-# is pixels (100, 100)-(300, 300) and the expectations stay readable.
+# Test frames are 1000 x 500 so pixel expectations stay readable.
 FRAME = (1000, 500)
 
 
@@ -37,42 +35,15 @@ def library():
                           region_mm=[5, 5, 40, 12], x_dim_mm=0.33)]
 
     warn = LabelDef(label_id="warning_en", family="warning_label", size_mm=[40.0, 30.0],
-                    reference_images=["warn.png"], rotation_policy="fixed",
-                    rotation_tol_deg=8.0)
+                    reference_images=["warn.png"])
     other = LabelDef(label_id="spec_plate_27agm", family="spec_plate",
                      size_mm=[90.0, 60.0], reference_images=["other.png"])
-    promo = LabelDef(label_id="promo", family="promo_label", size_mm=[30.0, 20.0],
-                     reference_images=["promo.png"])
-    return LabelLibrary([plate, tag, warn, other, promo])
+    return LabelLibrary([plate, tag, warn, other])
 
 
-@pytest.fixture
-def recipe():
-    """Two cameras, ROIs, a serial cross-check and one forbidden look-alike."""
-    side_a = ViewSpec(
-        view="side_a", camera="cam1", frame_size=list(FRAME),
-        labels=[
-            LabelRequirement("spec_plate_31agm", roi=[0.05, 0.1, 0.3, 0.4],
-                             severity="fail", roi_tol=0.02),
-            LabelRequirement("warning_en", roi=[0.5, 0.1, 0.2, 0.3], severity="fail"),
-        ],
-        forbidden=["spec_plate_27agm"],
-    )
-    side_b = ViewSpec(
-        view="side_b", camera="cam2", frame_size=list(FRAME),
-        labels=[LabelRequirement("trace_tag", roi=[0.1, 0.1, 0.4, 0.4], severity="fail")],
-    )
-    return Recipe(
-        group="AGM", model="31-AGM-950", views=[side_a, side_b],
-        cross_checks=[CrossCheck(type="equal",
-                                 left="side_a.spec_plate_31agm.serial",
-                                 right="side_b.trace_tag.serial")],
-    )
-
-
-def frame(view="side_a", boxes=None, label_id="", **meta):
-    """A frame annotation: what one camera saw, or one training image."""
-    data = ann.new_annotation(f"{view}.jpg", label_id, FRAME[0], FRAME[1], view=view, **meta)
+def frame(label_id="spec_plate_31agm", boxes=None, **meta):
+    """One training image's sidecar."""
+    data = ann.new_annotation(f"{label_id}.jpg", label_id, FRAME[0], FRAME[1], **meta)
     data["boxes"].extend(boxes or [])
     return data
 

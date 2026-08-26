@@ -7,13 +7,13 @@ shared industrial workstations, and is kept behaviour-for-behaviour.
 The layout below is not. This tool trains **one label at a time**: a dataset
 is a folder of images of a single label, gathered from wherever they come
 from, annotated and exported on its own schedule. Nothing here knows about
-batteries, cameras or capture sets -- the vision program's recipe is what
-assembles labels into an inspection, and it lives on the runtime side.
+batteries, cameras or recipes. Which labels a given battery must carry, and
+where to look for each, is the front end's business -- authored and stored
+there, never here. This tool's whole job is producing a trained label.
 
     captures/<label_id>/<image>.jpg
     labels/<label_id>/<image>.json
     library/labels.json          every label definition
-    recipes/<recipe>.json        the vision program's bill of labels + ROIs
 
 A dataset folder per label means a label can be added, trained and shipped
 without touching any other label's data, and it makes "how many examples do I
@@ -32,7 +32,7 @@ from typing import Any
 APP_FOLDER_NAME = "LabelVisionStudio"
 DATA_DIR_ENV = "LABELVISION_DATA_DIR"
 
-SUBDIRS = ("captures", "labels", "recipes", "exports", "library", "models")
+SUBDIRS = ("captures", "labels", "exports", "library", "models")
 
 
 def _is_writable(path: Path) -> bool:
@@ -105,23 +105,53 @@ def resolve_data_dir() -> Path:
     return _app_root() / "data"
 
 
+MAX_RECENT_DATA_DIRS = 8
+
+
+def _read_location_config() -> dict:
+    try:
+        path = data_location_file()
+        if path.is_file():
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return data
+    except Exception:
+        pass
+    return {}
+
+
+def read_recent_data_dirs() -> list[Path]:
+    """Previously used library locations, most recent first.
+
+    Lets an operator switch between site libraries from a list instead of
+    re-browsing to a network path every time.
+    """
+    raw = _read_location_config().get("recent", [])
+    out: list[Path] = []
+    seen: set[str] = set()
+    for item in raw if isinstance(raw, list) else []:
+        text = str(item).strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        out.append(Path(text))
+    return out
+
+
 def write_configured_data_dir(path: Path | str | None) -> None:
     """Persist the library location. ``None`` restores the default.
 
     Takes effect on next launch: the module-level paths below are imported
     directly all over the app.
     """
+    config = _read_location_config()
+    value = "" if path is None else str(Path(path))
+    config["data_dir"] = value
+    if value:
+        recent = [str(p) for p in read_recent_data_dirs() if str(p) != value]
+        config["recent"] = [value] + recent[: MAX_RECENT_DATA_DIRS - 1]
     target = data_location_file()
     target.parent.mkdir(parents=True, exist_ok=True)
-    config: dict[str, Any] = {}
-    try:
-        if target.is_file():
-            loaded = json.loads(target.read_text(encoding="utf-8"))
-            if isinstance(loaded, dict):
-                config = loaded
-    except Exception:
-        config = {}
-    config["data_dir"] = "" if path is None else str(Path(path))
     target.write_text(json.dumps(config, indent=2), encoding="utf-8")
 
 
@@ -150,13 +180,15 @@ if not _ensure_data_dirs(DATA_DIR):
 
 CAPTURE_DIR = DATA_DIR / "captures"
 LABEL_DIR = DATA_DIR / "labels"
-RECIPE_DIR = DATA_DIR / "recipes"
 EXPORT_DIR = DATA_DIR / "exports"
 LIBRARY_DIR = DATA_DIR / "library"
 MODEL_DIR = DATA_DIR / "models"
 
 LABEL_LIBRARY_PATH = LIBRARY_DIR / "labels.json"
 CLASS_CONFIG_PATH = LIBRARY_DIR / "classes.json"
+CAMERA_SETTINGS_PATH = DATA_DIR / "camera_settings.json"
+TRAINING_SETTINGS_PATH = DATA_DIR / "training_settings.json"
+TEST_SETTINGS_PATH = DATA_DIR / "test_settings.json"
 
 
 # --- name sanitising -------------------------------------------------------
@@ -213,15 +245,6 @@ def list_images(label_id: str, root: Path | None = None) -> list[Path]:
     )
 
 
-def recipe_path(safe_name: str, root: Path | None = None) -> Path:
-    return (root or RECIPE_DIR) / f"{safe_token(safe_name)}.json"
-
-
-def list_recipe_files(root: Path | None = None) -> list[Path]:
-    base = root or RECIPE_DIR
-    return sorted(base.glob("*.json")) if base.is_dir() else []
-
-
 # --- JSON helpers ----------------------------------------------------------
 
 def read_json(path: Path) -> dict | None:
@@ -247,3 +270,277 @@ def write_json(path: Path, payload: dict) -> Path:
     tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     tmp.replace(path)
     return path
+
+
+# --- detector families -----------------------------------------------------
+# The classes the model is actually trained on. Deliberately few and visually
+# distinct: this list is the thing that costs a retrain to change, so it holds
+# *kinds* of label, never individual SKUs. Which exact label a detection is
+# gets resolved afterwards from the library, by decoding and matching.
+
+DEFAULT_FAMILY_CONFIG = [
+    {"id": 0, "name": "battery_side", "default_tool": "OBB", "enabled": True},
+    {"id": 1, "name": "spec_plate", "default_tool": "OBB", "enabled": True},
+    {"id": 2, "name": "warning_label", "default_tool": "OBB", "enabled": True},
+    {"id": 3, "name": "cert_mark", "default_tool": "OBB", "enabled": True},
+    {"id": 4, "name": "trace_tag", "default_tool": "OBB", "enabled": True},
+    {"id": 5, "name": "promo_label", "default_tool": "OBB", "enabled": True},
+    {"id": 6, "name": "code_patch", "default_tool": "OBB", "enabled": True},
+]
+
+
+def load_class_config() -> list[dict[str, Any]]:
+    """The detector families, from disk or the shipped defaults.
+
+    A malformed file falls back to the defaults rather than raising: the app
+    must still launch so an operator can fix the library location.
+    """
+    data = read_json(CLASS_CONFIG_PATH)
+    if data is None:
+        save_class_config(DEFAULT_FAMILY_CONFIG)
+        return [dict(c) for c in DEFAULT_FAMILY_CONFIG]
+
+    raw = data.get("classes", [])
+    out: list[dict[str, Any]] = []
+    used: set[int] = set()
+    for entry in raw if isinstance(raw, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        cid = int(entry.get("id", len(out)))
+        if cid in used:
+            continue
+        used.add(cid)
+        name = str(entry.get("name", f"class_{cid}")).strip() or f"class_{cid}"
+        tool = str(entry.get("default_tool", "OBB")).upper()
+        out.append({
+            "id": cid,
+            "name": name,
+            # OBB throughout: labels sit on curved, tilted battery faces and an
+            # axis-aligned box around a rotated label swallows its neighbours.
+            "default_tool": "BOX" if tool == "BOX" and entry.get("tool_locked") else "OBB",
+            "enabled": bool(entry.get("enabled", True)),
+            "tool_locked": bool(entry.get("tool_locked", False)),
+        })
+    if not out:
+        return [dict(c) for c in DEFAULT_FAMILY_CONFIG]
+    return sorted(out, key=lambda c: int(c["id"]))
+
+
+def save_class_config(classes: list[dict[str, Any]]) -> Path:
+    payload = {"classes": sorted(classes, key=lambda c: int(c.get("id", 0)))}
+    return write_json(CLASS_CONFIG_PATH, payload)
+
+
+def class_names_from_config(classes: list[dict[str, Any]]) -> list[str]:
+    """Family names indexed by class id, with gaps filled, for YOLO export."""
+    enabled = [c for c in sorted(classes, key=lambda c: int(c.get("id", 0)))
+               if c.get("enabled", True)]
+    max_id = max([int(c.get("id", 0)) for c in enabled], default=-1)
+    names = [f"class_{i}" for i in range(max_id + 1)]
+    for c in enabled:
+        names[int(c["id"])] = str(c["name"])
+    return names or ["battery_side", "spec_plate"]
+
+
+# --- persisted UI settings -------------------------------------------------
+# Ported unchanged: re-selecting a camera, a model path and an image size on
+# every launch was pure friction.
+
+DEFAULT_CAMERA_SETTINGS: dict[str, Any] = {
+    "camera_source": "0",
+    "camera_backend": "V4L2",
+    "width": 2592,
+    "height": 1944,
+    "fps": 0,
+    "preview_scale": "1/2",
+    "exposure_auto": True,
+    "exposure_us": 0,
+    "force_v4l2": True,
+    "low_latency": True,
+    "threaded_camera": True,
+    "mjpg": True,
+    "skip_heavy_live": True,
+}
+
+def load_camera_settings() -> dict[str, Any]:
+    settings = dict(DEFAULT_CAMERA_SETTINGS)
+    if CAMERA_SETTINGS_PATH.exists():
+        try:
+            data = json.loads(CAMERA_SETTINGS_PATH.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                settings.update({k: data[k] for k in settings if k in data})
+        except Exception:
+            pass
+    return settings
+
+
+def save_camera_settings(settings: dict[str, Any]) -> Path:
+    payload = dict(DEFAULT_CAMERA_SETTINGS)
+    payload.update({k: settings[k] for k in payload if k in settings})
+    CAMERA_SETTINGS_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return CAMERA_SETTINGS_PATH
+
+
+def load_training_settings() -> dict[str, Any]:
+    """Last-used YOLO training parameters, persisted between sessions."""
+    if TRAINING_SETTINGS_PATH.exists():
+        try:
+            data = json.loads(TRAINING_SETTINGS_PATH.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return data
+        except Exception:
+            pass
+    return {}
+
+
+def save_training_settings(settings: dict[str, Any]) -> Path:
+    TRAINING_SETTINGS_PATH.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+    return TRAINING_SETTINGS_PATH
+
+
+def load_test_settings() -> dict[str, Any]:
+    """Last-used Model Test settings, persisted between sessions.
+
+    Re-selecting a model path, image size, confidence and class filters on every
+    launch was pure friction, especially when iterating on a model.
+    """
+    if TEST_SETTINGS_PATH.exists():
+        try:
+            data = json.loads(TEST_SETTINGS_PATH.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return data
+        except Exception:
+            pass
+    return {}
+
+
+def save_test_settings(settings: dict[str, Any]) -> Path:
+    TEST_SETTINGS_PATH.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+    return TEST_SETTINGS_PATH
+
+
+# --- annotation sidecars ---------------------------------------------------
+def image_label_json_path(image_path: Path) -> Path:
+    """data/labels/<label_id>/<image_stem>.json for a capture path.
+
+    The sidecar folder is named after the image's parent directory, which in
+    this layout is the label id -- the same shape the per-recipe version had,
+    so everything downstream of it ported unchanged.
+    """
+    label_id = image_path.parent.name
+    folder = LABEL_DIR / label_id
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder / f"{image_path.stem}.json"
+
+
+def save_annotations(
+    image_path: Path,
+    image_w: int,
+    image_h: int,
+    boxes: list[dict[str, Any]],
+    class_names: list[str],
+    review: dict[str, Any] | None = None,
+    clear_review: bool = False,
+    background: bool | None = None,
+) -> Path:
+    """Save Label Studio annotations.
+
+    v0.9.28 adds an optional review marker so images imported from
+    BungVision can remain visibly "needs review" until an operator
+    explicitly saves or marks them reviewed.  When review is not supplied,
+    existing review metadata is normally preserved.  v0.9.37 adds
+    clear_review=True for the safety case where an already-reviewed image
+    is edited into a quantity mismatch; normal Save must then remove the
+    old review marker so only Force Review can include the mismatch in
+    training/export.
+
+    ``background=True`` records a deliberate negative image -- a conveyor,
+    an empty fixture -- which exports as an empty label file. It is an explicit
+    flag rather than "no boxes" so a half-finished annotation is never mistaken
+    for a background sample. Drawing any box clears it; ``background=None``
+    leaves an existing flag alone.
+    """
+    path = image_label_json_path(image_path)
+    previous: dict[str, Any] = {}
+    if path.exists():
+        try:
+            previous = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            previous = {}
+
+    payload = {
+        "image": str(image_path),
+        "width": image_w,
+        "height": image_h,
+        "classes": class_names,
+        "boxes": boxes,
+    }
+
+    # Preserve useful source metadata from imported BungVision JSON.
+    # Review metadata is preserved only for non-review-changing saves.  When
+    # clear_review=True, stale Label Studio review markers are intentionally
+    # removed so an image edited into a count mismatch cannot accidentally
+    # remain eligible for reviewed-only export/training.
+    source_keys = (
+        "source",
+        "origin",
+        "imported_from",
+        "imported_from_bungvision",
+        "bungvision",
+        "capture_source",
+    )
+    review_keys = (
+        "review",
+        "reviewed",
+        "reviewed_at",
+        "reviewed_by",
+        "review_status",
+        "review_source",
+        "review_tool",
+        "forced_review",
+        "force_reviewed",
+    )
+    for key in source_keys:
+        if key in previous:
+            payload[key] = previous[key]
+
+    # Background marker. A box on the image contradicts the flag outright, so
+    # boxes always win -- otherwise an operator who marked a frame background
+    # and then labelled something would export it as a negative anyway.
+    if boxes:
+        payload["background"] = False
+    elif background is None:
+        payload["background"] = bool(previous.get("background", False))
+    else:
+        payload["background"] = bool(background)
+    if review is None and not clear_review:
+        for key in review_keys:
+            if key in previous:
+                payload[key] = previous[key]
+    elif review is None and clear_review:
+        payload["reviewed"] = False
+        payload["review_status"] = "needs_review"
+
+    if review is not None:
+        payload["review"] = review
+        payload["reviewed"] = bool(review.get("reviewed", False))
+        payload["review_source"] = review.get("source", "bungvision_label_studio")
+        payload["review_tool"] = review.get("tool", "BungVision Label Studio")
+        if review.get("reviewed_at"):
+            payload["reviewed_at"] = review.get("reviewed_at")
+        if review.get("reviewed_by"):
+            payload["reviewed_by"] = review.get("reviewed_by")
+        payload["review_status"] = review.get("review_status") or ("reviewed" if payload["reviewed"] else "needs_review")
+        if review.get("forced_review") or review.get("force_reviewed"):
+            payload["forced_review"] = True
+            payload["force_reviewed"] = True
+
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return path
+
+
+def load_annotations(image_path: Path) -> dict[str, Any] | None:
+    path = image_label_json_path(image_path)
+    if not path.exists():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))

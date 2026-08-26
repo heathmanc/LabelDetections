@@ -1,20 +1,18 @@
-"""Print a wizard's questions to a terminal.
+"""Print the add-a-label questionnaire to a terminal.
 
-The questionnaires *are* the domain knowledge this tool captures, so they need
-to be reviewable by people who will never install Qt -- process engineers,
-quality, whoever decides what a label must carry.
+The questions *are* the domain knowledge this tool captures, so they need to be
+reviewable by people who will never install Qt -- process engineers, quality,
+whoever decides what a label must carry.
 
     python -m label_detections.preview labels
-    python -m label_detections.preview recipe
 """
 from __future__ import annotations
 
 import sys
 
-from .core import label_wizard, recipe_wizard
+from .core import label_wizard
 
-FLOWS = {"labels": label_wizard.FLOW, "label": label_wizard.FLOW,
-         "recipe": recipe_wizard.FLOW, "recipes": recipe_wizard.FLOW}
+FLOWS = {"labels": label_wizard.FLOW, "label": label_wizard.FLOW}
 
 
 def main(argv: list[str] | None = None) -> int:

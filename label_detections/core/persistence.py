@@ -1,9 +1,12 @@
-"""Reading and writing the library, recipes and annotation sidecars.
+"""Reading and writing the label library and annotation sidecars.
 
 Split out from the schema modules so those stay pure and unit testable without
-a filesystem, and so every path in the app goes through one atomic writer.
+a filesystem, and so every write in the app goes through one atomic writer.
 Every function takes an optional root, which is what lets the tests run against
 a temporary directory instead of the operator's real library.
+
+No recipes here: which labels a battery must carry, and where each belongs, is
+authored and stored by the front end.
 """
 from __future__ import annotations
 
@@ -11,7 +14,6 @@ from pathlib import Path
 
 from . import storage
 from .labels import LabelDef, LabelLibrary
-from .recipes import Recipe
 
 
 # --- label library ---------------------------------------------------------
@@ -39,31 +41,6 @@ def add_label(label: LabelDef, root: Path | None = None, *, replace: bool = Fals
     library.add(label, replace=replace)
     save_library(library, root)
     return library
-
-
-# --- recipes ---------------------------------------------------------------
-
-def save_recipe(recipe: Recipe, root: Path | None = None) -> Path:
-    return storage.write_json(storage.recipe_path(recipe.safe_name, root), recipe.to_dict())
-
-
-def load_recipe(path: Path) -> Recipe | None:
-    data = storage.read_json(path)
-    return Recipe.from_dict(data) if data else None
-
-
-def list_recipes(root: Path | None = None) -> list[Recipe]:
-    """Every readable recipe, sorted by name. Unreadable files are skipped.
-
-    Skipped rather than fatal: one corrupt recipe on a shared network library
-    must not stop anyone opening the other forty.
-    """
-    out: list[Recipe] = []
-    for path in storage.list_recipe_files(root):
-        recipe = load_recipe(path)
-        if recipe is not None:
-            out.append(recipe)
-    return sorted(out, key=lambda r: r.safe_name)
 
 
 # --- annotation sidecars ---------------------------------------------------
