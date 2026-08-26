@@ -8,14 +8,17 @@ audited).
 
 The questions that earn their keep, and why:
 
-* **read-regions** -- the areas inside the label that have to be read on their
-  own: a barcode, a serial, a date code. Drawn on the reference artwork and
-  stored as fractions of the label, so once someone draws the label's four
-  corners on a real image every region follows by homography, at any angle and
-  any distance. Nothing is measured and nothing is calibrated.
-* **variable data / anchor** -- a label carrying a per-unit serial matches
-  against its unchanging artwork only. Without this every unit looks like a
-  mismatch, and the region is what says where the changing part lives.
+The wizard deliberately does **not** ask for artwork or read-regions. A label's
+dataset is keyed by its id, so no image of it can exist until the label does --
+asking for one here would be a circle. Artwork comes from a capture afterwards:
+draw the label's box on a collected image and Define Regions flattens that box
+into straight-on artwork, saves it, and opens it to draw the read-regions on.
+
+What it does ask about:
+
+* **variable data** -- a label carrying a per-unit serial matches against its
+  unchanging artwork only. Without this every unit looks like a mismatch, and
+  the anchor region drawn later is what says which part holds still.
 * **surface** -- gloss and foil decide whether artwork matching works at all
   and whether the line needs cross-polarisation.
 * **severity** -- what missing this label should do. Asked once, here, rather
@@ -140,12 +143,6 @@ PAGES = [
                      default="spec_plate", required=True,
                      help="The coarse class the model is trained on. Adding a label to an "
                           "existing family needs no retraining."),
-            Question("reference_images", "Reference artwork", "paths",
-                     help="Optional. Normally left empty: after you draw this "
-                          "label's box on a captured image, Define Regions "
-                          "flattens that box into artwork and saves it here for "
-                          "you. Add a file only if you already have vendor "
-                          "artwork you would rather use."),
             Question("size_mm", "Physical size W x H (mm)", "size_mm",
                      validator=_optional_size,
                      help="Optional, for the record. Nothing computes with it -- "
@@ -177,30 +174,19 @@ PAGES = [
         ],
     ),
     Page(
-        "regions", "Read-regions",
-        blurb="Areas inside the label that have to be read on their own -- a barcode, "
-              "a serial, a date code. You do not have to do this now. Finish the "
-              "wizard, capture an image, draw the label's box, then press "
-              "Define Regions: the box is flattened into straight-on artwork and you "
-              "draw on that. Regions are stored as fractions of the label, so they "
-              "then apply to every image of it, at any angle and any distance.",
-        questions=[
-            Question("draw_regions", "Draw now (needs artwork)", "regions",
-                     help="Only usable if you added vendor artwork above. Otherwise "
-                          "skip this page and use Define Regions while labeling."),
-        ],
-    ),
-    Page(
         "codes", "Code details",
-        blurb="One row per code drawn above. Set what has to happen with each.",
-        visible_when={},
+        blurb="Optional, and usually skipped here. Drawing a code region later "
+              "creates its row for you; this page is only for the policies and "
+              "patterns you already know, such as a serial that must match a "
+              "format. Where each code sits on the label is drawn, never typed.",
         questions=[
             Question("codes", "Codes", "table", columns=CODE_COLUMNS),
         ],
     ),
     Page(
         "text", "Text field details",
-        blurb="One row per text region drawn above.",
+        blurb="Optional, same as the page before: drawing a text region creates "
+              "its row.",
         questions=[
             Question("text_fields", "Text fields", "table", columns=TEXT_COLUMNS),
         ],

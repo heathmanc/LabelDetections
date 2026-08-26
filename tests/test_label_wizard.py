@@ -35,12 +35,22 @@ def test_no_physical_size_is_needed():
     assert build_label(answers).size_mm == [0.0, 0.0]
 
 
-def test_a_label_needs_no_artwork_file_up_front():
-    """Only an id, a name and a family. Everything else can wait for an image."""
+def test_the_wizard_never_asks_for_what_cannot_exist_yet():
+    """A label's dataset is keyed by its id, so no image of it exists yet.
+
+    Asking for artwork -- or for regions drawn on artwork -- would be a circle:
+    you cannot capture until the label exists, and the label could not be
+    finished until you had captured.
+    """
+    keys = {q.key for q in FLOW.questions()}
+    assert "reference_images" not in keys
+    assert "draw_regions" not in keys
+    assert "regions" not in [p.key for p in FLOW.pages]
+
     answers = minimal()
-    assert answers["reference_images"] == []
     assert answers["size_mm"] == [0.0, 0.0]
     assert FLOW.validate(answers) == []
+    assert build_label(answers).reference_images == []
 
 
 def test_a_bad_regex_is_caught_at_entry_not_at_runtime():
@@ -52,7 +62,6 @@ def test_a_bad_regex_is_caught_at_entry_not_at_runtime():
 
 def test_a_region_outside_the_label_is_rejected_with_an_explanation():
     answers = minimal()
-    answers["reference_images"] = ["ref.png"]
     answers["codes"] = [{"role": "serial", "symbology": "qr", "policy": "must_decode",
                          "region": [0.8, 0.1, 0.4, 0.2]}]
     assert any("fractions of the label" in e for e in FLOW.validate(answers))
@@ -66,9 +75,10 @@ def test_anchor_question_appears_only_for_variable_data_labels():
     assert "anchor_region" in [q.key for q in page.visible_questions(answers)]
 
 
-def test_there_is_a_page_for_drawing_regions():
-    assert "regions" in [p.key for p in FLOW.pages]
-    assert FLOW.question("draw_regions").kind == "regions"
+def test_code_and_text_pages_survive_for_policies_known_up_front():
+    """Where a code sits is drawn later; what it must satisfy can be known now."""
+    pages = [p.key for p in FLOW.pages]
+    assert "codes" in pages and "text" in pages
 
 
 def test_variable_data_without_an_anchor_warns_about_matching_moving_text():

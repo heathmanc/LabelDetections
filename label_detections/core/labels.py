@@ -145,7 +145,11 @@ class LabelDef:
     # battery look like a mismatch.
     anchor_region: list[float] = field(default_factory=list)
 
+    # Artwork, and the dataset image it was flattened out of. Recorded so the
+    # image list can mark that capture: "which shot did I define regions from?"
+    # is otherwise unanswerable once a dataset has a few hundred frames.
     reference_images: list[str] = field(default_factory=list)
+    reference_source: str = ""
     codes: list[CodeSpec] = field(default_factory=list)
     text_fields: list[TextField] = field(default_factory=list)
 

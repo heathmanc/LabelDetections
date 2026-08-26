@@ -334,6 +334,9 @@ class MainWindow(QMainWindow):
         # Set by Capture Reference: the next label box drawn opens the region
         # editor on it, so the whole flow is capture, draw, draw regions.
         self._awaiting_reference_box = False
+        # The last frame of a capture burst, opened when the preview stops.
+        self._last_capture_path: Path | None = None
+        self._session_captures = 0
 
         # One label at a time. `label_id` is the dataset being worked on -- the
         # whole app is scoped to it, because a label is trained on its own
@@ -3321,6 +3324,10 @@ class MainWindow(QMainWindow):
         except Exception:
             image_mtime = 0
         json_exists, json_mtime = self._json_mtime_ns(path)
+        label = self.library.get(self.label_id) if self.label_id else None
+        reference_source = str(getattr(label, "reference_source", "") or "")
+        is_reference = bool(reference_source) and key == str(Path(reference_source).resolve())
+
         cached = self._image_status_cache.get(key)
         if (
             cached
@@ -3329,6 +3336,9 @@ class MainWindow(QMainWindow):
             and cached.get("json_exists") == json_exists
             and cached.get("json_mtime") == json_mtime
             and cached.get("label_id") == self.label_id
+            # Part of the key, or redefining regions would leave the old marker
+            # on the old image and none on the new one.
+            and cached.get("is_reference") == is_reference
         ):
             return cached
 
@@ -3352,6 +3362,11 @@ class MainWindow(QMainWindow):
             "empty": "◇ JSON EMPTY  ",
             "unlabeled": "□ NO JSON  ",
         }.get(status, "□ NO JSON  ")
+        # Leads the line: the artwork every read-region on this label is
+        # positioned against came from this shot, and redefining regions from a
+        # different one silently moves every region.
+        if is_reference:
+            prefix = "◆ REFERENCE  " + prefix
 
         entry = {
             "path": path,
@@ -3359,6 +3374,7 @@ class MainWindow(QMainWindow):
             "json_exists": bool(json_exists),
             "json_mtime": json_mtime,
             "label_id": self.label_id,
+            "is_reference": is_reference,
             "status": status,
             "prefix": prefix,
             "own_count": int(own),
@@ -3509,7 +3525,16 @@ class MainWindow(QMainWindow):
         self.timer.stop()
         self.camera.close()
         self._refresh_live_mode()
-        self.status.showMessage("Live view stopped", 5000)
+        # A burst ends ready to label: open the last frame captured in it,
+        # unless the operator has already opened something else.
+        last = getattr(self, "_last_capture_path", None)
+        if last is not None and self.current_image_path is None and Path(last).exists():
+            self._load_image_path(Path(last))
+        count = getattr(self, "_session_captures", 0)
+        self._session_captures = 0
+        self.status.showMessage(
+            f"Live view stopped — {count} captured this session" if count
+            else "Live view stopped", 6000)
 
     def _adjustment_changed(self, *args) -> None:
         if self.last_raw is not None and not self.camera.is_open():
@@ -3632,6 +3657,18 @@ class MainWindow(QMainWindow):
                 "OBB labels: drag to draw, then adjust the four corner handles.")
 
     def capture_frame(self, save_adjusted: bool) -> None:
+        """Save the current frame into the active label's dataset.
+
+        The camera keeps streaming. Capturing is a burst activity -- frame,
+        shoot, reposition, shoot again -- and stopping the preview after every
+        press would make a session of twenty captures twenty reopenings.
+
+        Nothing is loaded onto the canvas either, for the same reason: the live
+        frame would overwrite it on the next tick, and pointing
+        ``current_image_path`` at a still nobody is looking at is how labels get
+        saved against the wrong image. The last capture is remembered and
+        opened when the preview stops, so a burst ends ready to label.
+        """
         if self.last_raw is None:
             QMessageBox.information(self, "Capture", "No frame available yet. Open live view first.")
             return
@@ -3644,23 +3681,34 @@ class MainWindow(QMainWindow):
         raw_path, adj_path = save_capture(
             self.label_id, self.last_raw, adjusted, save_raw=not save_adjusted
         )
+        path = adj_path if adj_path else raw_path
+        self._last_capture_path = path
+        self._session_captures = getattr(self, "_session_captures", 0) + 1
         self._dataset_index_dirty = True
         self._refresh_images(force=True)
-        self.current_image_path = adj_path if adj_path else raw_path
-        self.canvas.load_image(self.current_image_path)
-        self.canvas.clear_boxes()
-        # Capturing produces a still, so drawing is available again even though
-        # the Live Capture tab is still in front.
-        self.camera.close()
-        self._refresh_live_mode()
+        self._update_dataset_summary()
+
+        if not self._camera_is_live():
+            # Captured from a still (no preview running): show it straight away.
+            self.current_image_path = path
+            self.canvas.load_image(path)
+            self.canvas.clear_boxes()
+
         # Name which variant landed on disk: the live view always renders the
         # adjusted frame, so a raw capture can look darker than what was on
         # screen and the difference is otherwise invisible.
         kind = "adjusted" if save_adjusted else "raw (unadjusted)"
+        total = len(self._get_dataset_image_paths())
         self.status.showMessage(
-            f"Captured {kind}: {self.current_image_path.name}", 6000
+            f"Captured {kind}: {path.name} — {self._session_captures} this session, "
+            f"{total} in {self.label_id}", 6000
         )
 
+    def _camera_is_live(self) -> bool:
+        try:
+            return bool(self.camera.is_open())
+        except Exception:
+            return False
     def capture_reference(self) -> None:
         """Capture a frame in order to define this label's read-regions.
 
@@ -3683,6 +3731,12 @@ class MainWindow(QMainWindow):
 
         adjusted = bool(getattr(self, "capture_adjusted_default", False))
         self.capture_frame(save_adjusted=adjusted)
+        # Unlike a burst capture, this one exists to be drawn on, so the preview
+        # stops and the frame is opened.
+        self.close_camera()
+        last = getattr(self, "_last_capture_path", None)
+        if last is not None and Path(last).exists():
+            self._load_image_path(Path(last))
         # Armed rather than modal: the operator still has to say where the label
         # is, and a dialog sitting over the canvas is the worst possible place
         # to ask for that.
@@ -4568,8 +4622,15 @@ class MainWindow(QMainWindow):
         self._load_image_path(dataset_folder(self.label_id) / name)
 
     def _load_image_path(self, path: Path) -> None:
-        # A still is on screen from here on, so drawing comes back.
-        self.close_camera()
+        # A still is on screen from here on, so drawing comes back. Guarded
+        # rather than unconditional: close_camera opens the last capture when a
+        # burst ends, and closing an already-closed camera from in here made
+        # that mutually recursive.
+        if self._camera_is_live():
+            self.close_camera()
+        else:
+            self.timer.stop()
+            self._refresh_live_mode()
         if not self.canvas.load_image(path):
             QMessageBox.warning(self, "Image", "Could not load image.")
             return
@@ -5022,7 +5083,8 @@ class MainWindow(QMainWindow):
             return
 
         reference = imageio.save_reference(self.label_id, flattened)
-        self._open_region_editor(label, str(reference))
+        self._open_region_editor(label, str(reference),
+                                 source=str(self.current_image_path or ""))
 
     def _label_box_for_regions(self, label):
         """The on-canvas box to flatten: the selection, else the only candidate."""
@@ -5052,7 +5114,7 @@ class MainWindow(QMainWindow):
             "one to define regions on, then try again.")
         return None
 
-    def _open_region_editor(self, label, reference: str) -> None:
+    def _open_region_editor(self, label, reference: str, source: str = "") -> None:
         """Run the region editor against ``reference`` and save what was drawn."""
         from .region_editor import RegionEditorDialog
 
@@ -5076,6 +5138,7 @@ class MainWindow(QMainWindow):
             # is this label, under this line's lighting, through this lens.
             "reference_images": [reference] + [
                 r for r in label.reference_images if r != reference],
+            "reference_source": source or label.reference_source,
             "variable_data": bool(label.variable_data or drawn["anchor_region"]),
         })
         self.library.add(updated, replace=True)

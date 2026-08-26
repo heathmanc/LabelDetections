@@ -496,3 +496,103 @@ def test_the_canvas_says_why_it_is_not_accepting_boxes():
         assert win.canvas._blocked() is True
     finally:
         win.canvas.set_drawing_enabled(True)
+
+
+# --- burst capture, and marking the reference -------------------------------
+
+def test_capturing_does_not_stop_the_preview():
+    """Capture is a burst activity: frame, shoot, reposition, shoot again."""
+    import numpy as np
+    from label_detections.core import storage
+
+    win = _window()
+    _define(win, "wf_burst")
+    win.set_active_label("wf_burst")
+    real = win.camera
+    try:
+        win.camera = _FakeCamera(True)
+        win._refresh_live_mode()
+        win.last_raw = np.zeros((120, 200, 3), dtype=np.uint8)
+
+        for _ in range(3):
+            win.capture_frame(save_adjusted=False)
+
+        assert win.camera.is_open() is True          # never stopped
+        assert win.canvas.drawing_enabled is False   # still a live frame
+        assert win._session_captures == 3
+        assert len(storage.list_images("wf_burst")) >= 3
+        # The canvas is not repointed at a still nobody is looking at.
+        assert win.current_image_path is None
+    finally:
+        win.camera = real
+        win._refresh_live_mode()
+
+
+def test_stopping_the_preview_opens_the_last_capture_ready_to_label():
+    import numpy as np
+
+    win = _window()
+    _define(win, "wf_burst_end")
+    win.set_active_label("wf_burst_end")
+    real = win.camera
+    try:
+        win.camera = _FakeCamera(True)
+        win._refresh_live_mode()
+        win.last_raw = np.zeros((120, 200, 3), dtype=np.uint8)
+        win.capture_frame(save_adjusted=False)
+        last = win._last_capture_path
+
+        win.close_camera()
+        assert win.current_image_path == last
+        assert win.canvas.drawing_enabled is True
+        assert win._session_captures == 0            # the count resets per session
+    finally:
+        win.camera = real
+        win._refresh_live_mode()
+
+
+def test_the_image_the_artwork_came_from_is_marked_in_the_list(monkeypatch):
+    """Redefining regions from a different shot silently moves every region."""
+    from label_detections.core import persistence
+
+    calls = _fake_editor(monkeypatch, {
+        "codes": [], "text_fields": [], "anchor_region": [0.0, 0.0, 0.5, 0.5]})
+    win = _window()
+    _define(win, "wf_marker")
+    win.set_active_label("wf_marker")
+    plain = _capture(win, "wf_marker", "plain.jpg")
+    source = _capture(win, "wf_marker", "source.jpg")
+    win.canvas.boxes.clear()
+    _draw(win, "spec_plate")
+    win.define_read_regions()
+    assert calls.get("opened") == 1
+
+    label = persistence.load_library().get("wf_marker")
+    assert Path(label.reference_source) == source
+
+    win.library = persistence.load_library()
+    win._image_status_cache.clear()
+    assert "◆ REFERENCE" in win._cached_image_status(source)["prefix"]
+    assert "◆ REFERENCE" not in win._cached_image_status(plain)["prefix"]
+
+
+def test_the_marker_moves_when_the_artwork_is_redefined(monkeypatch):
+    from label_detections.core import persistence
+
+    _fake_editor(monkeypatch)
+    win = _window()
+    _define(win, "wf_marker_move")
+    win.set_active_label("wf_marker_move")
+    first = _capture(win, "wf_marker_move", "first.jpg")
+    win.canvas.boxes.clear(); _draw(win, "spec_plate")
+    win.define_read_regions()
+
+    second = _capture(win, "wf_marker_move", "second.jpg")
+    win.canvas.boxes.clear(); _draw(win, "spec_plate")
+    win.define_read_regions()
+
+    win.library = persistence.load_library()
+    assert Path(win.library.get("wf_marker_move").reference_source) == second
+    # The old marker must not linger: the cache keys on it for this reason.
+    assert "◆ REFERENCE" not in win._cached_image_status(first)["prefix"]
+    assert "◆ REFERENCE" in win._cached_image_status(second)["prefix"]

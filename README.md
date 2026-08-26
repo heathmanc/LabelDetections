@@ -121,14 +121,26 @@ click Next without reading.
 A region is an area *inside* a label that inspection reads on its own — a
 barcode, a serial, a date code.
 
-**You never need an artwork file.** The tool is already collecting pictures of
-the label; one of them, flattened, *is* the artwork:
+**You never need an artwork file, and the Add Label wizard never asks for one.**
+A label's dataset is keyed by its id, so no image of it can exist until the
+label does — asking for artwork up front would be a circle. It comes from a
+capture afterwards:
 
-1. Open one of the label's captured images and draw its box, as normal.
-2. **Define Regions…** on the Annotation rail (or `Ctrl+Shift+R`). The box you
+1. Add the label. Capture images of it (the preview stays live, so a session of
+   twenty captures is twenty presses, not twenty reopenings).
+2. Open one and draw the label's box, as normal.
+3. **Define Regions…** on the Annotation rail (or `Ctrl+Shift+R`). The box you
    drew is warped straight-on — tilt and perspective removed — and saved as
-   that label's reference.
-3. Drag regions on it. Name each, pick code / text field / static anchor.
+   that label's artwork.
+4. Drag regions on it. Name each, pick code / text field / static anchor.
+
+**Capture Reference** on the Live Capture tab does 1–3 in one press: it shoots a
+frame, stops the preview, opens it, and waits for you to draw the label's box —
+then the region editor opens on it by itself.
+
+The capture the artwork was flattened from is marked **◆ REFERENCE** in the
+image list, because redefining regions from a different shot silently moves
+every region on the label.
 
 That flattened crop is a *better* reference than vendor artwork anyway: it is
 this label, under this line's lighting, through this lens.
