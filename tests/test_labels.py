@@ -26,17 +26,22 @@ def test_from_dict_ignores_unknown_keys_from_a_newer_file():
 
 def test_a_label_needs_no_physical_size():
     """Nothing computes with it: region placement is proportional."""
-    label = LabelDef(label_id="sp", reference_images=["a.png"])
-    assert validate_label_def(label) == []
+    assert validate_label_def(LabelDef(label_id="sp")) == []
 
 
-def test_missing_reference_is_flagged_because_regions_are_drawn_on_it():
-    issues = validate_label_def(LabelDef(label_id="sp"))
-    assert any("reference image" in i.lower() for i in issues)
+def test_a_label_with_nothing_to_read_needs_no_artwork():
+    """Artwork comes from a capture, so it is not a prerequisite for a label."""
+    assert validate_label_def(LabelDef(label_id="sp")) == []
+
+
+def test_a_label_that_reads_something_needs_artwork_to_position_it_on():
+    label = LabelDef(label_id="sp")
+    label.codes = [CodeSpec(role="serial", region=[0.1, 0.1, 0.2, 0.2])]
+    assert any("Define Regions" in i for i in validate_label_def(label))
 
 
 def test_variable_data_without_an_anchor_is_flagged():
-    label = LabelDef(label_id="sp", reference_images=["a.png"], variable_data=True)
+    label = LabelDef(label_id="sp", variable_data=True)
     assert any("anchor" in i.lower() for i in validate_label_def(label))
 
 

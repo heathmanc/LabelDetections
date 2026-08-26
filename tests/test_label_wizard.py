@@ -5,9 +5,14 @@ from label_detections.core.labels import validate_label_def
 
 
 def minimal():
+    """The whole of a new label: an id, a name and a family.
+
+    No artwork file and no measurements. The tool is already collecting
+    pictures of the label; one of them, flattened, becomes its artwork.
+    """
     answers = FLOW.defaults()
     answers.update(label_id="spec plate 31", name="31-AGM spec plate",
-                   family="spec_plate", reference_images=["ref.png"])
+                   family="spec_plate")
     return answers
 
 
@@ -30,10 +35,12 @@ def test_no_physical_size_is_needed():
     assert build_label(answers).size_mm == [0.0, 0.0]
 
 
-def test_a_reference_image_is_required_because_regions_are_drawn_on_it():
+def test_a_label_needs_no_artwork_file_up_front():
+    """Only an id, a name and a family. Everything else can wait for an image."""
     answers = minimal()
-    answers["reference_images"] = []
-    assert any("Reference images" in e for e in FLOW.validate(answers))
+    assert answers["reference_images"] == []
+    assert answers["size_mm"] == [0.0, 0.0]
+    assert FLOW.validate(answers) == []
 
 
 def test_a_bad_regex_is_caught_at_entry_not_at_runtime():
@@ -45,6 +52,7 @@ def test_a_bad_regex_is_caught_at_entry_not_at_runtime():
 
 def test_a_region_outside_the_label_is_rejected_with_an_explanation():
     answers = minimal()
+    answers["reference_images"] = ["ref.png"]
     answers["codes"] = [{"role": "serial", "symbology": "qr", "policy": "must_decode",
                          "region": [0.8, 0.1, 0.4, 0.2]}]
     assert any("fractions of the label" in e for e in FLOW.validate(answers))

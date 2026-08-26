@@ -237,10 +237,13 @@ def validate_label_def(label: LabelDef) -> list[str]:
             "Variable-data label has no anchor region: matching would score against "
             "text that changes on every unit."
         )
-    if not label.reference_images:
+    # Artwork is not a prerequisite. It comes from a capture: draw the label's
+    # box on a collected image and Define Regions flattens that box into
+    # straight-on artwork. Only flag it when something needs positioning on it.
+    if not label.reference_images and (label.codes or label.text_fields):
         issues.append(
-            "No reference image. It is what read-regions are drawn on, so without "
-            "one nothing on this label can be read."
+            "This label reads something but has no artwork to position it on. Draw "
+            "its box on a captured image and use Define Regions."
         )
     for i, code in enumerate(label.codes, start=1):
         if code.symbology not in SYMBOLOGIES:

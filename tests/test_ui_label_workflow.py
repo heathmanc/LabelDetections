@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -210,3 +211,106 @@ def test_no_recipe_authoring_survived_the_fork():
     assert not hasattr(win, "recipe")
     for attribute in ("save_recipe_from_ui", "_refresh_recipes", "run_count_test"):
         assert not hasattr(win, attribute), f"{attribute} should be gone"
+
+
+# --- read-regions from a captured image ------------------------------------
+
+def test_regions_are_defined_from_a_capture_not_an_artwork_file(monkeypatch):
+    """The workflow question: no external file, no measuring, no calibration.
+
+    Capture an image, draw the label's box, and that box -- flattened -- becomes
+    the artwork the regions are drawn on.
+    """
+    from label_detections.core import persistence
+
+    win = _window()
+    _define(win, "wf_regions")
+    win.set_active_label("wf_regions")
+    _capture(win, "wf_regions", "with_label.jpg")
+    win.canvas.boxes.clear()
+    _draw(win, "spec_plate")
+
+    # Stand in for the operator dragging two regions on the flattened crop.
+    import label_detections.ui.region_editor as region_editor
+
+    class FakeDialog:
+        def __init__(self, reference, codes, text_fields, anchor, parent=None):
+            FakeDialog.reference = reference
+
+        def exec(self):
+            return True
+
+        def result_regions(self):
+            return {
+                "codes": [{"role": "serial", "symbology": "datamatrix",
+                           "policy": "must_decode", "region": [0.6, 0.1, 0.3, 0.4]}],
+                "text_fields": [{"name": "date_code", "policy": "must_be_present",
+                                 "region": [0.1, 0.7, 0.4, 0.2]}],
+                "anchor_region": [0.0, 0.0, 0.5, 0.5],
+            }
+
+    monkeypatch.setattr(region_editor, "RegionEditorDialog", FakeDialog)
+    win.define_read_regions()
+
+    label = persistence.load_library().get("wf_regions")
+    assert label.code_by_role("serial").region == [0.6, 0.1, 0.3, 0.4]
+    assert label.text_fields[0].name == "date_code"
+    # Drawing an anchor is itself the statement that the artwork varies.
+    assert label.variable_data is True
+    # The flattened crop was saved as this label's artwork -- no file hunting.
+    assert label.reference_images and Path(label.reference_images[0]).is_file()
+    assert FakeDialog.reference == label.reference_images[0]
+
+
+def test_defined_regions_then_place_themselves_on_every_other_image():
+    """The point of storing fractions: draw once, applies to every image."""
+    from label_detections.core import persistence
+    from label_detections.core.labels import CodeSpec
+
+    win = _window()
+    _define(win, "wf_reuse")
+    library = persistence.load_library()
+    label = library.get("wf_reuse")
+    label.codes = [CodeSpec(role="serial", region=[0.5, 0.25, 0.25, 0.5])]
+    library.add(label, replace=True)
+    persistence.save_library(library)
+    win.library = persistence.load_library()
+
+    win.set_active_label("wf_reuse")
+    _capture(win, "wf_reuse", "another.jpg")
+    win.canvas.boxes.clear()
+    _draw(win, "spec_plate")             # box at (10, 10) 100x60
+    win.place_regions_on_canvas()
+
+    box = win.canvas.boxes[0]
+    assert box.label_id == "wf_reuse"
+    code = next(r for r in box.regions if r.get("code_role") == "serial")
+    # 50% across and 25% down a 100x60 box drawn at (10, 10).
+    assert code["points"][0] == pytest.approx([60.0, 25.0])
+
+
+def test_defining_regions_without_a_label_box_says_what_to_do():
+    win = _window()
+    _define(win, "wf_no_box")
+    win.set_active_label("wf_no_box")
+    _capture(win, "wf_no_box", "empty.jpg")
+    win.canvas.boxes.clear()
+
+    shown = {}
+    import label_detections.ui.main_window as mw_mod
+    original = mw_mod.QMessageBox.information
+    mw_mod.QMessageBox.information = lambda parent, title, text, *a, **k: shown.update(
+        {"title": title, "text": text})
+    try:
+        win.define_read_regions()
+    finally:
+        mw_mod.QMessageBox.information = original
+    assert "Draw the wf_no_box box" in shown.get("text", "")
+
+
+def test_the_action_is_reachable_without_opening_the_wizard():
+    """It was buried on a wizard page, which is why nobody found it."""
+    win = _window()
+    titles = {a.text() for a in win.actions()}
+    assert "Define read-regions from this image" in titles
+    assert "Place read-regions" in titles

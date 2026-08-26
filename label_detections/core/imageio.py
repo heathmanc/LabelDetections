@@ -26,6 +26,56 @@ from .storage import (
 IMPORT_IMAGE_EXTS = IMAGE_SUFFIXES + (".webp",)
 
 
+def rectify_quad(image_bgr: np.ndarray, quad: list[list[float]],
+                 out_width: int = 0) -> np.ndarray | None:
+    """Flatten a drawn label out of a captured frame.
+
+    The operator has already drawn the label's four corners on a real capture.
+    Warping that quad to a rectangle gives a deskewed, straight-on picture of
+    the label -- which is both the natural surface to draw read-regions on and
+    the natural reference image for the library.
+
+    It removes the need to go and find vendor artwork: the tool is already
+    collecting pictures of the label, and one of them, flattened, IS the
+    artwork. Returns None for a degenerate quad.
+    """
+    if image_bgr is None or len(quad) < 4:
+        return None
+    points = [[float(x), float(y)] for x, y in quad[:4]]
+
+    def edge(a, b):
+        return float(np.hypot(points[b][0] - points[a][0], points[b][1] - points[a][1]))
+
+    # Average opposite edges: a label on a curved battery face keystones by a
+    # few percent, and picking one edge would bake that skew into the output.
+    width = (edge(0, 1) + edge(3, 2)) / 2.0
+    height = (edge(1, 2) + edge(0, 3)) / 2.0
+    if width < 4 or height < 4:
+        return None
+
+    if out_width > 0:
+        scale = out_width / width
+        width, height = out_width, max(4.0, height * scale)
+
+    src = np.array(points, dtype=np.float32)
+    dst = np.array([[0, 0], [width - 1, 0], [width - 1, height - 1], [0, height - 1]],
+                   dtype=np.float32)
+    try:
+        matrix = cv2.getPerspectiveTransform(src, dst)
+        return cv2.warpPerspective(image_bgr, matrix, (int(round(width)), int(round(height))))
+    except cv2.error:
+        return None
+
+
+def save_reference(label_id: str, image_bgr: np.ndarray, root: Path | None = None) -> Path:
+    """Store a flattened label crop as that label's reference artwork."""
+    folder = (root or dataset_folder(label_id).parent.parent / "library") / "references"
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"{safe_token(label_id)}.png"
+    cv2.imwrite(str(path), image_bgr)
+    return path
+
+
 def save_capture(
     label_id: str,
     frame_bgr: np.ndarray,

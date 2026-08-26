@@ -140,11 +140,12 @@ PAGES = [
                      default="spec_plate", required=True,
                      help="The coarse class the model is trained on. Adding a label to an "
                           "existing family needs no retraining."),
-            Question("reference_images", "Reference images", "paths", required=True,
-                     help="Read-regions are drawn on the first of these, so at least "
-                          "one is needed. Capture a few under production lighting: "
-                          "artwork files alone look nothing like a real, slightly "
-                          "glared label."),
+            Question("reference_images", "Reference artwork", "paths",
+                     help="Optional. Normally left empty: after you draw this "
+                          "label's box on a captured image, Define Regions "
+                          "flattens that box into artwork and saves it here for "
+                          "you. Add a file only if you already have vendor "
+                          "artwork you would rather use."),
             Question("size_mm", "Physical size W x H (mm)", "size_mm",
                      validator=_optional_size,
                      help="Optional, for the record. Nothing computes with it -- "
@@ -177,14 +178,16 @@ PAGES = [
     ),
     Page(
         "regions", "Read-regions",
-        blurb="Areas inside the label that have to be read on their own. Drag them "
-              "on the reference artwork; they are stored as fractions of the label, "
-              "so they follow it onto any image at any angle. This is how text that "
-              "changes on every unit gets read: the artwork around it does not move.",
+        blurb="Areas inside the label that have to be read on their own -- a barcode, "
+              "a serial, a date code. You do not have to do this now. Finish the "
+              "wizard, capture an image, draw the label's box, then press "
+              "Define Regions: the box is flattened into straight-on artwork and you "
+              "draw on that. Regions are stored as fractions of the label, so they "
+              "then apply to every image of it, at any angle and any distance.",
         questions=[
-            Question("draw_regions", "Draw on the reference", "regions",
-                     help="Opens the artwork. Drag to add a code, a text field or "
-                          "the static anchor; the rows below fill in as you draw."),
+            Question("draw_regions", "Draw now (needs artwork)", "regions",
+                     help="Only usable if you added vendor artwork above. Otherwise "
+                          "skip this page and use Define Regions while labeling."),
         ],
     ),
     Page(

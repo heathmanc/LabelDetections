@@ -100,6 +100,8 @@ from label_detections.core import dataset_health
 from label_detections.core import storage as storage_mod
 from label_detections.core import class_stats
 from label_detections.core import persistence
+from label_detections.core import imageio
+from label_detections.core import labels as labels_mod
 from label_detections.core import annotations as ann_logic
 from label_detections.version import APP_TITLE
 from label_detections.ui import wizards
@@ -519,6 +521,15 @@ class MainWindow(QMainWindow):
 
         tools_menu.addSeparator()
 
+        define_regions_action = QAction("Define read-regions from this image", self)
+        define_regions_action.setShortcut("Ctrl+Shift+R")
+        define_regions_action.triggered.connect(self._guarded(self.define_read_regions))
+        tools_menu.addAction(define_regions_action)
+
+        edit_regions_action = QAction("Edit read-regions", self)
+        edit_regions_action.triggered.connect(self._guarded(self.edit_read_regions))
+        tools_menu.addAction(edit_regions_action)
+
         regions_action = QAction("Place read-regions", self)
         regions_action.setShortcut("Ctrl+R")
         regions_action.setToolTip(
@@ -567,6 +578,7 @@ class MainWindow(QMainWindow):
             unreviewed_action, mark_reviewed_action, force_review_action,
             capture_action, auto_label_action, validate_action,
             prelabel_action, next_queue_action, shortcuts_action, regions_action,
+            define_regions_action, edit_regions_action,
         ):
             self.addAction(action)
 
@@ -2400,6 +2412,13 @@ class MainWindow(QMainWindow):
         copy_prev.clicked.connect(self.copy_previous_labels)
         qa_btn = QPushButton("Find Problem")
         qa_btn.clicked.connect(self.find_next_problem_image)
+        define_regions_btn = QPushButton("Define Regions...")
+        define_regions_btn.setToolTip(
+            "Flatten the label box on this image into straight-on artwork and draw "
+            "the areas to read inside it -- a barcode, a serial, a date code. "
+            "Stored as fractions of the label, so they then apply to every image "
+            "of it. No external artwork file needed. (Ctrl+Shift+R)")
+        define_regions_btn.clicked.connect(self.define_read_regions)
         regions_btn = QPushButton("Place Regions")
         regions_btn.setToolTip(
             "Fill in this label's read-regions -- barcodes, text fields, the match "
@@ -2423,7 +2442,8 @@ class MainWindow(QMainWindow):
         zplus = QPushButton("+")
         zplus.clicked.connect(self.canvas.zoom_in)
 
-        right_panel_buttons = (save, save_next, copy_prev, qa_btn, regions_btn,
+        right_panel_buttons = (save, save_next, copy_prev, qa_btn,
+                               define_regions_btn, regions_btn,
                                delete, clear, clear_saved, zminus, zfit, zplus)
         for btn in right_panel_buttons:
             btn.setProperty("rightPanelButton", True)
@@ -2470,7 +2490,7 @@ class MainWindow(QMainWindow):
         v.addLayout(button_row(zminus, zfit, zplus))
         v.addLayout(button_row(save, save_next))
         v.addLayout(button_row(copy_prev, qa_btn))
-        v.addWidget(regions_btn)
+        v.addLayout(button_row(define_regions_btn, regions_btn))
         v.addLayout(button_row(delete, clear))
         v.addWidget(clear_saved)
 
@@ -4858,6 +4878,131 @@ class MainWindow(QMainWindow):
         self.status.showMessage(
             f"Placed {placed} read-region(s) from {self.label_id}'s artwork", 5000)
 
+    def define_read_regions(self) -> None:
+        """Define this label's read-regions from the label box on screen.
+
+        No external artwork needed. The tool is already collecting pictures of
+        the label, and the operator has already drawn its four corners on one --
+        so that box, flattened, *is* the artwork. It gets warped straight-on,
+        saved as the label's reference, and opened to draw on.
+
+        What comes back is stored as fractions of the label, so it then applies
+        to every other image of it, at any angle and any distance.
+        """
+        label = self.library.get(self.label_id) if self.label_id else None
+        if label is None:
+            QMessageBox.information(
+                self, "Read-Regions",
+                "Open a label first -- read-regions belong to a label, not to an image.")
+            return
+
+        box = self._label_box_for_regions(label)
+        if box is None:
+            return
+
+        frame = self.last_raw
+        if frame is None and self.current_image_path:
+            frame = cv2.imread(str(self.current_image_path))
+        if frame is None:
+            QMessageBox.information(
+                self, "Read-Regions",
+                "Open one of this label's images and draw its box first. The box is "
+                "what gets flattened into the artwork you draw regions on.")
+            return
+
+        flattened = imageio.rectify_quad(frame, box.to_dict().get("points") or [],
+                                         out_width=900)
+        if flattened is None:
+            QMessageBox.warning(
+                self, "Read-Regions",
+                "That box could not be flattened -- its corners are collinear or "
+                "too small. Redraw it around the whole label and try again.")
+            return
+
+        reference = imageio.save_reference(self.label_id, flattened)
+        self._open_region_editor(label, str(reference))
+
+    def _label_box_for_regions(self, label):
+        """The on-canvas box to flatten: the selection, else the only candidate."""
+        family = str(getattr(label, "family", "") or "")
+        candidates = [b for b in self.canvas.boxes if str(getattr(b, "label", "")) == family]
+        index = getattr(self.canvas, "selected_idx", None)
+        if index is not None and 0 <= index < len(self.canvas.boxes):
+            chosen = self.canvas.boxes[index]
+            if str(getattr(chosen, "label", "")) == family:
+                return chosen
+            QMessageBox.information(
+                self, "Read-Regions",
+                f"The selected box is a {getattr(chosen, 'label', '?')}, not a "
+                f"{family}. Select the {self.label_id} box instead.")
+            return None
+        if len(candidates) == 1:
+            return candidates[0]
+        if not candidates:
+            QMessageBox.information(
+                self, "Read-Regions",
+                f"Draw the {self.label_id} box on this image first. Regions are "
+                "positioned inside it, so it has to exist before they can.")
+            return None
+        QMessageBox.information(
+            self, "Read-Regions",
+            f"There are {len(candidates)} {family} boxes on this image. Click the "
+            "one to define regions on, then try again.")
+        return None
+
+    def _open_region_editor(self, label, reference: str) -> None:
+        """Run the region editor against ``reference`` and save what was drawn."""
+        from .region_editor import RegionEditorDialog
+
+        dialog = RegionEditorDialog(
+            reference,
+            [c.to_dict() if hasattr(c, "to_dict") else dict(c.__dict__) for c in label.codes],
+            [dict(t.__dict__) for t in label.text_fields],
+            list(label.anchor_region),
+            parent=self,
+        )
+        if not dialog.exec():
+            return
+
+        drawn = dialog.result_regions()
+        updated = labels_mod.LabelDef.from_dict({
+            **label.to_dict(),
+            "codes": drawn["codes"],
+            "text_fields": drawn["text_fields"],
+            "anchor_region": drawn["anchor_region"],
+            # A flattened capture is a better reference than vendor artwork: it
+            # is this label, under this line's lighting, through this lens.
+            "reference_images": [reference] + [
+                r for r in label.reference_images if r != reference],
+            "variable_data": bool(label.variable_data or drawn["anchor_region"]),
+        })
+        self.library.add(updated, replace=True)
+        persistence.save_library(self.library)
+        self.library = persistence.load_library()
+
+        count = len(drawn["codes"]) + len(drawn["text_fields"]) + \
+            (1 if drawn["anchor_region"] else 0)
+        self._refresh_active_label_panel()
+        self.place_regions_on_canvas()
+        self.status.showMessage(
+            f"Saved {count} read-region(s) on {self.label_id}. They now apply to "
+            "every image of it.", 8000)
+
+    def edit_read_regions(self) -> None:
+        """Re-open the regions of the active label on its saved reference."""
+        label = self.library.get(self.label_id) if self.label_id else None
+        if label is None:
+            QMessageBox.information(self, "Read-Regions", "Open a label first.")
+            return
+        references = [r for r in label.reference_images if Path(r).is_file()]
+        if not references:
+            QMessageBox.information(
+                self, "Read-Regions",
+                f"'{self.label_id}' has no reference artwork yet.\n\n"
+                "Open one of its images, draw the label box, then use "
+                "Define Read-Regions -- the box gets flattened into the artwork.")
+            return
+        self._open_region_editor(label, references[0])
     def _update_box_count(self) -> None:
         """Refresh the on-canvas tallies for the label being trained.
 

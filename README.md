@@ -119,9 +119,19 @@ click Next without reading.
 ## 5. Read-regions: nesting an area inside a label
 
 A region is an area *inside* a label that inspection reads on its own — a
-barcode, a serial, a date code. **Tools → Draw Regions** opens the label's
-reference artwork; drag a box, name it, pick whether it is a code, a text field
-or the static match anchor.
+barcode, a serial, a date code.
+
+**You never need an artwork file.** The tool is already collecting pictures of
+the label; one of them, flattened, *is* the artwork:
+
+1. Open one of the label's captured images and draw its box, as normal.
+2. **Define Regions…** on the Annotation rail (or `Ctrl+Shift+R`). The box you
+   drew is warped straight-on — tilt and perspective removed — and saved as
+   that label's reference.
+3. Drag regions on it. Name each, pick code / text field / static anchor.
+
+That flattened crop is a *better* reference than vendor artwork anyway: it is
+this label, under this line's lighting, through this lens.
 
 Regions are stored as **fractions of the label**, `[x, y, w, h]` each 0–1:
 
@@ -130,30 +140,29 @@ Regions are stored as **fractions of the label**, `[x, y, w, h]` each 0–1:
   "region": [0.66, 0.117, 0.28, 0.467] }
 ```
 
-Fractions, not millimetres, because the mapping is pure proportion. Once an
-operator draws the label's four corners on a real image,
-`core/annotations.py::apply_reference_regions` places every region by
-homography — at any angle, any distance, any resolution. **Nothing is measured
-and nothing is calibrated.** Press **Ctrl+R** while labeling and the barcode
-box appears from the artwork; hand-adjusted regions are never overwritten.
+Fractions, not millimetres, because the mapping is pure proportion. On any
+other image, drawing the label's four corners is all the positioning they need
+— `Ctrl+R` places every region by homography, at any angle, any distance, any
+resolution. **Nothing is measured and nothing is calibrated.** Hand-adjusted
+regions are never overwritten.
 
 That is also the answer to text that changes per unit. The artwork around a
-serial never moves; the serial does. The anchor region says what to match on,
-and the text region says where to read the part that changes.
+serial never moves; the serial does. The anchor region says what matching
+scores against, and a text region says where to read the part that changes.
 
-The label outline exists because a reference photo usually has margin around
-the label — everything is measured relative to that outline, not to the image.
+### What the reference image is for
 
-### What the reference image is actually for
+Honestly, three things in this order:
 
-Three things, honestly ranked:
+1. **It is the surface you draw regions on** — and it comes from a capture, so
+   there is nothing to go and find.
+2. Human documentation: which artwork this label id refers to.
+3. Input to artwork matching, *once that is built*. Nothing reads its pixels at
+   runtime today (see §10), so until then identity comes from barcode decoding
+   plus the operator's choice.
 
-1. **It is what regions are drawn on.** Without one there is nowhere to define
-   a read area, which is why it is the one required field on the Appearance page.
-2. Human documentation — which artwork this label id refers to.
-3. Input to artwork matching, *once that is built*. Nothing reads its pixels
-   at runtime today (see §9), so until then identity comes from barcode
-   decoding plus the operator's choice.
+It is optional on the Add Label page for exactly that reason: a label needs an
+id, a name and a family, and nothing else until you have an image of it.
 
 ---
 
