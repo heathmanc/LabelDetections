@@ -65,6 +65,7 @@ def count_summary(out: Path) -> str:
     groups: set[str] = set()
     total_boxes = 0
     empty_images = 0
+    augmented = 0
 
     for row in rows:
         split = str(row.get("split", "")).strip()
@@ -79,6 +80,8 @@ def count_summary(out: Path) -> str:
         total_boxes += boxes
         if boxes == 0:
             empty_images += 1
+        if _int(row, "augmented"):
+            augmented += 1
 
     lines = [
         f"Images written: {len(rows)}  (train {split_images['train']}, "
@@ -93,6 +96,9 @@ def count_summary(out: Path) -> str:
         # Backgrounds export as an empty label file on purpose, so this is a
         # count worth showing rather than a warning.
         lines.append(f"Images with no boxes (backgrounds): {empty_images}")
+    if augmented:
+        lines.append(
+            f"Of those, {augmented} are variable-region copies (train only)")
     if groups:
         lines.append(f"Capture groups: {len(groups)} (never split across train/val)")
 

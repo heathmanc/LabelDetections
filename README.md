@@ -186,6 +186,36 @@ Honestly, three things in this order:
 It is optional on the Add Label page for exactly that reason: a label needs an
 id, a name and a family, and nothing else until you have an image of it.
 
+### Regions that change per unit
+
+A date code or a serial changes on every battery, and the instinct is to hide
+that area from training. YOLO has no ignore-region — the box is the unit — but
+you mostly don't need one: a region that differs across the training set carries
+no signal for the class, so the network stops using it.
+
+**The risk is the opposite.** Collect two hundred images in one afternoon off
+one lot and the date code is *identical* in every one, which makes it a
+perfectly good shortcut for "this is a spec plate" until next month's date
+breaks detection for reasons nothing in the labels explains.
+
+**Tools → Check variable regions** measures whether that has happened: how much
+each drawn text region actually differs across a label's images, scored as
+cross-image difference over within-image contrast so the answer doesn't depend
+on how much of the region the printing covers. Identical content, brightness-only
+differences and blank regions all score 0; genuine variation scores well above.
+
+If it has, **Variable-region copies** on the Export box writes extra training
+images with those regions **grafted from other images of the same label** —
+real values, correctly lit, simply belonging to a different battery. Not
+synthesis: painting noise or fake text there would put something in the training
+set that never occurs at runtime. Labels whose regions already vary get none,
+because recombining them teaches nothing and dilutes the real images.
+
+Copies go to train only, are tagged in the manifest, and carry the original's
+labels unchanged — only pixels inside the region differ. Capturing across more
+lots is still the real fix; this is the stopgap when the images you have all
+came from one session.
+
 ---
 
 ## 6. Layout
@@ -197,6 +227,7 @@ label_detections/
 │   ├── annotations.py     nested sidecars (boxes -> regions) [new]
 │   ├── review.py          markers + the per-image gate      [rewritten]
 │   ├── dataset.py         group-aware split, coverage       [new]
+│   ├── augment.py         variable-region check + grafting  [new]
 │   ├── yolo_export.py     per-label export                  [rewritten]
 │   ├── dataset_health.py  readiness tallies                 [rewritten]
 │   ├── active_learning.py queue scoring                     [rewritten]
@@ -221,7 +252,7 @@ label_detections/
 the decision that rejects an image be tested exhaustively instead of observed
 on a conveyor.
 
-**248 tests.** The core suite needs nothing but pytest; the UI tests build the
+**318 tests.** The core suite needs nothing but pytest; the UI tests build the
 real `MainWindow` under the offscreen platform plugin, which is what caught the
 lost `@staticmethod` decorators and the canvas dropping `label_id` during this
 migration.

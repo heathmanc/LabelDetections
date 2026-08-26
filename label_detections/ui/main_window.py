@@ -103,6 +103,8 @@ from label_detections.core import persistence
 from label_detections.core import imageio
 from label_detections.core import labels as labels_mod
 from label_detections.core import annotations as ann_logic
+from label_detections.core import augment as augment_logic
+from label_detections.core import dataset as dataset_logic
 from label_detections.version import APP_TITLE
 from label_detections.ui import wizards
 from label_detections.ui.canvas import ImageCanvas
@@ -566,6 +568,13 @@ class MainWindow(QMainWindow):
 
         tools_menu.addSeparator()
 
+        variance_action = QAction("Check variable regions", self)
+        variance_action.setToolTip(
+            "Measure how much each label's date codes and serials actually differ "
+            "across its images.")
+        variance_action.triggered.connect(self._guarded(self.check_variable_regions))
+        tools_menu.addAction(variance_action)
+
         health_action = QAction("Dataset health dashboard", self)
         health_action.triggered.connect(self.show_dataset_health)
         tools_menu.addAction(health_action)
@@ -592,6 +601,7 @@ class MainWindow(QMainWindow):
             capture_action, auto_label_action, validate_action,
             prelabel_action, next_queue_action, shortcuts_action, regions_action,
             define_regions_action, edit_regions_action, replace_artwork_action,
+            variance_action,
         ):
             self.addAction(action)
 
@@ -2591,6 +2601,16 @@ class MainWindow(QMainWindow):
         self.export_task_combo = QComboBox()
         self.export_task_combo.addItem("OBB dataset - all labeled classes", "obb")
         self.export_task_combo.addItem("Detect boxes dataset - compatibility", "detect")
+        self.export_augment_spin = QSpinBox()
+        self.export_augment_spin.setRange(0, 10)
+        self.export_augment_spin.setValue(0)
+        self.export_augment_spin.setToolTip(
+            "Extra training copies per image with variable regions -- date codes, "
+            "serials -- grafted from other images of the same label.\n\n"
+            "Only written for labels whose regions turn out to be near-identical "
+            "across the dataset; ones that already vary get none, because "
+            "recombining them teaches nothing and dilutes the real images.\n\n"
+            "Tools > Check variable regions says which is which.")
         exp = QPushButton("Export Dataset")
         exp.clicked.connect(self.export_yolo)
         exp_all = QPushButton("Export All")
@@ -2611,6 +2631,10 @@ class MainWindow(QMainWindow):
         export_btn_row.addWidget(exp_all)
         ev.addWidget(QLabel("Export task"))
         ev.addWidget(self.export_task_combo)
+        augment_row = QHBoxLayout()
+        augment_row.addWidget(QLabel("Variable-region copies"))
+        augment_row.addWidget(self.export_augment_spin, 1)
+        ev.addLayout(augment_row)
         ev.addLayout(export_btn_row)
         export_note = QLabel("Exports annotation class names as-is. Reviewed and force-reviewed images only.")
         export_note.setWordWrap(True)
@@ -5656,6 +5680,61 @@ class MainWindow(QMainWindow):
         buttons.accepted.connect(dlg.accept)
         v.addWidget(buttons)
         dlg.exec()
+    def check_variable_regions(self) -> None:
+        """Say whether each label's date codes and serials really differ.
+
+        The question this answers is whether a varying region is a problem at
+        all. One that differs across the dataset carries no signal for the class
+        and the model already ignores it. One that is the same picture in every
+        image is a shortcut waiting to be learned -- and the day a new value
+        appears, detection breaks for reasons nothing in the labels explains.
+        """
+        library = self.library
+        entries = []
+        for label in library.all():
+            for image in list_images(label.label_id):
+                data = storage_mod.read_json(
+                    storage_mod.annotation_path(label.label_id, image.name))
+                if not data or not review_logic.export_ready(
+                        review_logic.annotation_status(data, label.label_id)):
+                    continue
+                entries.append(dataset_logic.entry_from_annotation(
+                    label.label_id, str(image), data))
+
+        if not entries:
+            QMessageBox.information(
+                self, "Variable Regions",
+                "Nothing reviewed yet, so there is nothing to measure.")
+            return
+
+        self.status.showMessage("Measuring variable regions...", 2000)
+        QApplication.processEvents()
+        reports = augment_logic.scan_entries(entries, library)
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Variable Regions")
+        dlg.resize(760, 420)
+        v = QVBoxLayout(dlg)
+        body = QTextEdit()
+        body.setReadOnly(True)
+        body.setPlainText(augment_logic.scan_text(reports))
+        v.addWidget(body)
+        note = QLabel(
+            "Capturing across more lots is the real fix. Variable-region copies at "
+            "export are the stopgap when the images you have all came from one "
+            "session."
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet("color: #94a3b8;")
+        v.addWidget(note)
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons.rejected.connect(dlg.reject)
+        buttons.accepted.connect(dlg.accept)
+        v.addWidget(buttons)
+        dlg.exec()
+        self.status.showMessage(
+            f"Checked {len(reports)} variable region(s) across {len(entries)} images",
+            6000)
     def show_shortcuts_reference(self) -> None:
         """Cheat-sheet of keyboard shortcuts (the menu bar is hidden)."""
         groups = [
@@ -5779,6 +5858,11 @@ class MainWindow(QMainWindow):
         self.clahe_clip_slider.setValue(20)
         self.clahe_grid_slider.setValue(8)
 
+    def _export_augment(self) -> int:
+        if not hasattr(self, "export_augment_spin"):
+            return 0
+        return int(self.export_augment_spin.value())
+
     def _export_task(self) -> str:
         return self.export_task_combo.currentData() if hasattr(self, "export_task_combo") else "obb"
 
@@ -5797,7 +5881,8 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Export", "Open a label first.")
             return
         try:
-            out = export_label_yolo(self.label_id, task=task, reviewed_only=reviewed_only)
+            out = export_label_yolo(self.label_id, task=task, reviewed_only=reviewed_only,
+                                    library=self.library, augment=self._export_augment())
         except Exception as e:
             QMessageBox.warning(self, "Export", str(e))
             return
@@ -5825,7 +5910,9 @@ class MainWindow(QMainWindow):
         task = self._export_task()
         reviewed_only = self._export_reviewed_only()
         try:
-            out = export_all_labels_yolo(task=task, reviewed_only=reviewed_only)
+            out = export_all_labels_yolo(task=task, reviewed_only=reviewed_only,
+                                          library=self.library,
+                                          augment=self._export_augment())
         except Exception as e:
             QMessageBox.warning(self, "Export All Labels", str(e))
             return

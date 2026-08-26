@@ -26,6 +26,7 @@ import json
 import shutil
 from pathlib import Path
 
+from . import augment as augment_logic
 from . import dataset as dataset_logic
 from .review import annotation_reviewed as _annotation_reviewed
 from .review import is_background_annotation as _is_background
@@ -131,17 +132,34 @@ def collect_entries(label_id: str, reviewed_only: bool = True) -> list[dataset_l
     return entries
 
 
+def _write_label_file(out: Path, split: str, stem: str, data: dict,
+                      class_index: dict[str, int], task: str) -> int:
+    """Write one label file and return how many boxes it carried."""
+    line_for = _obb_line if task == "obb" else _detect_line
+    width = int(data.get("width", 0) or 0)
+    height = int(data.get("height", 0) or 0)
+    lines: list[str] = []
+    for box in data.get("boxes", []) or []:
+        family = _family(box)
+        if family not in class_index:
+            continue
+        line = line_for(box, width, height, class_index[family])
+        if line:
+            lines.append(line)
+    (out / "labels" / split / f"{stem}.txt").write_text(
+        "\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+    return len(lines)
+
+
 def _write_split(out: Path, entries: list[dataset_logic.Entry], class_index: dict[str, int],
                  split: str, task: str) -> list[str]:
     """Copy images and write label files for one split; returns manifest rows."""
     (out / "images" / split).mkdir(parents=True, exist_ok=True)
     (out / "labels" / split).mkdir(parents=True, exist_ok=True)
 
-    line_for = _obb_line if task == "obb" else _detect_line
     rows: list[str] = []
     for entry in entries:
         image = Path(entry.image)
-        data = entry.annotation
         # Prefix with the label id: two datasets can hold identically named
         # frames, and a plain copy would have one silently overwrite the other.
         out_name = f"{safe_token(entry.label_id)}__{image.name}"
@@ -149,29 +167,83 @@ def _write_split(out: Path, entries: list[dataset_logic.Entry], class_index: dic
             shutil.copy2(image, out / "images" / split / out_name)
         except OSError:
             continue
-
-        width = int(data.get("width", 0) or 0)
-        height = int(data.get("height", 0) or 0)
-        lines: list[str] = []
-        for box in data.get("boxes", []) or []:
-            family = _family(box)
-            if family not in class_index:
-                continue
-            line = line_for(box, width, height, class_index[family])
-            if line:
-                lines.append(line)
-
-        (out / "labels" / split / f"{Path(out_name).stem}.txt").write_text(
-            "\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
-        rows.append(f"{split},{entry.label_id},{out_name},{len(lines)},"
-                    f"{entry.session or entry.source or ''}")
+        boxes = _write_label_file(out, split, Path(out_name).stem,
+                                  entry.annotation, class_index, task)
+        rows.append(f"{split},{entry.label_id},{out_name},{boxes},"
+                    f"{entry.session or entry.source or ''},0")
     return rows
+
+
+def _write_augmented(out: Path, entries: list[dataset_logic.Entry],
+                     class_index: dict[str, int], task: str, library,
+                     copies: int, seed: int) -> tuple[list[str], list[str]]:
+    """Extra training images with each label's variable regions replaced.
+
+    Train only, never validation: recombined images validate nothing except how
+    well the model handles recombined images.
+
+    Returns (manifest rows, notes for the report).
+    """
+    import random
+
+    rng = random.Random(seed)
+    rows: list[str] = []
+    notes: list[str] = []
+    if copies <= 0 or library is None:
+        return rows, notes
+
+    by_label: dict[str, list] = {}
+    for entry in entries:
+        by_label.setdefault(str(entry.label_id), []).append(entry)
+
+    for label_id, group in sorted(by_label.items()):
+        label = library.get(label_id)
+        if label is None or not augment_logic.variable_regions(label):
+            continue
+        reports = augment_logic.scan_entries(group, library)
+        planned = augment_logic.plan_copies(reports, copies)
+        if not planned:
+            notes.append(
+                f"{label_id}: variable regions already vary across its images, so "
+                "no extra copies were written.")
+            continue
+
+        donors = augment_logic.donor_pool(group, label)
+        written = 0
+        for entry in group:
+            variants = augment_logic.augmented_variants(
+                entry, label, planned, donors, rng)
+            for index, image in enumerate(variants):
+                stem = f"{safe_token(label_id)}__aug{index}__{Path(entry.image).stem}"
+                target = out / "images" / "train" / f"{stem}.jpg"
+                try:
+                    import cv2
+                    if not cv2.imwrite(str(target), image):
+                        continue
+                except Exception:
+                    continue
+                boxes = _write_label_file(out, "train", stem, entry.annotation,
+                                          class_index, task)
+                rows.append(f"train,{label_id},{target.name},{boxes},"
+                            f"{entry.session or entry.source or ''},1")
+                written += 1
+        notes.append(
+            f"{label_id}: {written} extra training image(s) written with variable "
+            f"regions grafted from other images of the same label.")
+    return rows, notes
 
 
 def write_dataset(out: Path, entries: list[dataset_logic.Entry], *, task: str = "obb",
                   split_train: float = DEFAULT_SPLIT_TRAIN, seed: int = DEFAULT_SEED,
-                  reviewed_only: bool = True) -> Path:
-    """Write a YOLO dataset from already-collected entries."""
+                  reviewed_only: bool = True, library=None,
+                  augment: int = 0) -> Path:
+    """Write a YOLO dataset from already-collected entries.
+
+    ``augment`` asks for that many extra training copies per image of any label
+    whose variable regions turn out to be constant across the dataset -- see
+    ``core/augment.py``. Labels whose regions already vary get none, because
+    recombining them teaches nothing and dilutes the real images.
+    """
     families: list[str] = []
     seen: set[str] = set()
     labeled = 0
@@ -203,9 +275,13 @@ def write_dataset(out: Path, entries: list[dataset_logic.Entry], *, task: str = 
         shutil.rmtree(out)
     out.mkdir(parents=True, exist_ok=True)
 
-    rows = ["split,label_id,image,boxes,group"]
+    rows = ["split,label_id,image,boxes,group,augmented"]
     rows += _write_split(out, train, class_index, "train", task)
     rows += _write_split(out, val, class_index, "val", task)
+
+    augmented_rows, augment_notes = _write_augmented(
+        out, train, class_index, task, library, augment, seed)
+    rows += augmented_rows
 
     names_block = "\n".join(f"  {i}: {name}" for i, name in enumerate(families))
     (out / "data.yaml").write_text(
@@ -223,13 +299,27 @@ def write_dataset(out: Path, entries: list[dataset_logic.Entry], *, task: str = 
     # The split report ships with the dataset on purpose: a reviewer needs to
     # see that no capture group straddles train and val before trusting a
     # validation number.
-    (out / "split_report.txt").write_text(report.text() + "\n", encoding="utf-8")
+    split_text = report.text()
+    if augment_notes:
+        split_text += "\n\nVariable regions:\n" + "\n".join(
+            f"  {note}" for note in augment_notes)
+    (out / "split_report.txt").write_text(split_text + "\n", encoding="utf-8")
+
+    # The check ships with the dataset whether or not anything was augmented: a
+    # region that is the same picture in every image is worth knowing about
+    # before training, not after a month of drift.
+    if library is not None:
+        scan = augment_logic.scan_entries(entries, library)
+        if scan:
+            (out / "variable_regions.txt").write_text(
+                augment_logic.scan_text(scan) + "\n", encoding="utf-8")
     return out
 
 
 def export_label_yolo(label_id: str, *, task: str = "obb", reviewed_only: bool = True,
                       split_train: float = DEFAULT_SPLIT_TRAIN,
-                      seed: int = DEFAULT_SEED, out: Path | None = None) -> Path:
+                      seed: int = DEFAULT_SEED, out: Path | None = None,
+                      library=None, augment: int = 0) -> Path:
     """Export one label's dataset on its own.
 
     Useful for checking a single label in isolation. The normal training run
@@ -244,12 +334,14 @@ def export_label_yolo(label_id: str, *, task: str = "obb", reviewed_only: bool =
         )
     target = out or (EXPORT_DIR / f"{safe_token(label_id)}_{task}")
     return write_dataset(target, entries, task=task, split_train=split_train,
-                         seed=seed, reviewed_only=reviewed_only)
+                         seed=seed, reviewed_only=reviewed_only,
+                         library=library, augment=augment)
 
 
 def export_all_labels_yolo(*, task: str = "obb", reviewed_only: bool = True,
                            split_train: float = DEFAULT_SPLIT_TRAIN,
-                           seed: int = DEFAULT_SEED, out: Path | None = None) -> Path:
+                           seed: int = DEFAULT_SEED, out: Path | None = None,
+                           library=None, augment: int = 0) -> Path:
     """Export every label's dataset into one training set.
 
     This is the normal export. Labels are *trained* one at a time in the sense
@@ -267,4 +359,5 @@ def export_all_labels_yolo(*, task: str = "obb", reviewed_only: bool = True,
         )
     target = out or (EXPORT_DIR / f"all_labels_{task}")
     return write_dataset(target, entries, task=task, split_train=split_train,
-                         seed=seed, reviewed_only=reviewed_only)
+                         seed=seed, reviewed_only=reviewed_only,
+                         library=library, augment=augment)
