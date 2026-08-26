@@ -98,12 +98,15 @@ The ones that earn their keep:
 
 | Question | Why |
 |---|---|
-| **Physical size (mm)** | Gives every detection a real-world scale. A box that swallowed two labels has a badly wrong aspect ratio and is caught as a misdetection instead of reported as a defect. |
+| **Read-regions** | The areas inside the label that have to be read on their own. See §5. |
 | **Variable data + anchor** | A label carrying a per-unit serial matches against its unchanging artwork only. Without this, every unit looks like a mismatch. |
-| **Code region on the artwork** | The runtime crops straight to the barcode from the full-resolution frame instead of searching for it — the difference between decoding a 10-mil DataMatrix and not. `core/annotations.py::apply_reference_regions` places the box by homography, so drawing four corners yields the barcode box for free. |
-| **X-dimension** | Turns "is the camera sharp enough?" into a number, quoted back in the wizard, before anyone runs a trial. |
+| **Printed width + X-dimension** | Optional, off the print spec. Turns "is the camera sharp enough?" into a number, quoted back in the wizard, before anyone runs a trial. |
 | **Surface** | Gloss and foil glare. Decides whether artwork matching works at all and whether the line needs cross-polarised lighting. |
 | **Looks like these labels** | The look-alikes. Their images are the hard negatives that stop the two being swapped. |
+
+Physical size is **optional and unused** — nothing computes with it. Region
+placement is proportional, so nothing has to be measured or calibrated for
+distance.
 
 The wizard is **data**: pages of questions with kinds, validators and
 `visible_when` conditions, in `core/label_wizard.py`. Adding a question is a
@@ -113,12 +116,53 @@ click Next without reading.
 
 ---
 
-## 5. Layout
+## 5. Read-regions: nesting an area inside a label
+
+A region is an area *inside* a label that inspection reads on its own — a
+barcode, a serial, a date code. **Tools → Draw Regions** opens the label's
+reference artwork; drag a box, name it, pick whether it is a code, a text field
+or the static match anchor.
+
+Regions are stored as **fractions of the label**, `[x, y, w, h]` each 0–1:
+
+```json
+{ "role": "serial", "symbology": "datamatrix", "policy": "must_decode",
+  "region": [0.66, 0.117, 0.28, 0.467] }
+```
+
+Fractions, not millimetres, because the mapping is pure proportion. Once an
+operator draws the label's four corners on a real image,
+`core/annotations.py::apply_reference_regions` places every region by
+homography — at any angle, any distance, any resolution. **Nothing is measured
+and nothing is calibrated.** Press **Ctrl+R** while labeling and the barcode
+box appears from the artwork; hand-adjusted regions are never overwritten.
+
+That is also the answer to text that changes per unit. The artwork around a
+serial never moves; the serial does. The anchor region says what to match on,
+and the text region says where to read the part that changes.
+
+The label outline exists because a reference photo usually has margin around
+the label — everything is measured relative to that outline, not to the image.
+
+### What the reference image is actually for
+
+Three things, honestly ranked:
+
+1. **It is what regions are drawn on.** Without one there is nowhere to define
+   a read area, which is why it is the one required field on the Appearance page.
+2. Human documentation — which artwork this label id refers to.
+3. Input to artwork matching, *once that is built*. Nothing reads its pixels
+   at runtime today (see §9), so until then identity comes from barcode
+   decoding plus the operator's choice.
+
+---
+
+## 6. Layout
 
 ```text
 label_detections/
 ├── core/                  stdlib only -- no Qt, no OpenCV in the logic
-│   ├── labels.py          the label library schema          [new]
+│   ├── labels.py          the label library + read-regions  [new]
 │   ├── annotations.py     nested sidecars (boxes -> regions) [new]
 │   ├── review.py          markers + the per-image gate      [rewritten]
 │   ├── dataset.py         group-aware split, coverage       [new]
@@ -137,6 +181,7 @@ label_detections/
 └── ui/
     ├── main_window.py     the app                           [migrated]
     ├── canvas.py          OBB canvas, now identity-aware    [ported + extended]
+    ├── region_editor.py   draw read-regions on artwork      [new]
     ├── flow_dialog.py     generic renderer for any Flow     [new]
     └── wizards.py         the add-a-label entry point       [new]
 ```
@@ -145,14 +190,14 @@ label_detections/
 the decision that rejects an image be tested exhaustively instead of observed
 on a conveyor.
 
-**225 tests.** The core suite needs nothing but pytest; the UI tests build the
+**248 tests.** The core suite needs nothing but pytest; the UI tests build the
 real `MainWindow` under the offscreen platform plugin, which is what caught the
 lost `@staticmethod` decorators and the canvas dropping `label_id` during this
 migration.
 
 ---
 
-## 6. The split bug worth knowing about
+## 7. The split bug worth knowing about
 
 `core/dataset.py` splits by **group**, never by image.
 
@@ -172,7 +217,7 @@ trusting a number.
 
 ---
 
-## 7. Running it
+## 8. Running it
 
 ```bash
 pip install -r requirements.txt
@@ -207,7 +252,7 @@ data/
 
 ---
 
-## 8. Two rules inherited, and worth keeping
+## 9. Two rules inherited, and worth keeping
 
 **Only a review marker this tool wrote counts as reviewed.** Runtime and
 third-party JSON is full of generic `reviewed: true` and `review_status: ok`
@@ -221,11 +266,11 @@ edited, then saved — is the bug that cost bunglabel a release, and
 
 ---
 
-## 9. Not built yet
+## 10. Not built yet
 
 - Decode-on-draw: run the barcode decoder the moment a code region exists, so
-  labeling is self-verifying. `core/labels.py::CodeSpec` already carries the
-  symbology and X-dimension; the decoder call is the missing piece.
+  labeling is self-verifying. The regions and their symbologies are already
+  there; the decoder call is the missing piece.
 - Reference matching and OCR — the identity half of stage two.
 - Synthetic sample generation from artwork.
 - Auto-identify on draw (the matcher pre-filling `label_id`).

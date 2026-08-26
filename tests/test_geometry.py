@@ -45,11 +45,11 @@ def test_quad_size_averages_opposite_edges():
     assert h == pytest.approx(50.0, abs=1.0)
 
 
-def test_homography_round_trip_through_reference_space():
-    """A pixel mapped to mm and back must land where it started."""
+def test_homography_round_trip_through_label_space():
+    """A pixel mapped to label space and back must land where it started."""
     quad = [[100, 50], [700, 80], [690, 400], [90, 380]]
-    to_ref = geo.homography_to_reference(quad, 300.0, 180.0)
-    from_ref = geo.homography_from_reference(quad, 300.0, 180.0)
+    to_ref = geo.homography_to_unit(quad)
+    from_ref = geo.homography_from_unit(quad)
     for px, py in [(120, 60), (400, 200), (650, 350)]:
         mx, my = geo.apply_homography(to_ref, px, py)
         bx, by = geo.apply_homography(from_ref, mx, my)
@@ -57,32 +57,45 @@ def test_homography_round_trip_through_reference_space():
         assert by == pytest.approx(py, abs=1e-6)
 
 
-def test_homography_maps_corners_exactly():
+def test_homography_maps_corners_onto_the_unit_square():
     quad = [[10, 20], [210, 25], [205, 125], [5, 120]]
-    to_ref = geo.homography_to_reference(quad, 100.0, 50.0)
+    to_ref = geo.homography_to_unit(quad)
     assert geo.apply_homography(to_ref, *quad[0]) == pytest.approx((0.0, 0.0), abs=1e-9)
-    assert geo.apply_homography(to_ref, *quad[2]) == pytest.approx((100.0, 50.0), abs=1e-9)
+    assert geo.apply_homography(to_ref, *quad[2]) == pytest.approx((1.0, 1.0), abs=1e-9)
 
 
-def test_place_reference_rect_puts_a_code_where_the_artwork_says():
+def test_place_unit_rect_puts_a_code_where_the_artwork_says():
     """The labeling shortcut: draw the label, get the barcode box for free."""
-    label_quad = rect(100, 100, 200, 120)      # 200x120 px for a 100x60 mm label
-    placed = geo.place_reference_rect(label_quad, 100.0, 60.0, [10, 10, 40, 20])
-    assert placed[0] == pytest.approx([120.0, 120.0])
-    assert placed[2] == pytest.approx([200.0, 160.0])
+    label_quad = rect(100, 100, 200, 120)
+    placed = geo.place_unit_rect(label_quad, [0.1, 0.1, 0.4, 0.3])
+    assert placed[0] == pytest.approx([120.0, 112.0])
+    assert placed[2] == pytest.approx([200.0, 148.0])
 
 
-def test_place_reference_rect_follows_a_rotated_label():
+def test_placement_needs_no_size_and_no_calibration():
+    """The same fractions land proportionally on a label of any size."""
+    small = geo.place_unit_rect(rect(0, 0, 100, 60), [0.25, 0.5, 0.5, 0.25])
+    large = geo.place_unit_rect(rect(0, 0, 400, 240), [0.25, 0.5, 0.5, 0.25])
+    assert small[0] == pytest.approx([25.0, 30.0])
+    assert large[0] == pytest.approx([100.0, 120.0])
+
+
+def test_place_unit_rect_follows_a_rotated_label():
     upright = rect(0, 0, 100, 100)
     rotated = [[0, 0], [0, 100], [-100, 100], [-100, 0]]
-    a = geo.place_reference_rect(upright, 100.0, 100.0, [10, 20, 30, 30])
-    b = geo.place_reference_rect(rotated, 100.0, 100.0, [10, 20, 30, 30])
+    a = geo.place_unit_rect(upright, [0.1, 0.2, 0.3, 0.3])
+    b = geo.place_unit_rect(rotated, [0.1, 0.2, 0.3, 0.3])
     assert a != b
     # Same shape, just turned: the placed region keeps its size.
     assert geo.quad_size(a) == pytest.approx(geo.quad_size(b), abs=1e-6)
 
 
+def test_a_region_with_no_area_places_nothing():
+    assert geo.place_unit_rect(rect(0, 0, 10, 10), [0.1, 0.1, 0.0, 0.0]) is None
+    assert geo.place_unit_rect(rect(0, 0, 10, 10), []) is None
+
+
 def test_degenerate_quad_returns_none_instead_of_raising():
     collapsed = [[0, 0], [0, 0], [0, 0], [0, 0]]
-    assert geo.homography_to_reference(collapsed, 10.0, 10.0) is None
-    assert geo.place_reference_rect(collapsed, 10.0, 10.0, [1, 1, 2, 2]) is None
+    assert geo.homography_to_unit(collapsed) is None
+    assert geo.place_unit_rect(collapsed, [0.1, 0.1, 0.2, 0.2]) is None

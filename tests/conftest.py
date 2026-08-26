@@ -22,22 +22,24 @@ def rect(x, y, w, h):
 @pytest.fixture
 def library():
     plate = LabelDef(label_id="spec_plate_31agm", family="spec_plate",
-                     size_mm=[90.0, 60.0], reference_images=["ref.png"],
+                     reference_images=["ref.png"],
                      confusable_with=["spec_plate_27agm"])
     plate.codes = [CodeSpec(role="serial", symbology="datamatrix",
                             policy="must_match_pattern", pattern=r"^SN\d{6}$",
-                            region_mm=[10, 10, 30, 30], x_dim_mm=0.254)]
-    plate.text_fields = [TextField(name="date_code", region_mm=[10, 45, 60, 10])]
+                            region=[0.1, 0.1, 0.33, 0.5],
+                            code_width_mm=30.0, x_dim_mm=0.254)]
+    plate.text_fields = [TextField(name="date_code", region=[0.1, 0.75, 0.66, 0.16])]
 
-    tag = LabelDef(label_id="trace_tag", family="trace_tag", size_mm=[50.0, 25.0],
+    tag = LabelDef(label_id="trace_tag", family="trace_tag",
                    reference_images=["tag.png"])
     tag.codes = [CodeSpec(role="serial", symbology="code128", policy="must_decode",
-                          region_mm=[5, 5, 40, 12], x_dim_mm=0.33)]
+                          region=[0.1, 0.2, 0.8, 0.48],
+                          code_width_mm=40.0, x_dim_mm=0.33)]
 
-    warn = LabelDef(label_id="warning_en", family="warning_label", size_mm=[40.0, 30.0],
+    warn = LabelDef(label_id="warning_en", family="warning_label",
                     reference_images=["warn.png"])
     other = LabelDef(label_id="spec_plate_27agm", family="spec_plate",
-                     size_mm=[90.0, 60.0], reference_images=["other.png"])
+                     reference_images=["other.png"])
     return LabelLibrary([plate, tag, warn, other])
 
 

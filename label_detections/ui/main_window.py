@@ -519,6 +519,13 @@ class MainWindow(QMainWindow):
 
         tools_menu.addSeparator()
 
+        regions_action = QAction("Place read-regions", self)
+        regions_action.setShortcut("Ctrl+R")
+        regions_action.setToolTip(
+            "Fill in the active label's read-regions from its artwork.")
+        regions_action.triggered.connect(self._guarded(self.place_regions_on_canvas))
+        tools_menu.addAction(regions_action)
+
         prelabel_action = QAction("Pre-label unlabeled && review (model)", self)
         prelabel_action.setShortcut("Ctrl+Shift+P")
         prelabel_action.triggered.connect(self.prelabel_and_review)
@@ -559,7 +566,7 @@ class MainWindow(QMainWindow):
             next_action, prev_action,
             unreviewed_action, mark_reviewed_action, force_review_action,
             capture_action, auto_label_action, validate_action,
-            prelabel_action, next_queue_action, shortcuts_action,
+            prelabel_action, next_queue_action, shortcuts_action, regions_action,
         ):
             self.addAction(action)
 
@@ -1962,6 +1969,10 @@ class MainWindow(QMainWindow):
         for box in boxes:
             if family and str(box.get("label", "")) == family:
                 box["label_id"] = self.label_id
+                # The read-regions follow from the four corners just drawn, so
+                # the operator confirms a barcode box rather than drawing one.
+                # Hand-adjusted regions are preserved.
+                ann_logic.apply_reference_regions(box, label)
         return boxes
     def _refresh_library_label(self) -> None:
         """Show the active library path, how it was chosen, and any pending change."""
@@ -2389,6 +2400,12 @@ class MainWindow(QMainWindow):
         copy_prev.clicked.connect(self.copy_previous_labels)
         qa_btn = QPushButton("Find Problem")
         qa_btn.clicked.connect(self.find_next_problem_image)
+        regions_btn = QPushButton("Place Regions")
+        regions_btn.setToolTip(
+            "Fill in this label's read-regions -- barcodes, text fields, the match "
+            "anchor -- from its artwork. They are stored as fractions of the label, "
+            "so drawing its four corners is all the positioning they need. (Ctrl+R)")
+        regions_btn.clicked.connect(self.place_regions_on_canvas)
         delete = QPushButton("Delete Box")
         delete.setToolTip("Delete only the selected on-screen box. Click Save when you want to write the change.")
         delete.clicked.connect(self.canvas.delete_selected)
@@ -2406,7 +2423,8 @@ class MainWindow(QMainWindow):
         zplus = QPushButton("+")
         zplus.clicked.connect(self.canvas.zoom_in)
 
-        right_panel_buttons = (save, save_next, copy_prev, qa_btn, delete, clear, clear_saved, zminus, zfit, zplus)
+        right_panel_buttons = (save, save_next, copy_prev, qa_btn, regions_btn,
+                               delete, clear, clear_saved, zminus, zfit, zplus)
         for btn in right_panel_buttons:
             btn.setProperty("rightPanelButton", True)
             btn.setMinimumHeight(24)
@@ -2452,6 +2470,7 @@ class MainWindow(QMainWindow):
         v.addLayout(button_row(zminus, zfit, zplus))
         v.addLayout(button_row(save, save_next))
         v.addLayout(button_row(copy_prev, qa_btn))
+        v.addWidget(regions_btn)
         v.addLayout(button_row(delete, clear))
         v.addWidget(clear_saved)
 
@@ -4812,6 +4831,32 @@ class MainWindow(QMainWindow):
         if str(label).startswith("retainer") or class_id == 2:
             return "retainer"
         return str(label)
+
+    def place_regions_on_canvas(self) -> None:
+        """Fill in the active label's read-regions on every matching box.
+
+        Runs after a draw, so the barcode and text areas appear the moment the
+        label's corners exist -- the whole point of storing them as fractions of
+        the label. Purely visual until Save, and a single Undo step.
+        """
+        label = self.library.get(self.label_id) if self.label_id else None
+        if label is None or not label.regions():
+            return
+        family = str(getattr(label, "family", "") or "")
+        placed = 0
+        if hasattr(self.canvas, "push_undo_snapshot"):
+            self.canvas.push_undo_snapshot()
+        for box in self.canvas.boxes:
+            if str(getattr(box, "label", "")) != family:
+                continue
+            payload = box.to_dict()
+            ann_logic.apply_reference_regions(payload, label)
+            box.label_id = self.label_id
+            box.regions = payload.get("regions", [])
+            placed += len(box.regions)
+        self.canvas.update()
+        self.status.showMessage(
+            f"Placed {placed} read-region(s) from {self.label_id}'s artwork", 5000)
 
     def _update_box_count(self) -> None:
         """Refresh the on-canvas tallies for the label being trained.

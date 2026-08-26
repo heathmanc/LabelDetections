@@ -8,19 +8,22 @@ audited).
 
 The questions that earn their keep, and why:
 
-* **physical size** -- gives every detection a millimetre scale, so a box that
-  swallowed two labels is caught as a misdetection instead of being reported
-  as a defect on the battery.
+* **read-regions** -- the areas inside the label that have to be read on their
+  own: a barcode, a serial, a date code. Drawn on the reference artwork and
+  stored as fractions of the label, so once someone draws the label's four
+  corners on a real image every region follows by homography, at any angle and
+  any distance. Nothing is measured and nothing is calibrated.
 * **variable data / anchor** -- a label carrying a per-unit serial matches
   against its unchanging artwork only. Without this every unit looks like a
-  mismatch.
-* **code region on the artwork** -- the runtime crops straight to the barcode
-  from the full-resolution frame instead of searching for it, which is both
-  faster and the difference between decoding a 10-mil DataMatrix and not.
-* **surface** -- gloss and foil decide whether reference matching works at all
+  mismatch, and the region is what says where the changing part lives.
+* **surface** -- gloss and foil decide whether artwork matching works at all
   and whether the line needs cross-polarisation.
 * **severity** -- what missing this label should do. Asked once, here, rather
   than re-litigated in every recipe.
+
+Physical numbers are asked for in exactly one place: a code's printed width and
+module size, both optional, both off the print spec, and both only to answer
+"can the camera resolve this symbol at all".
 """
 from __future__ import annotations
 
@@ -43,28 +46,32 @@ def _valid_regex(value: Any, _answers: dict[str, Any]) -> str:
     return ""
 
 
-def _positive_size(value: Any, _answers: dict[str, Any]) -> str:
+def _optional_size(value: Any, _answers: dict[str, Any]) -> str:
+    """Size is documentation. Nothing computes with it, so only reject nonsense."""
+    if not value or not any(value):
+        return ""
     try:
         w, h = float(value[0]), float(value[1])
     except Exception:
-        return "Size must be width and height in mm."
-    if w <= 0 or h <= 0:
-        return ("Physical size must be greater than zero -- it is the scale sanity "
-                "check that separates a misdetection from a defect.")
+        return "Size must be width and height in mm, or left blank."
+    if w < 0 or h < 0:
+        return "Size cannot be negative."
     return ""
 
 
-def _rect(value: Any, _answers: dict[str, Any]) -> str:
+def _region(value: Any, _answers: dict[str, Any]) -> str:
+    """Regions are fractions of the label, drawn rather than typed."""
     if not value:
         return ""
     try:
         x, y, w, h = (float(v) for v in list(value)[:4])
     except Exception:
-        return "Region must be x, y, width, height in mm."
+        return "Region must be x, y, width, height as fractions of the label."
     if w <= 0 or h <= 0:
         return "Region width and height must be greater than zero."
-    if x < 0 or y < 0:
-        return "Region origin cannot be negative -- it is measured from the label's top-left."
+    if x < 0 or y < 0 or x + w > 1.001 or y + h > 1.001:
+        return ("Region runs outside the label. Values are fractions of the label "
+                "itself, 0 to 1 -- draw it on the reference rather than typing it.")
     return ""
 
 
@@ -74,11 +81,15 @@ CODE_COLUMNS = [
     Question("symbology", "Symbology", "choice", choices=SYMBOLOGIES, default="datamatrix"),
     Question("policy", "Policy", "choice", choices=CODE_POLICIES, default="must_decode",
              help="present = the code must be there; decode = it must be readable."),
-    Question("region_mm", "Region on artwork (mm)", "rect_mm", validator=_rect,
-             help="Draw it on the reference image. Lets the runtime crop straight to the code."),
-    Question("x_dim_mm", "X-dimension / cell (mm)", "float", default=0.254,
-             help="Narrow-bar width, or 2D cell size. Decides whether your camera can read it."),
-    Question("quiet_zone_mm", "Quiet zone (mm)", "float", default=2.54),
+    Question("region", "Region on the label", "region", validator=_region,
+             help="Fractions of the label, 0 to 1. Use Draw Regions rather than "
+                  "typing: the runtime crops straight here instead of searching."),
+    Question("code_width_mm", "Printed width (mm)", "float", default=0.0,
+             help="Optional, off the print spec. Only used to work out whether the "
+                  "camera can resolve the symbol."),
+    Question("x_dim_mm", "X-dimension / cell (mm)", "float", default=0.0,
+             help="Optional. Narrow-bar width, or 2D cell size, from the print spec."),
+    Question("quiet_zone_mm", "Quiet zone (mm)", "float", default=0.0),
     Question("pattern", "Content pattern", "text", validator=_valid_regex,
              placeholder="^SN[0-9]{10}$"),
     Question("grade", "Print-grade it", "bool", default=False,
@@ -87,7 +98,9 @@ CODE_COLUMNS = [
 
 TEXT_COLUMNS = [
     Question("name", "Field name", "text", required=True, placeholder="date_code"),
-    Question("region_mm", "Region on artwork (mm)", "rect_mm", validator=_rect),
+    Question("region", "Region on the label", "region", validator=_region,
+             help="Fractions of the label. Draw it -- this is what finds text that "
+                  "changes on every unit, because the artwork around it does not."),
     Question("policy", "Policy", "choice",
              choices=["ignore", "must_be_present", "must_match_pattern"],
              default="must_be_present"),
@@ -128,11 +141,15 @@ PAGES = [
                      help="The coarse class the model is trained on. Adding a label to an "
                           "existing family needs no retraining."),
             Question("reference_images", "Reference images", "paths", required=True,
-                     help="Capture three or more under production lighting. Artwork files "
-                          "alone match poorly against a real, slightly glared label."),
-            Question("size_mm", "Physical size W x H (mm)", "size_mm", required=True,
-                     validator=_positive_size,
-                     help="The scale check: a detection far off this size is a misdetection."),
+                     help="Read-regions are drawn on the first of these, so at least "
+                          "one is needed. Capture a few under production lighting: "
+                          "artwork files alone look nothing like a real, slightly "
+                          "glared label."),
+            Question("size_mm", "Physical size W x H (mm)", "size_mm",
+                     validator=_optional_size,
+                     help="Optional, for the record. Nothing computes with it -- "
+                          "regions are proportional, so no size is needed to place "
+                          "one."),
             Question("shape", "Shape", "choice", choices=SHAPES, default="rectangle"),
             Question("surface", "Surface", "choice", choices=SURFACES, default="matte",
                      help="Gloss and foil glare. They decide lighting and whether matching works."),
@@ -151,21 +168,36 @@ PAGES = [
                      visible_when={"rotation_policy": ["fixed", "flip_ok"]}),
             Question("variable_data", "Artwork changes per unit", "bool", default=False,
                      help="Serial, lot or date printed per battery."),
-            Question("anchor_region_mm", "Static anchor region (mm)", "rect_mm",
-                     visible_when={"variable_data": True}, validator=_rect,
-                     help="The part that never changes. Matching scores against this only."),
+            Question("anchor_region", "Static anchor region", "region",
+                     visible_when={"variable_data": True}, validator=_region,
+                     help="The part that never changes, as fractions of the label. "
+                          "Matching scores against this alone. Draw it on the "
+                          "Read-regions page."),
         ],
     ),
     Page(
-        "codes", "Barcodes and 2D codes",
-        blurb="One row per code on the label. Leave empty if it carries none.",
+        "regions", "Read-regions",
+        blurb="Areas inside the label that have to be read on their own. Drag them "
+              "on the reference artwork; they are stored as fractions of the label, "
+              "so they follow it onto any image at any angle. This is how text that "
+              "changes on every unit gets read: the artwork around it does not move.",
+        questions=[
+            Question("draw_regions", "Draw on the reference", "regions",
+                     help="Opens the artwork. Drag to add a code, a text field or "
+                          "the static anchor; the rows below fill in as you draw."),
+        ],
+    ),
+    Page(
+        "codes", "Code details",
+        blurb="One row per code drawn above. Set what has to happen with each.",
+        visible_when={},
         questions=[
             Question("codes", "Codes", "table", columns=CODE_COLUMNS),
         ],
     ),
     Page(
-        "text", "Text fields",
-        blurb="Printed text that inspection must read. Leave empty to skip OCR.",
+        "text", "Text field details",
+        blurb="One row per text region drawn above.",
         questions=[
             Question("text_fields", "Text fields", "table", columns=TEXT_COLUMNS),
         ],
@@ -213,7 +245,8 @@ def build_label(answers: dict[str, Any]) -> LabelDef:
             symbology=str(row.get("symbology", "datamatrix")),
             policy=str(row.get("policy", "must_decode")),
             pattern=str(row.get("pattern", "") or ""),
-            region_mm=[float(v) for v in (row.get("region_mm") or [])[:4]],
+            region=[float(v) for v in (row.get("region") or [])[:4]],
+            code_width_mm=float(row.get("code_width_mm", 0.0) or 0.0),
             x_dim_mm=float(row.get("x_dim_mm", 0.0) or 0.0),
             quiet_zone_mm=float(row.get("quiet_zone_mm", 0.0) or 0.0),
             grade=bool(row.get("grade", False)),
@@ -223,7 +256,7 @@ def build_label(answers: dict[str, Any]) -> LabelDef:
     text_fields = [
         TextField(
             name=str(row.get("name", "") or ""),
-            region_mm=[float(v) for v in (row.get("region_mm") or [])[:4]],
+            region=[float(v) for v in (row.get("region") or [])[:4]],
             pattern=str(row.get("pattern", "") or ""),
             policy=str(row.get("policy", "must_be_present")),
             max_age_days=int(row.get("max_age_days", 0) or 0),
@@ -247,7 +280,7 @@ def build_label(answers: dict[str, Any]) -> LabelDef:
         rotation_policy=str(answers.get("rotation_policy", "fixed")),
         rotation_tol_deg=float(answers.get("rotation_tol_deg", 8.0) or 0.0),
         variable_data=bool(answers.get("variable_data", False)),
-        anchor_region_mm=[float(v) for v in (answers.get("anchor_region_mm") or [])[:4]],
+        anchor_region=[float(v) for v in (answers.get("anchor_region") or [])[:4]],
         reference_images=[str(p) for p in answers.get("reference_images", []) or []],
         default_severity=str(answers.get("default_severity", "fail")),
         min_confidence=float(answers.get("min_confidence", 0.5) or 0.0),
@@ -270,7 +303,7 @@ def review_answers(answers: dict[str, Any]) -> list[str]:
     warnings: list[str] = []
     label = build_label(answers)
 
-    if label.variable_data and len(label.anchor_region_mm) < 4:
+    if label.variable_data and len(label.anchor_region) < 4:
         warnings.append(
             "This label changes per unit but has no anchor region, so matching will "
             "score against text that is different on every battery."
@@ -281,17 +314,18 @@ def review_answers(answers: dict[str, Any]) -> list[str]:
             "cross-polarised lighting before relying on artwork matching."
         )
     for i, code in enumerate(label.codes, start=1):
-        if code.policy in ("must_decode", "must_match_pattern") and not code.region_mm:
+        if code.policy in ("must_decode", "must_match_pattern") and not code.region:
             warnings.append(
-                f"Code {i} ({code.role}) must decode but has no region on the artwork, "
-                "so the runtime has to search the whole label instead of cropping to it."
+                f"Code {i} ({code.role}) must decode but has no region drawn on the "
+                "artwork, so the runtime has to search the whole label instead of "
+                "cropping straight to it."
             )
         needed = code.min_pixels_needed()
         if needed:
             warnings.append(
                 f"Code {i} ({code.role}, {code.symbology}) needs about {needed:.0f} px "
-                f"across {code.region_mm[2]:.0f} mm to decode reliably -- check the "
-                "camera resolution over its field of view."
+                f"across its {code.code_width_mm:g} mm width to decode reliably -- "
+                "check the camera resolves that over its field of view."
             )
     if label.family == "battery_side":
         warnings.append(

@@ -8,11 +8,11 @@ from label_detections.core.labels import CodeSpec, LabelDef, LabelLibrary
 
 
 def test_library_round_trips_through_disk(tmp_path):
-    label = LabelDef(label_id="sp", size_mm=[90, 60], reference_images=["a.png"])
-    label.codes = [CodeSpec(role="serial", region_mm=[1, 2, 3, 4])]
+    label = LabelDef(label_id="sp", reference_images=["a.png"])
+    label.codes = [CodeSpec(role="serial", region=[0.1, 0.2, 0.3, 0.4])]
     io.save_library(LabelLibrary([label]), tmp_path)
     back = io.load_library(tmp_path)
-    assert back.get("sp").codes[0].region_mm == [1, 2, 3, 4]
+    assert back.get("sp").codes[0].region == [0.1, 0.2, 0.3, 0.4]
 
 
 def test_missing_library_loads_empty_so_the_app_still_launches(tmp_path):

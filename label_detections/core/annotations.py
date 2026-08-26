@@ -215,23 +215,20 @@ def read_value(box: dict, role: str) -> str | None:
 def place_label_regions(box: dict, label_def) -> list[dict]:
     """Sub-regions for a label, positioned from its library artwork.
 
-    This is the labeling-time and runtime shortcut that removes most hand
-    drawing: the operator draws the label's four corners, the library already
-    knows the barcode sits at (x, y, w, h) millimetres inside the artwork, so
-    the code's image quad is a homography away. Returns an empty list when the
-    label has no usable size, in which case the operator draws the regions.
+    This is the shortcut that removes most hand drawing, at labeling time and at
+    runtime alike: the operator draws the label's four corners, the library
+    already knows the barcode occupies a given fraction of the label, and the
+    code's image quad is one homography away.
+
+    It needs no measurement and no calibration -- the mapping is proportional,
+    so it holds at any distance and any angle. A label with no regions drawn on
+    its artwork simply gets none placed.
     """
-    size = list(getattr(label_def, "size_mm", []) or [])
-    if len(size) < 2 or float(size[0]) <= 0 or float(size[1]) <= 0:
-        return []
     quad = box_polygon(box)
-    ref_w, ref_h = float(size[0]), float(size[1])
 
     out: list[dict] = []
     for code in getattr(label_def, "codes", []) or []:
-        if len(getattr(code, "region_mm", []) or []) < 4:
-            continue
-        placed = geo.place_reference_rect(quad, ref_w, ref_h, code.region_mm)
+        placed = geo.place_unit_rect(quad, list(getattr(code, "region", []) or []))
         if placed is None:
             continue
         out.append(make_region(
@@ -241,14 +238,16 @@ def place_label_regions(box: dict, label_def) -> list[dict]:
             placed_from="reference",
         ))
     for field in getattr(label_def, "text_fields", []) or []:
-        if len(getattr(field, "region_mm", []) or []) < 4:
-            continue
-        placed = geo.place_reference_rect(quad, ref_w, ref_h, field.region_mm)
+        placed = geo.place_unit_rect(quad, list(getattr(field, "region", []) or []))
         if placed is None:
             continue
         out.append(make_region(
             "text", placed, field=field.name, placed_from="reference",
         ))
+    anchor = list(getattr(label_def, "anchor_region", []) or [])
+    placed = geo.place_unit_rect(quad, anchor)
+    if placed is not None:
+        out.append(make_region("anchor", placed, placed_from="reference"))
     return out
 
 

@@ -18,8 +18,9 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
     QDoubleSpinBox, QFileDialog, QFormLayout, QFrame, QHBoxLayout, QHeaderView,
-    QLabel, QLineEdit, QListWidget, QListWidgetItem, QPlainTextEdit, QPushButton,
-    QSpinBox, QStackedWidget, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
+    QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPlainTextEdit,
+    QPushButton, QSpinBox, QStackedWidget, QTableWidget, QTableWidgetItem,
+    QVBoxLayout, QWidget,
 )
 
 from ..core.wizard import Flow, Page, Question
@@ -34,10 +35,15 @@ LIBRARY_IDS_KEY = "__library_ids"
 class FieldEditor(QWidget):
     """Wraps one question's widget behind a uniform value/setValue pair."""
 
-    def __init__(self, question: Question, answers: dict[str, Any], parent=None):
+    def __init__(self, question: Question, answers: dict[str, Any], parent=None,
+                 owner=None):
         super().__init__(parent)
         self.question = question
         self._answers = answers
+        # The "regions" button is the one question that edits several answers at
+        # once -- a drawn barcode fills in the codes table, the text table and
+        # the anchor together. It needs the dialog, not just its own value.
+        self._owner = owner
         self._build()
 
     def _build(self) -> None:
@@ -109,14 +115,22 @@ class FieldEditor(QWidget):
                 layout.addWidget(widget)
             layout.addStretch(1)
             self._w = None
-        elif kind in ("rect_mm", "roi"):
-            normalised = kind == "roi"
-            self._parts = [self._number(False, normalised) for _ in range(4)]
+        elif kind == "region":
+            self._parts = [self._number(False, normalised=True) for _ in range(4)]
             for caption, widget in zip(("X", "Y", "W", "H"), self._parts):
                 layout.addWidget(QLabel(caption))
                 layout.addWidget(widget)
             layout.addStretch(1)
             self._w = None
+        elif kind == "regions":
+            self._w = QPushButton("Draw Regions on the Reference...")
+            self._w.clicked.connect(self._open_region_editor)
+            layout.addWidget(self._w)
+            self._summary = QLabel()
+            self._summary.setWordWrap(True)
+            self._summary.setStyleSheet("color: #9aa4b2;")
+            layout.addWidget(self._summary, 1)
+            self._refresh_region_summary()
         else:
             self._w = QLineEdit()
             layout.addWidget(self._w)
@@ -160,6 +174,60 @@ class FieldEditor(QWidget):
         for item in self._w.selectedItems():
             self._w.takeItem(self._w.row(item))
 
+    # -- region drawing ---------------------------------------------------
+
+    def _region_summary_text(self) -> str:
+        answers = self._owner.answers if self._owner is not None else self._answers
+        parts = []
+        for row in answers.get("codes", []) or []:
+            if row.get("region"):
+                parts.append(f"code:{row.get('role', '?')}")
+        for row in answers.get("text_fields", []) or []:
+            if row.get("region"):
+                parts.append(f"text:{row.get('name', '?')}")
+        if answers.get("anchor_region"):
+            parts.append("anchor")
+        if not parts:
+            return ("Nothing drawn yet. Regions are fractions of the label, so they "
+                    "follow it onto any image at any angle -- no measuring, no "
+                    "calibration.")
+        return "Drawn: " + ", ".join(parts)
+
+    def _refresh_region_summary(self) -> None:
+        if hasattr(self, "_summary"):
+            self._summary.setText(self._region_summary_text())
+
+    def _open_region_editor(self) -> None:
+        from .region_editor import RegionEditorDialog
+
+        answers = self._owner.answers if self._owner is not None else self._answers
+        references = answers.get("reference_images") or []
+        if not references:
+            QMessageBox.information(
+                self, "Draw Regions",
+                "Add a reference image on the Appearance page first -- it is what "
+                "the regions are drawn on.")
+            return
+
+        dialog = RegionEditorDialog(
+            str(references[0]),
+            [dict(r) for r in answers.get("codes", []) or []],
+            [dict(r) for r in answers.get("text_fields", []) or []],
+            list(answers.get("anchor_region") or []),
+            parent=self,
+        )
+        if not dialog.exec():
+            return
+        drawn = dialog.result_regions()
+        answers["codes"] = drawn["codes"]
+        answers["text_fields"] = drawn["text_fields"]
+        answers["anchor_region"] = drawn["anchor_region"]
+        if drawn["anchor_region"]:
+            # An anchor only means anything on a variable-data label, so drawing
+            # one says what the operator meant more clearly than the checkbox did.
+            answers["variable_data"] = True
+        self._refresh_region_summary()
+
     # -- value round-trip ---------------------------------------------------
 
     def value(self) -> Any:
@@ -181,10 +249,13 @@ class FieldEditor(QWidget):
                     if self._w.item(i).checkState() == Qt.Checked]
         if kind == "paths":
             return [self._w.item(i).text() for i in range(self._w.count())]
-        if kind in ("size_mm", "frame_size", "rect_mm", "roi"):
+        if kind == "regions":
+            # The button owns no value of its own; it writes the tables directly.
+            return self._answers.get(self.question.key, "")
+        if kind in ("size_mm", "frame_size", "region"):
             values = [w.value() for w in self._parts]
-            if kind in ("rect_mm", "roi") and values[2] <= 0 and values[3] <= 0:
-                return []          # an untouched rect means "not set", not a zero rect
+            if kind == "region" and values[2] <= 0 and values[3] <= 0:
+                return []          # an untouched region means "not set", not a zero one
             return values
         return self._w.text()
 
@@ -211,9 +282,11 @@ class FieldEditor(QWidget):
         elif kind == "paths":
             self._w.clear()
             self._w.addItems([str(v) for v in value or []])
-        elif kind in ("size_mm", "frame_size", "rect_mm", "roi"):
+        elif kind in ("size_mm", "frame_size", "region"):
             for widget, item in zip(self._parts, list(value or [])):
                 widget.setValue(type(widget.value())(item or 0))
+        elif kind == "regions":
+            self._refresh_region_summary()
 
 
 # --- table editor ----------------------------------------------------------
@@ -348,7 +421,7 @@ class FlowDialog(QDialog):
         self._editors = {}
         for question in page.visible_questions(self.answers):
             editor = (TableEditor(question, self.answers) if question.kind == "table"
-                      else FieldEditor(question, self.answers))
+                      else FieldEditor(question, self.answers, owner=self))
             editor.setValue(self.answers.get(question.key, question.blank()))
             caption = question.label + (" *" if question.required else "")
             form.addRow(caption, editor)

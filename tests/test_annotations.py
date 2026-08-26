@@ -49,9 +49,9 @@ def test_box_center_norm_is_a_fraction_of_the_frame():
 
 
 def label_with_code():
-    label = LabelDef(label_id="sp", size_mm=[100.0, 60.0])
-    label.codes = [CodeSpec(role="serial", region_mm=[10, 10, 40, 20])]
-    label.text_fields = [TextField(name="date_code", region_mm=[10, 40, 50, 10])]
+    label = LabelDef(label_id="sp")
+    label.codes = [CodeSpec(role="serial", region=[0.1, 0.1, 0.4, 0.3])]
+    label.text_fields = [TextField(name="date_code", region=[0.1, 0.6, 0.5, 0.2])]
     return label
 
 
@@ -61,15 +61,34 @@ def test_regions_are_placed_from_the_library_instead_of_drawn():
     ann.apply_reference_regions(box, label_with_code())
     code = ann.code_region(box, "serial")
     assert code is not None
-    assert code["points"][0] == pytest.approx([120.0, 120.0])
-    assert code["points"][2] == pytest.approx([200.0, 160.0])
+    assert code["points"][0] == pytest.approx([120.0, 112.0])
+    assert code["points"][2] == pytest.approx([200.0, 148.0])
     assert [r["role"] for r in ann.regions(box)] == ["code", "text"]
 
 
-def test_placement_is_skipped_when_the_label_has_no_size():
+def test_placement_needs_no_size_at_any_scale():
+    """Fractions, so nothing is measured and nothing is calibrated for distance."""
+    near = label_box("sp", "spec_plate", 0, 0, 200, 120)
+    far = label_box("sp", "spec_plate", 0, 0, 50, 30)
+    ann.apply_reference_regions(near, label_with_code())
+    ann.apply_reference_regions(far, label_with_code())
+    assert ann.code_region(near, "serial")["points"][0] == pytest.approx([20.0, 12.0])
+    assert ann.code_region(far, "serial")["points"][0] == pytest.approx([5.0, 3.0])
+
+
+def test_a_label_with_nothing_drawn_gets_no_regions():
     box = label_box("sp", "spec_plate", 0, 0, 10, 10)
     ann.apply_reference_regions(box, LabelDef(label_id="sp"))
     assert ann.regions(box) == []
+
+
+def test_the_anchor_is_placed_too_so_matching_knows_where_to_score():
+    label = label_with_code()
+    label.anchor_region = [0.0, 0.0, 0.5, 0.4]
+    box = label_box("sp", "spec_plate", 0, 0, 200, 100)
+    ann.apply_reference_regions(box, label)
+    anchor = next(r for r in ann.regions(box) if r["role"] == "anchor")
+    assert anchor["points"][2] == pytest.approx([100.0, 40.0])
 
 
 def test_hand_adjusted_regions_survive_a_replacement_pass():

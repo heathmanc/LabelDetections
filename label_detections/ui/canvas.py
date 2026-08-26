@@ -594,6 +594,28 @@ class ImageCanvas(QWidget):
         return QColor(148, 163, 184)
 
 
+    # Read-regions are drawn thin, dashed and in the parent's colour: they are
+    # a consequence of the label box, not an annotation in their own right, and
+    # they must never be mistaken for one at a glance.
+    def _draw_regions(self, p: QPainter, b: Box, color: QColor) -> None:
+        if not b.regions:
+            return
+        pen = QPen(color.lighter(140), 1, Qt.DashLine)
+        p.setPen(pen)
+        for region in b.regions:
+            points = region.get("points") or []
+            if len(points) < 4:
+                continue
+            poly = QPolygonF([self._image_to_screen_point(float(x), float(y))
+                              for x, y in points[:4]])
+            p.drawPolygon(poly)
+            caption = str(region.get("code_role") or region.get("field")
+                          or region.get("role") or "")
+            if caption:
+                top = poly.boundingRect().topLeft()
+                p.drawText(int(top.x() + 3), int(top.y() - 3), caption)
+        p.setPen(QPen(color, 2))
+
     def _draw_model_test_overlays(self, p: QPainter) -> None:
         if not self.model_test_overlays:
             return
@@ -729,6 +751,7 @@ class ImageCanvas(QWidget):
                         # not. An unidentified box has to look different on the
                         # canvas -- it is either a new SKU or a wrong label, and
                         # both need someone to look at it.
+                        self._draw_regions(p, b, color)
                         tag = f"{b.label_id or b.label} [{b.kind.upper()}]"
                         tag_w = max(90, min(170, len(tag) * 8 + 14))
                         p.fillRect(QRect(br.x(), max(br.y() - 22, 0), tag_w, 22), QColor(0, 0, 0, 170))

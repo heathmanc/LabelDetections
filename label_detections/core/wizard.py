@@ -22,8 +22,11 @@ from typing import Any, Callable
 # What the Qt layer must know how to render.
 KINDS = (
     "text", "textarea", "int", "float", "bool", "choice", "multichoice",
-    "path", "paths", "rect_mm", "size_mm", "roi", "frame_size", "table",
-    "label_picker", "count",
+    "path", "paths", "size_mm", "frame_size", "table", "label_picker", "count",
+    # "region" is four fractions of the label; "regions" is the button that
+    # opens the artwork to draw them. Kept apart so the rows stay editable by
+    # hand when someone needs to nudge one, without making typing the norm.
+    "region", "regions",
 )
 
 
@@ -78,7 +81,7 @@ class Question:
         return {
             "bool": False, "int": 0, "float": 0.0,
             "multichoice": [], "paths": [], "table": [],
-            "rect_mm": [], "size_mm": [0.0, 0.0], "roi": [],
+            "region": [], "size_mm": [0.0, 0.0],
             "frame_size": [0, 0], "count": 1,
         }.get(self.kind, "")
 

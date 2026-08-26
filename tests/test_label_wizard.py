@@ -7,7 +7,7 @@ from label_detections.core.labels import validate_label_def
 def minimal():
     answers = FLOW.defaults()
     answers.update(label_id="spec plate 31", name="31-AGM spec plate",
-                   family="spec_plate", reference_images=["ref.png"], size_mm=[90, 60])
+                   family="spec_plate", reference_images=["ref.png"])
     return answers
 
 
@@ -22,32 +22,45 @@ def test_label_id_is_made_filesystem_safe():
     assert build_label(minimal()).label_id == "spec_plate_31"
 
 
-def test_size_is_required_because_it_is_the_scale_check():
+def test_no_physical_size_is_needed():
+    """Regions are proportional, so nothing has to be measured or calibrated."""
     answers = minimal()
-    answers["size_mm"] = [0, 0]
-    assert any("Physical size" in e for e in FLOW.validate(answers))
+    assert answers["size_mm"] == [0.0, 0.0]
+    assert FLOW.validate(answers) == []
+    assert build_label(answers).size_mm == [0.0, 0.0]
+
+
+def test_a_reference_image_is_required_because_regions_are_drawn_on_it():
+    answers = minimal()
+    answers["reference_images"] = []
+    assert any("Reference images" in e for e in FLOW.validate(answers))
 
 
 def test_a_bad_regex_is_caught_at_entry_not_at_runtime():
     answers = minimal()
     answers["codes"] = [{"role": "serial", "symbology": "qr", "policy": "must_match_pattern",
-                         "pattern": "[unclosed", "region_mm": [1, 1, 10, 10], "x_dim_mm": 0.5}]
+                         "pattern": "[unclosed", "region": [0.1, 0.1, 0.2, 0.2]}]
     assert any("regular expression" in e for e in FLOW.validate(answers))
 
 
-def test_a_code_region_outside_the_label_is_rejected():
+def test_a_region_outside_the_label_is_rejected_with_an_explanation():
     answers = minimal()
     answers["codes"] = [{"role": "serial", "symbology": "qr", "policy": "must_decode",
-                         "region_mm": [-1, 1, 10, 10]}]
-    assert any("negative" in e for e in FLOW.validate(answers))
+                         "region": [0.8, 0.1, 0.4, 0.2]}]
+    assert any("fractions of the label" in e for e in FLOW.validate(answers))
 
 
 def test_anchor_question_appears_only_for_variable_data_labels():
     answers = minimal()
     page = next(p for p in FLOW.pages if p.key == "orientation")
-    assert "anchor_region_mm" not in [q.key for q in page.visible_questions(answers)]
+    assert "anchor_region" not in [q.key for q in page.visible_questions(answers)]
     answers["variable_data"] = True
-    assert "anchor_region_mm" in [q.key for q in page.visible_questions(answers)]
+    assert "anchor_region" in [q.key for q in page.visible_questions(answers)]
+
+
+def test_there_is_a_page_for_drawing_regions():
+    assert "regions" in [p.key for p in FLOW.pages]
+    assert FLOW.question("draw_regions").kind == "regions"
 
 
 def test_variable_data_without_an_anchor_warns_about_matching_moving_text():
@@ -56,12 +69,21 @@ def test_variable_data_without_an_anchor_warns_about_matching_moving_text():
     assert any("every battery" in n for n in review_answers(answers))
 
 
-def test_decode_feasibility_is_quoted_in_pixels_at_entry_time():
+def test_decode_feasibility_is_quoted_when_the_print_spec_is_given():
     """The camera-resolution conversation happens now, not after a failed trial."""
     answers = minimal()
     answers["codes"] = [{"role": "serial", "symbology": "datamatrix", "policy": "must_decode",
-                         "region_mm": [10, 10, 12, 12], "x_dim_mm": 0.254}]
+                         "region": [0.1, 0.1, 0.2, 0.2],
+                         "code_width_mm": 12, "x_dim_mm": 0.254}]
     assert any("px" in n and "decode" in n for n in review_answers(answers))
+
+
+def test_no_feasibility_noise_without_the_print_spec():
+    """It is an optional hint. A label with no print numbers is still finished."""
+    answers = minimal()
+    answers["codes"] = [{"role": "serial", "symbology": "datamatrix",
+                         "policy": "must_decode", "region": [0.1, 0.1, 0.2, 0.2]}]
+    assert not any("px" in n for n in review_answers(answers))
 
 
 def test_glossy_labels_prompt_a_lighting_check():
@@ -73,12 +95,13 @@ def test_glossy_labels_prompt_a_lighting_check():
 def test_codes_and_text_fields_survive_the_build():
     answers = minimal()
     answers["codes"] = [{"role": "serial", "symbology": "datamatrix", "policy": "must_decode",
-                         "region_mm": [10, 10, 30, 30], "x_dim_mm": 0.254}]
-    answers["text_fields"] = [{"name": "date_code", "region_mm": [10, 45, 60, 10],
+                         "region": [0.1, 0.1, 0.3, 0.3]}]
+    answers["text_fields"] = [{"name": "date_code", "region": [0.1, 0.75, 0.6, 0.15],
                                "policy": "must_be_present"}]
     label = build_label(answers)
     assert label.code_by_role("serial").symbology == "datamatrix"
-    assert label.text_fields[0].name == "date_code"
+    assert label.code_by_role("serial").region == [0.1, 0.1, 0.3, 0.3]
+    assert label.text_fields[0].region == [0.1, 0.75, 0.6, 0.15]
 
 
 def test_training_settings_belong_to_the_label_not_a_recipe():

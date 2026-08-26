@@ -8,13 +8,20 @@ resolved afterwards by decoding its barcode and matching its reference
 artwork. Adding a new label SKU is therefore a row in this library, not a
 retraining cycle.
 
-Two coordinate facts make the rest of the system work:
+Regions -- the areas inside a label that have to be read on their own, a
+barcode or a serial or a date code -- are stored in **label space**: ``[x, y,
+w, h]`` as fractions of the label itself, ``0`` to ``1``. Once an operator
+draws the label's four corners on a real image, every region follows by
+homography, at whatever angle, distance or resolution the camera saw it.
 
-* ``size_mm`` gives every label a real-world size, so a detection whose
-  rectified size is wildly off is a misdetection rather than a defect.
-* code and text regions are stored in **label space** (millimetres within the
-  label's own artwork), so once an operator draws the label's four corners the
-  barcode's position follows from the library instead of being drawn by hand.
+Fractions rather than millimetres on purpose. The mapping is pure proportion,
+so nothing has to be measured and nothing has to be calibrated for distance.
+A region is a thing you drag on the artwork, not a number you look up.
+
+Physical sizes appear in exactly one place -- ``CodeSpec.code_width_mm`` and
+``x_dim_mm`` -- and only to answer "can the camera resolve this code at all",
+which is a question about the printed symbol, not about the camera's distance.
+Both are optional and both come off the label's print spec.
 """
 from __future__ import annotations
 
@@ -61,34 +68,47 @@ class CodeSpec:
     symbology: str = "datamatrix"
     policy: str = "must_decode"
     pattern: str = ""              # regex the decoded text must match
-    # Where the code sits within the label artwork, [x, y, w, h] in mm.
-    # Present means the runtime never has to *find* the code -- it crops it.
-    region_mm: list[float] = field(default_factory=list)
+    # Where the code sits on the label: [x, y, w, h] as fractions of the label,
+    # 0 to 1. Drawn on the reference artwork, never typed. Present means the
+    # runtime crops straight to the code instead of having to search for it.
+    region: list[float] = field(default_factory=list)
+
+    # Optional, and only for the decode-feasibility check below. Both come off
+    # the label's print spec -- they describe the printed symbol, not the
+    # camera or its distance.
+    code_width_mm: float = 0.0     # physical width of the whole symbol
     x_dim_mm: float = 0.0          # narrow-bar width (1D) or cell size (2D)
     quiet_zone_mm: float = 0.0
     grade: bool = False            # run ISO 15415/15416 print grading
 
     def min_pixels_needed(self) -> float:
-        """Pixels across the whole code needed to hit the decode threshold.
+        """Pixels across the code needed before a decoder is reliable, or 0.
 
-        A 1D symbol wants ~2 px per narrow bar and a 2D symbol ~3 px per cell
-        before a decoder gets reliable. Multiplied out against ``region_mm``
-        this becomes the concrete "your camera is not sharp enough" number
-        that the dataset health report shows, instead of an argument about
-        whether the model is at fault.
+        A 1D symbol wants ~2 px per narrow bar and a 2D symbol ~3 px per cell.
+        Multiplied out this is the concrete "the camera is not sharp enough"
+        number, which is worth knowing before a trial rather than after -- no
+        model recovers a code the optics never resolved.
+
+        Returns 0 when the print spec was not entered, which is fine: it is an
+        optional check, not a gate.
         """
-        if not self.x_dim_mm or not self.region_mm:
+        if not self.x_dim_mm or not self.code_width_mm:
             return 0.0
         per_module = 3.0 if self.symbology in ("qr", "datamatrix", "aztec") else 2.0
-        modules = float(self.region_mm[2]) / float(self.x_dim_mm)
-        return modules * per_module
+        return (float(self.code_width_mm) / float(self.x_dim_mm)) * per_module
 
 
 @dataclass
 class TextField:
-    """A human-readable field on the label that inspection must verify."""
+    """A human-readable field on the label that inspection must read.
+
+    This is the answer to text that changes per unit: the artwork around a
+    serial never moves, so a region pinned to the artwork finds the serial on
+    every battery without anyone knowing in advance what it will say.
+    """
     name: str = ""
-    region_mm: list[float] = field(default_factory=list)
+    # [x, y, w, h] as fractions of the label. Drawn, not measured.
+    region: list[float] = field(default_factory=list)
     pattern: str = ""
     policy: str = "must_be_present"     # ignore | must_be_present | must_match_pattern
     # For date codes: reject when the read date is older than this many days.
@@ -107,6 +127,9 @@ class LabelDef:
     part_number: str = ""               # part number of the label stock itself
     vendor: str = ""
 
+    # Optional documentation, off the label's drawing. Nothing computes with
+    # it: region placement is proportional, so no size is needed to put a
+    # barcode box where it belongs.
     size_mm: list[float] = field(default_factory=lambda: [0.0, 0.0])
     shape: str = "rectangle"
     surface: str = "matte"
@@ -117,7 +140,10 @@ class LabelDef:
     # Variable-data labels (serial, lot, date printed per unit) must be matched
     # on their unchanging artwork only, or every unit looks like a mismatch.
     variable_data: bool = False
-    anchor_region_mm: list[float] = field(default_factory=list)
+    # The part of the artwork that never changes, as fractions of the label.
+    # Matching scores against this alone, or a per-unit serial makes every
+    # battery look like a mismatch.
+    anchor_region: list[float] = field(default_factory=list)
 
     reference_images: list[str] = field(default_factory=list)
     codes: list[CodeSpec] = field(default_factory=list)
@@ -142,8 +168,12 @@ class LabelDef:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "LabelDef":
         data = dict(data or {})
-        codes = [CodeSpec(**c) for c in data.pop("codes", []) if isinstance(c, dict)]
-        texts = [TextField(**t) for t in data.pop("text_fields", []) if isinstance(t, dict)]
+        known_code = set(CodeSpec.__dataclass_fields__)
+        known_text = set(TextField.__dataclass_fields__)
+        codes = [CodeSpec(**{k: v for k, v in c.items() if k in known_code})
+                 for c in data.pop("codes", []) if isinstance(c, dict)]
+        texts = [TextField(**{k: v for k, v in t.items() if k in known_text})
+                 for t in data.pop("text_fields", []) if isinstance(t, dict)]
         known = set(cls.__dataclass_fields__)
         clean = {k: v for k, v in data.items() if k in known}
         clean.setdefault("label_id", "unnamed")
@@ -158,16 +188,34 @@ class LabelDef:
                 return c
         return None
 
-    def match_region_mm(self) -> list[float]:
-        """The region reference matching should score against.
+    def match_region(self) -> list[float]:
+        """The region matching should score against, as fractions of the label.
 
-        Variable-data labels score on their anchor only; everything else scores
+        Variable-data labels score on their anchor alone; everything else scores
         on the whole artwork.
         """
-        if self.variable_data and len(self.anchor_region_mm) >= 4:
-            return list(self.anchor_region_mm)
-        w, h = (self.size_mm + [0.0, 0.0])[:2]
-        return [0.0, 0.0, float(w), float(h)]
+        if self.variable_data and len(self.anchor_region) >= 4:
+            return list(self.anchor_region)
+        return [0.0, 0.0, 1.0, 1.0]
+
+    def regions(self) -> list[tuple[str, str, list[float]]]:
+        """Every drawn region as ``(role, name, rect)``, for display and export."""
+        out = [("code", c.role, list(c.region)) for c in self.codes if c.region]
+        out += [("text", t.name, list(t.region)) for t in self.text_fields if t.region]
+        if len(self.anchor_region) >= 4:
+            out.append(("anchor", "anchor", list(self.anchor_region)))
+        return out
+
+
+def _valid_region(region: list[float]) -> bool:
+    """A drawn region: four fractions inside the label, with real area."""
+    if not region or len(region) < 4:
+        return False
+    try:
+        x, y, w, h = (float(v) for v in region[:4])
+    except (TypeError, ValueError):
+        return False
+    return w > 0 and h > 0 and x >= 0 and y >= 0 and x + w <= 1.001 and y + h <= 1.001
 
 
 def validate_label_def(label: LabelDef) -> list[str]:
@@ -184,36 +232,36 @@ def validate_label_def(label: LabelDef) -> list[str]:
         issues.append(f"Unknown detector family '{label.family}'.")
     if label.default_severity not in SEVERITIES:
         issues.append(f"Severity must be one of {', '.join(SEVERITIES)}.")
-    w, h = (list(label.size_mm) + [0.0, 0.0])[:2]
-    if float(w) <= 0 or float(h) <= 0:
-        issues.append("Physical size in mm is required -- it is the scale sanity check.")
-    if label.variable_data and len(label.anchor_region_mm) < 4:
+    if label.variable_data and len(label.anchor_region) < 4:
         issues.append(
             "Variable-data label has no anchor region: matching would score against "
             "text that changes on every unit."
         )
     if not label.reference_images:
-        issues.append("No reference image: this label cannot be identified by matching.")
+        issues.append(
+            "No reference image. It is what read-regions are drawn on, so without "
+            "one nothing on this label can be read."
+        )
     for i, code in enumerate(label.codes, start=1):
         if code.symbology not in SYMBOLOGIES:
             issues.append(f"Code {i}: unknown symbology '{code.symbology}'.")
         if code.policy not in CODE_POLICIES:
             issues.append(f"Code {i}: unknown policy '{code.policy}'.")
-        if code.policy != "ignore" and len(code.region_mm) < 4:
+        if code.policy != "ignore" and not _valid_region(code.region):
             issues.append(
-                f"Code {i}: no region on the artwork, so the runtime must search the "
-                "whole label for it instead of cropping straight to it."
+                f"Code {i}: no region drawn on the artwork, so the runtime must search "
+                "the whole label for it instead of cropping straight to it."
             )
         if code.policy == "must_match_pattern" and not code.pattern:
             issues.append(f"Code {i}: policy is must_match_pattern but no pattern was given.")
-        if code.policy != "ignore" and not code.x_dim_mm:
-            issues.append(
-                f"Code {i}: no X-dimension, so decode-feasibility cannot be checked "
-                "against the camera resolution."
-            )
     for i, tf in enumerate(label.text_fields, start=1):
         if not tf.name:
             issues.append(f"Text field {i}: needs a name.")
+        if tf.policy != "ignore" and not _valid_region(tf.region):
+            issues.append(
+                f"Text field {i} ('{tf.name}'): no region drawn, so there is nowhere "
+                "to read it from."
+            )
         if tf.policy == "must_match_pattern" and not tf.pattern:
             issues.append(f"Text field {i}: policy is must_match_pattern but no pattern was given.")
     return issues

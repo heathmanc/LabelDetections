@@ -10,10 +10,14 @@ Coordinate conventions
 ----------------------
 * An oriented box ("quad") is four ``[x, y]`` points in clockwise order
   starting top-left: TL, TR, BR, BL. This matches the sidecar format.
-* "Reference space" is the flattened battery side in millimetres, origin at
-  the side's top-left. Recipe zones live here, so they are pose-independent.
-* "Label space" is one label's own flattened artwork, also in millimetres.
-  Barcode and text sub-regions live here, so they follow the label around.
+* "Label space" is one label's own flattened artwork as a **unit square**:
+  ``[0, 0]`` is its top-left corner, ``[1, 1]`` its bottom-right. Barcode and
+  text sub-regions live here, so they follow the label around.
+
+  Deliberately unitless. A homography maps the label's rectangle onto whatever
+  quad an operator drew, and it does not care whether that rectangle was
+  measured in millimetres, pixels or fractions -- only its proportions matter.
+  Fractions mean nothing has to be measured or calibrated to place a region.
 """
 from __future__ import annotations
 
@@ -172,32 +176,38 @@ def map_quad(h: Matrix, quad: Quad) -> Quad:
     return [list(apply_homography(h, p[0], p[1])) for p in quad]
 
 
-def homography_to_reference(quad: Quad, ref_w: float, ref_h: float) -> Matrix | None:
-    """Image -> reference space, flattening ``quad`` onto a ``ref_w`` x ``ref_h`` rect.
+UNIT_QUAD: Quad = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]
 
-    Feed it the ``battery_side`` OBB and the side's real millimetre size and
-    every downstream coordinate is in millimetres, independent of how the
-    battery happened to sit in front of the camera.
+
+def homography_to_unit(quad: Quad) -> Matrix | None:
+    """Image -> label space: flatten ``quad`` onto the unit square.
+
+    Feed it a label's four drawn corners and every coordinate inside it becomes
+    a fraction of that label, independent of angle, distance or resolution.
     """
-    return homography_from_points(quad, rect_corners(0.0, 0.0, ref_w, ref_h))
+    return homography_from_points(quad, UNIT_QUAD)
 
 
-def homography_from_reference(quad: Quad, ref_w: float, ref_h: float) -> Matrix | None:
-    """Reference space -> image. The inverse direction of the above."""
-    return homography_from_points(rect_corners(0.0, 0.0, ref_w, ref_h), quad)
+def homography_from_unit(quad: Quad) -> Matrix | None:
+    """Label space -> image. The inverse direction of the above."""
+    return homography_from_points(UNIT_QUAD, quad)
 
 
-def place_reference_rect(quad: Quad, ref_w: float, ref_h: float,
-                         rect: list[float]) -> Quad | None:
-    """Where a rect defined on flat reference artwork lands in the image.
+def place_unit_rect(quad: Quad, rect: list[float]) -> Quad | None:
+    """Where a region defined on flat artwork lands on a drawn label.
 
-    This is what puts a barcode box on screen without anyone drawing it: the
-    label library knows the code sits at ``rect`` millimetres within the
-    label, the operator drew the label's four corners, so the code's image
-    quad follows. Same call places a recipe zone on the battery side.
+    This is what puts a barcode box on screen without anyone drawing it. The
+    library knows the code occupies ``rect`` -- ``[x, y, w, h]`` as fractions of
+    the label -- the operator drew the label's four corners, and the code's
+    image quad follows.
+
+    Nothing is measured and nothing is calibrated: the mapping is pure
+    proportion, so it holds at any distance and any angle.
     """
-    h = homography_from_reference(quad, ref_w, ref_h)
+    h = homography_from_unit(quad)
     if h is None or len(rect) < 4:
         return None
     x, y, w, hh = (float(v) for v in rect[:4])
+    if w <= 0 or hh <= 0:
+        return None
     return map_quad(h, rect_corners(x, y, w, hh))
