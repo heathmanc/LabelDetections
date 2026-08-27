@@ -430,3 +430,71 @@ def test_no_read_regions_says_so_rather_than_reporting_nothing():
     lib = LabelLibrary([LabelDef(label_id="plain")])
     scales = {"plain": sr.LabelScale("plain", [500.0] * 2, [3840.0] * 2)}
     assert "No read-regions defined yet" in sr.region_report(scales, lib, 1280, 224)
+
+
+# --- region crops: the only stage that resolves fine print ------------------
+
+def test_a_region_is_cropped_from_the_full_frame_not_the_detector_input():
+    """The whole point: a 120 px revision block stays 120 px whatever imgsz the
+    detector runs at, because nothing downscaled it."""
+    from label_detections.core import classify_export as ce
+    from label_detections.core.labels import LabelDef, LabelLibrary, TextField
+
+    lib = LabelLibrary([LabelDef(
+        label_id="rr", text_fields=[TextField(name="rev", region=[0.1, 0.4, 0.2, 0.1])])])
+    data = {"boxes": [{"label": "rr", "label_id": "rr",
+                       "points": [[0, 0], [1000, 0], [1000, 600], [0, 600]]}]}
+    targets = ce.region_crop_targets(data, lib)
+    assert len(targets) == 1
+    label_id, name, quad = targets[0]
+    assert label_id == "rr" and name == "text_rev"
+    # 20% of a 1000 px label, placed by proportion.
+    xs = [p[0] for p in quad]
+    assert abs((max(xs) - min(xs)) - 200) < 2
+
+
+def test_regions_are_foldered_by_label_so_ground_truth_is_free():
+    """The label id already encodes which revision it is, so a classifier over
+    these crops is trained without anyone labelling anything twice."""
+    from label_detections.core import classify_export as ce, persistence, storage
+    from label_detections.core.labels import LabelDef, TextField
+
+    _window()
+    for lid in ("rc_a", "rc_b"):
+        _dataset(lid, images=3)
+    # After _dataset, not before: it replaces the library row and would wipe
+    # the regions back out.
+    lib = persistence.load_library()
+    for lid in ("rc_a", "rc_b"):
+        label = lib.get(lid)
+        label.text_fields = [TextField(name="rev", region=[0.1, 0.4, 0.3, 0.2])]
+        lib.add(label, replace=True)
+    persistence.save_library(lib)
+
+    out = ce.export_region_crops(library=persistence.load_library(),
+                                 out=storage.EXPORT_DIR / "rgn_test")
+    classes = (out / "classes.txt").read_text().split()
+    assert "rc_a" in classes and "rc_b" in classes
+    assert list((out / "train" / "rc_a").glob("*.jpg"))
+
+
+def test_no_regions_defined_explains_what_to_do():
+    from label_detections.core import classify_export as ce
+    from label_detections.core.labels import LabelDef, LabelLibrary
+
+    lib = LabelLibrary([LabelDef(label_id="plain")])
+    data = {"boxes": [{"label": "plain", "label_id": "plain",
+                       "points": [[0, 0], [10, 0], [10, 10], [0, 10]]}]}
+    assert ce.region_crop_targets(data, lib) == []
+
+
+def test_the_advice_sizes_the_detector_from_the_smallest_label():
+    """The smallest label runs out of pixels first, so it sets the floor."""
+    from label_detections.core import scale_report as sr
+
+    scales = {"big": sr.LabelScale("big", [2000.0] * 4, [3840.0] * 4),
+              "small": sr.LabelScale("small", [300.0] * 4, [3840.0] * 4)}
+    text = sr.advise(scales, None, imgsz=1280)
+    assert "small" in text
+    assert str(sr.min_imgsz_for_identity(scales)) in text
+    assert "Skip the whole-label classifier" in text

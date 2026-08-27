@@ -208,3 +208,112 @@ def export_two_stage(*, task: str = "obb", reviewed_only: bool = True,
         base / "two_stage_classify", entries, size=int(size), margin=margin,
         split_train=split_train, seed=seed)
     return detect_dir, classify_dir
+
+
+# --- region crops: the disambiguator for labels that differ in fine print ---
+#
+# Where two labels differ only by a revision letter or a language line, no
+# detector input and no whole-label crop resolves the difference -- see
+# core/scale_report for the arithmetic. What does resolve it is cropping the
+# read-region itself out of the full-resolution frame, where its pixels were
+# never downscaled at all.
+#
+# Foldering those crops by label id gives exactly the training set for a
+# disambiguator: "given this revision block, which label is this?". The ground
+# truth is free, because the label id already encodes the answer.
+
+REGION_ROLES_TO_CROP = ("code", "text")
+
+
+def region_crop_targets(data, library):
+    """``(label_id, region_name, quad)`` for every read-region on every box.
+
+    The region's four image-space corners come from the label's own quad by
+    proportion, so nothing is measured and nothing is calibrated: the operator
+    drew the label, the library knows where the region sits inside it.
+    """
+    from . import geometry as geo
+
+    out = []
+    for label_id, quad in crop_targets(data):
+        label = library.get(label_id) if library is not None else None
+        if label is None:
+            continue
+        for role, name, rect in label.regions():
+            if role not in REGION_ROLES_TO_CROP:
+                continue
+            placed = geo.place_unit_rect(quad, rect)
+            if placed:
+                out.append((label_id, f"{role}_{name}", placed))
+    return out
+
+
+def write_region_dataset(out: Path, entries, library, *, size: int = DEFAULT_CROP_PX,
+                         margin: float = DEFAULT_MARGIN,
+                         split_train: float = DEFAULT_SPLIT_TRAIN,
+                         seed: int = DEFAULT_SEED) -> Path:
+    """Crops of the read-regions themselves, foldered by label id.
+
+    Taken from the full-resolution frame, so a 120 px revision block arrives as
+    120 px however the detector is configured. ``size`` here is an upscale
+    target, not a downscale: these regions are small to begin with, which is
+    the entire reason this works.
+    """
+    import cv2
+    import shutil
+
+    train, val, report = dataset_logic.split_entries(entries, split_train, seed=seed)
+    if out.exists():
+        shutil.rmtree(out)
+    out.mkdir(parents=True, exist_ok=True)
+
+    rows = ["split,label_id,region,crop,native_px,group"]
+    for split, group in (("train", train), ("val", val)):
+        for entry in group:
+            image_path = Path(entry.annotation.get("image") or entry.image)
+            if not image_path.is_file():
+                continue
+            frame = cv2.imread(str(image_path))
+            if frame is None:
+                continue
+            for i, (label_id, region_name, quad) in enumerate(
+                    region_crop_targets(entry.annotation, library)):
+                patch = rectify_quad(frame, expand_quad(quad, margin))
+                if patch is None or patch.size == 0:
+                    continue
+                native = max(patch.shape[:2])
+                folder = out / split / safe_token(label_id)
+                folder.mkdir(parents=True, exist_ok=True)
+                name = f"{image_path.stem}__{region_name}__{i}.jpg"
+                cv2.imwrite(str(folder / name), letterbox(patch, size),
+                            [int(cv2.IMWRITE_JPEG_QUALITY), 95])
+                rows.append(f"{split},{label_id},{region_name},{name},"
+                            f"{native:.0f},{entry.group_key()}")
+
+    classes = sorted({r.split(",")[1] for r in rows[1:]})
+    if not classes:
+        raise FileNotFoundError(
+            "No read-regions to crop. Define regions on your labels first "
+            "(Define Regions) -- this exports the regions, not the labels."
+        )
+    (out / "classes.txt").write_text("\n".join(classes) + "\n", encoding="utf-8")
+    (out / "manifest.csv").write_text("\n".join(rows) + "\n", encoding="utf-8")
+    (out / "split_report.txt").write_text(report.text() + "\n", encoding="utf-8")
+    (out / "task.txt").write_text("classify\n", encoding="utf-8")
+    return out
+
+
+def export_region_crops(*, reviewed_only: bool = True, library=None,
+                        out: Path | None = None, size: int = DEFAULT_CROP_PX,
+                        split_train: float = DEFAULT_SPLIT_TRAIN,
+                        seed: int = DEFAULT_SEED) -> Path:
+    from . import yolo_export
+
+    entries = []
+    for label_id in yolo_export.list_datasets():
+        entries.extend(yolo_export.collect_entries(label_id, reviewed_only))
+    if not entries:
+        raise FileNotFoundError(
+            "No exportable images. Label some images and mark them reviewed first.")
+    return write_region_dataset(out or (EXPORT_DIR / "region_crops"), entries,
+                                library, size=size, split_train=split_train, seed=seed)

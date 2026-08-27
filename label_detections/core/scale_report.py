@@ -292,3 +292,132 @@ def full_report(scales: dict[str, LabelScale], library=None,
                 imgsz: int = DEFAULT_IMGSZ, crop: int | None = None) -> str:
     crop = int(crop or recommend_crop(scales, imgsz))
     return report(scales, imgsz, crop) + "\n" + region_report(scales, library, imgsz, crop)
+
+
+# --- what to actually build ------------------------------------------------
+#
+# Inverting the question -- "what does each approach REQUIRE?" instead of "is
+# this approach good?" -- gives a different answer than either option on the
+# table, and the numbers are not close.
+#
+# A deciding region needs roughly 64 px across to be read at all. For a 6% wide
+# revision block on a 2000 px plate that means imgsz 2048 single-stage, or a
+# 1067 px crop two-stage. For 25% of a 300 px cert mark: imgsz 3277, or a 256 px
+# crop. Not only is each expensive, no single setting serves both -- the
+# requirements move in opposite directions with label size.
+#
+# The third option is the one that works, and it was sitting in the schema
+# already: crop the READ-REGION itself out of the full-resolution frame. Its
+# pixels are never downscaled at all, so a 120 px revision block stays 120 px
+# whatever imgsz the detector runs at, and the crop is tiny.
+#
+# Which leaves a clean division of labour:
+#
+#   detector (per-label classes)  -> WHICH label, from gross artwork. Needs the
+#                                    label at ~128 px, not its fine print.
+#   read-region at native res     -> revision, language, codes. The only stage
+#                                    that ever resolves those.
+#
+# A whole-label classifier sits between the two and is worse than both: too
+# coarse to read fine print on a large label, and unnecessary for the gross
+# identity the detector already has.
+
+# A label narrower than this in the detector's input is being asked to be
+# identified from very little. Gross artwork, not fine print.
+IDENTITY_FLOOR_PX = 128
+# A text region narrower than this cannot be read by anything. Rule of thumb;
+# codes have an exact figure via CodeSpec.min_pixels_needed().
+REGION_FLOOR_PX = 64
+
+
+def min_imgsz_for_identity(scales: dict[str, LabelScale],
+                           floor: float = IDENTITY_FLOOR_PX) -> int:
+    """Smallest detector input at which every label clears the identity floor.
+
+    Sized from the *smallest* label, which is the one that runs out of pixels
+    first. This is about telling a warning label from a spec plate, not about
+    reading a revision letter -- nothing at detector resolution does that.
+    """
+    need = 0.0
+    for s in scales.values():
+        if s.median_px <= 0:
+            continue
+        frame = s.frame_sides[0] if s.frame_sides else 0.0
+        ratios = [f / side for side, f in zip(s.long_sides, s.frame_sides) if side]
+        if not ratios:
+            continue
+        need = max(need, floor * max(ratios))
+    if need <= 0:
+        return DEFAULT_IMGSZ
+    return min(MAX_CROP * 2, int(math.ceil(need / STRIDE) * STRIDE))
+
+
+def advise(scales: dict[str, LabelScale], library=None,
+           imgsz: int = DEFAULT_IMGSZ) -> str:
+    """The recommendation, from the measurements rather than from taste."""
+    if not scales:
+        return "Nothing measured yet -- draw and save some boxes first."
+
+    need_imgsz = min_imgsz_for_identity(scales)
+    smallest = min(scales.values(), key=lambda s: s.median_px)
+    lines = [
+        "RECOMMENDATION",
+        "",
+        f"1. Detector, one class per label, imgsz {need_imgsz}.",
+        f"   Sized so your smallest label ({smallest.label_id}, "
+        f"{smallest.median_px:.0f} px) still arrives at {IDENTITY_FLOOR_PX} px -- enough "
+        f"to tell labels apart by their overall artwork.",
+        f"   You are running {imgsz}; "
+        + ("that is already enough." if imgsz >= need_imgsz
+           else f"at {imgsz} your smallest label arrives at "
+                f"{smallest.detector_px(imgsz, 'median'):.0f} px, which is thin."),
+        "",
+    ]
+
+    fine: list[str] = []
+    if library is not None:
+        for label_id in sorted(scales):
+            label = library.get(label_id)
+            if label is None:
+                continue
+            for code in getattr(label, "codes", []) or []:
+                if len(getattr(code, "region", []) or []) >= 4:
+                    fine.append(f"{label_id}:{code.role}")
+            for field_ in getattr(label, "text_fields", []) or []:
+                if len(getattr(field_, "region", []) or []) >= 4:
+                    fine.append(f"{label_id}:{field_.name}")
+
+    if fine:
+        lines += [
+            "2. Read-regions cropped from the FULL-RESOLUTION frame, not from the "
+            "detector's input and not from a whole-label crop.",
+            f"   {len(fine)} region(s) defined: " + ", ".join(fine[:6])
+            + (" ..." if len(fine) > 6 else ""),
+            "   A region cropped at native resolution keeps every pixel it had. That "
+            "is the only way a revision letter or a barcode is ever resolved -- no "
+            "detector input and no whole-label crop reaches them, at any size you "
+            "would want to run.",
+            "",
+        ]
+    else:
+        lines += [
+            "2. No read-regions defined yet.",
+            "   If any two of your labels differ only by a revision letter, a "
+            "language line, or a code, draw a read-region over that difference "
+            "(Define Regions). Nothing at detector resolution will separate them, "
+            "and the region is what lets the front end read it at full resolution.",
+            "",
+        ]
+
+    lines += [
+        "3. Skip the whole-label classifier.",
+        "   It sits between the two and is worse than both: too coarse to read fine "
+        "print on your large labels (a 224 px crop of a 2000 px plate throws away "
+        "3x what the detector already had), and unnecessary for the gross identity "
+        "the detector gives you directly.",
+        "",
+        "Confusable labels: where two labels differ ONLY in fine print, the detector "
+        "will mix them up however it is trained. List them in confusable_with, and "
+        "let the region read decide between them.",
+    ]
+    return "\n".join(lines)

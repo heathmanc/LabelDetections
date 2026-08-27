@@ -3086,6 +3086,23 @@ class MainWindow(QMainWindow):
         ev.addLayout(augment_row)
         ev.addLayout(export_btn_row)
         ev.addWidget(exp_two)
+        exp_regions = QPushButton("Export Region Crops")
+        exp_regions.clicked.connect(self.export_region_crops)
+        exp_regions.setToolTip(
+            "Crop each read-region out of the FULL-RESOLUTION frame, foldered by "
+            "label id.\n\n"
+            "This is what separates two labels that differ only by a revision "
+            "letter or a language line. Nothing at detector resolution reaches "
+            "that detail, and a whole-label crop reaches it less -- the region "
+            "cropped from the original keeps every pixel it had.\n\n"
+            "Ground truth comes free: the label id already says which revision "
+            "it is.")
+        exp_regions.setProperty("rightPanelButton", True)
+        exp_regions.setMinimumHeight(24)
+        exp_regions.setMaximumHeight(26)
+        exp_regions.setMinimumWidth(0)
+        exp_regions.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        ev.addWidget(exp_regions)
         export_note = QLabel("Exports annotation class names as-is. Reviewed and force-reviewed images only.")
         export_note.setWordWrap(True)
         export_note.setStyleSheet("color: #94a3b8;")
@@ -6263,7 +6280,9 @@ class MainWindow(QMainWindow):
             entries.extend(yolo_export.collect_entries(label_id, reviewed_only=False))
         imgsz = int(self.test_imgsz_spin.value()) if hasattr(self, "test_imgsz_spin") else 640
         scales = scale_report.measure(entries)
-        text = scale_report.full_report(scales, self.library, imgsz=imgsz)
+        text = (scale_report.advise(scales, self.library, imgsz=imgsz) + "\n\n"
+                + "-" * 70 + "\n\nWORKING\n\n"
+                + scale_report.full_report(scales, self.library, imgsz=imgsz))
 
         box = QMessageBox(self)
         box.setWindowTitle("Label scale")
@@ -6276,6 +6295,41 @@ class MainWindow(QMainWindow):
         box.setDetailedText(text)
         box.setIcon(QMessageBox.Information)
         box.exec()
+
+    def export_region_crops(self) -> None:
+        """Crops of the read-regions themselves, at full resolution.
+
+        The stage that separates labels differing only in fine print. Nothing
+        at detector resolution reaches a revision letter, and a whole-label
+        crop reaches it less; the region cropped from the original frame keeps
+        every pixel it ever had.
+        """
+        from label_detections.core import classify_export
+
+        try:
+            out = classify_export.export_region_crops(
+                reviewed_only=self._export_reviewed_only(), library=self.library)
+        except FileNotFoundError as exc:
+            QMessageBox.information(self, "Export Region Crops", str(exc))
+            return
+        except Exception as exc:
+            QMessageBox.critical(self, "Export Region Crops", f"Export failed:\n{exc}")
+            return
+
+        rows = (out / "manifest.csv").read_text(encoding="utf-8").splitlines()[1:]
+        native = [float(r.split(",")[4]) for r in rows if len(r.split(",")) > 4]
+        classes = (out / "classes.txt").read_text(encoding="utf-8").split()
+        span = (f"{min(native):.0f}-{max(native):.0f} px native" if native else "-")
+        QMessageBox.information(
+            self, "Export complete",
+            f"Read-region crops:\n{out}\n\n"
+            f"{len(rows)} crop(s) over {len(classes)} label(s), {span}.\n\n"
+            f"Cropped from the full-resolution frames, so these keep detail no "
+            f"detector input and no whole-label crop can reach. Train a small "
+            f"classifier on them to separate labels that differ only in fine "
+            f"print.\n\nSuggested command:\n"
+            f"  yolo classify train data={out} model=yolo11n-cls.pt imgsz=224")
+        self.status.showMessage(f"Exported {len(rows)} region crop(s) to {out}", 8000)
 
     def export_two_stage(self) -> None:
         """Write a detector dataset and a classifier crop dataset together.
