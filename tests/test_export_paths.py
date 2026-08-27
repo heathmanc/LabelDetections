@@ -383,9 +383,13 @@ def test_the_report_says_when_a_recommendation_is_expensive():
 
     scales = {"big": sr.LabelScale("big", [2000.0] * 4, [3840.0] * 4),
               "small": sr.LabelScale("small", [300.0] * 4, [3840.0] * 4)}
+    # report() states observations; advise() is the only thing that recommends.
+    # They used to conclude independently and contradicted each other in one
+    # document -- "you are already there" above "a clean two-stage win".
     text = sr.report(scales, imgsz=1280, crop=224)
-    assert "no longer cheap" in text
+    assert "large classifier" in text
     assert "small" in text.split("crop stage is actually for")[0]
+    assert "two-stage win" not in text and "simpler place to start" not in text
 
 
 def test_labels_the_detector_already_resolves_are_not_the_ones_needing_a_crop():

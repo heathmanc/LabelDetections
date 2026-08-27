@@ -835,3 +835,58 @@ def test_a_query_matching_nothing_empties_the_list_rather_than_erroring():
         assert "0 of" in win.label_count_label.text()
     finally:
         win.label_search_edit.setText("")
+
+
+def test_removing_a_label_deletes_its_images_too():
+    """Keeping them was worse: the folder outlived the label, kept being
+    measured, and kept being exported as a class nothing referenced."""
+    from label_detections.core import persistence, storage
+
+    win = _window()
+    _define(win, "rm_wipes")
+    win.set_active_label("rm_wipes")
+    _capture(win, "rm_wipes", "a.jpg")
+    _capture(win, "rm_wipes", "b.jpg")
+    persistence.save_annotation("rm_wipes", "a.jpg", {"image": "a.jpg", "boxes": []})
+    assert len(storage.list_images("rm_wipes")) == 2
+
+    removed = win._delete_label_data("rm_wipes")
+    assert removed >= 2
+    assert storage.list_images("rm_wipes") == []
+    assert persistence.load_annotation("rm_wipes", "a.jpg") is None
+
+
+def test_a_dataset_with_no_library_row_is_not_exported():
+    """A renamed or deleted label leaves a folder behind. Training it makes a
+    class no recipe references, quietly competing with its replacement."""
+    from label_detections.core import persistence, storage, yolo_export
+
+    win = _window()
+    _define(win, "orphan_keeper")
+    # A library row alone is not a dataset -- it needs a folder to be listed.
+    storage.dataset_folder("orphan_keeper").mkdir(parents=True, exist_ok=True)
+    folder = storage.dataset_folder("orphan_ghost")
+    folder.mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(folder / "x.jpg"), np.zeros((40, 40, 3), np.uint8))
+
+    datasets, orphans = yolo_export.exportable_datasets(persistence.load_library())
+    assert "orphan_ghost" in orphans
+    assert "orphan_ghost" not in datasets
+    assert "orphan_keeper" in datasets
+
+
+def test_the_orphan_filter_reads_the_library_from_disk_not_from_memory():
+    """A window holds its library in memory and can be a label behind. A
+    filter run against a stale copy drops a perfectly valid dataset."""
+    from label_detections.core import persistence, storage, yolo_export
+    from label_detections.core.labels import LabelDef, LabelLibrary
+
+    win = _window()
+    lib = persistence.load_library()
+    lib.add(LabelDef(label_id="fresh_on_disk"), replace=True)
+    persistence.save_library(lib)
+    storage.dataset_folder("fresh_on_disk").mkdir(parents=True, exist_ok=True)
+
+    # Caller passes an empty library, as a stale window would.
+    datasets, _ = yolo_export.exportable_datasets(LabelLibrary([]))
+    assert "fresh_on_disk" in datasets

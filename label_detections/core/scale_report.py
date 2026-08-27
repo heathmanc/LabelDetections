@@ -211,23 +211,18 @@ def report(scales: dict[str, LabelScale], imgsz: int = DEFAULT_IMGSZ,
             f"model, one pass, nothing to keep in step.")
     lines.append("")
 
+    # Observations only. The recommendation is advise()'s job -- when both
+    # concluded independently they contradicted each other in one document.
     if loses:
         needed = recommend_crop(scales, imgsz)
         lines.append(
             f"{loses} label(s) would reach the classifier with LESS detail than the "
-            f"detector already had. A crop of {needed} px removes that entirely.")
-        if needed > COSTLY_CROP:
-            lines.append(
-                f"But {needed} px is a big classifier -- at that size the 'cheap second "
-                f"stage' is no longer cheap. Consider whether your LARGEST labels need "
-                f"the crop at all: a label the detector already sees at 600 px is not "
-                f"the problem, and sizing the crop to protect it is what forced this "
-                f"number up. A smaller crop that serves {', '.join(weak) or 'the small ones'} "
-                f"may be the better trade, made knowingly.")
+            f"detector already had; a {needed} px crop removes that."
+            + (f" That is a large classifier, so it is a real cost."
+               if needed > COSTLY_CROP else ""))
     elif helps:
         lines.append(
-            f"No label loses detail at {crop} px, and {helps} gain materially. This is "
-            f"a clean two-stage win.")
+            f"At {crop} px no label loses detail and {helps} gain materially.")
 
     lines.append("")
     lines.append(
@@ -637,6 +632,16 @@ def data_health(scales: dict[str, LabelScale], library=None) -> list[str]:
                     f"one to check it is the label and not the battery face -- "
                     f"a face drawn as a label trains the detector to fire on "
                     f"every battery.")
+
+    if library is not None:
+        known = {l.label_id for l in library.all()}
+        for label_id in sorted(scales):
+            if label_id not in known:
+                issues.insert(0, (
+                    f"{label_id}: has images on disk but no library row -- deleted "
+                    f"or renamed. It is excluded from export, so it will not become "
+                    f"a class, but the folder is still there. Delete it, or re-add "
+                    f"the id if the removal was a mistake."))
 
     counts = [s.count for s in scales.values()]
     if len(counts) > 1 and max(counts) >= 10 * max(min(counts), 1):

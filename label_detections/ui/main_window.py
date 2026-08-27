@@ -1301,7 +1301,8 @@ class MainWindow(QMainWindow):
         from label_detections.core.storage import EXPORT_DIR
 
         entries = []
-        for label_id in yolo_export.list_datasets():
+        datasets, orphans = yolo_export.exportable_datasets(self.library)
+        for label_id in datasets:
             entries.extend(yolo_export.collect_entries(label_id, reviewed_only=False))
         scales = scale_report.measure(entries)
         if not scales:
@@ -2598,20 +2599,45 @@ class MainWindow(QMainWindow):
         self._refresh_class_list_widget()
         self._refresh_labels()
 
+    def _delete_label_data(self, label_id: str) -> int:
+        """Delete a label's captures and sidecars. Returns files removed.
+
+        Failures are counted, not raised: a locked file must not leave the
+        library row behind pointing at a half-deleted dataset, which is a worse
+        state than either finishing or not starting.
+        """
+        import shutil
+
+        removed = 0
+        for folder in (storage_mod.dataset_folder(label_id),
+                       storage_mod.label_folder(label_id)):
+            try:
+                if folder.is_dir():
+                    removed += sum(1 for _ in folder.rglob("*") if _.is_file())
+                    shutil.rmtree(folder, ignore_errors=True)
+            except Exception:
+                pass
+        return removed
+
     def remove_selected_label(self) -> None:
         label_id = self._selected_label_id()
         if not label_id:
             QMessageBox.information(self, "Label", "Select a label in the list first.")
             return
+        images = storage_mod.list_images(label_id)
         reply = QMessageBox.question(
             self, "Remove Label",
-            f"Remove '{label_id}' from the library?\n\n"
-            "Its captured images and saved labels are NOT deleted -- only the "
-            "definition. Re-adding the same id picks the dataset back up.",
+            f"Remove '{label_id}' and DELETE its data?\n\n"
+            f"{len(images)} image(s) and their saved labels will be deleted from "
+            f"disk. This cannot be undone.\n\n"
+            f"Keeping the images behind was worse: the folder outlived the label, "
+            f"kept being counted, and kept being exported as a class nothing "
+            f"referenced.",
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
         )
         if reply != QMessageBox.Yes:
             return
+        removed = self._delete_label_data(label_id)
         self.library.remove(label_id)
         persistence.save_library(self.library)
         if self.label_id == label_id:
@@ -6478,7 +6504,8 @@ class MainWindow(QMainWindow):
         from label_detections.core.storage import EXPORT_DIR
 
         entries = []
-        for label_id in yolo_export.list_datasets():
+        datasets, orphans = yolo_export.exportable_datasets(self.library)
+        for label_id in datasets:
             entries.extend(yolo_export.collect_entries(label_id, reviewed_only=False))
         scales = scale_report.measure(entries)
         if not scales:
@@ -6489,7 +6516,7 @@ class MainWindow(QMainWindow):
 
         imgsz = int(self.test_imgsz_spin.value()) if hasattr(self, "test_imgsz_spin") else 640
         ready = 0
-        for label_id in yolo_export.list_datasets():
+        for label_id in datasets:
             statuses = persistence.dataset_statuses(label_id).values()
             ready += sum(1 for st in statuses if review_logic.export_ready(st))
         text = scale_report.dataset_details(
@@ -6529,7 +6556,8 @@ class MainWindow(QMainWindow):
         from label_detections.core import scale_report, yolo_export
 
         entries = []
-        for label_id in yolo_export.list_datasets():
+        datasets, orphans = yolo_export.exportable_datasets(self.library)
+        for label_id in datasets:
             entries.extend(yolo_export.collect_entries(label_id, reviewed_only=False))
         imgsz = int(self.test_imgsz_spin.value()) if hasattr(self, "test_imgsz_spin") else 640
         scales = scale_report.measure(entries)

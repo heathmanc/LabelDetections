@@ -187,8 +187,9 @@ def export_two_stage(*, task: str = "obb", reviewed_only: bool = True,
     """
     from . import yolo_export
 
+    datasets, _orphans = yolo_export.exportable_datasets(library)
     entries: list[dataset_logic.Entry] = []
-    for label_id in yolo_export.list_datasets():
+    for label_id in datasets:
         entries.extend(yolo_export.collect_entries(label_id, reviewed_only))
     if not entries:
         raise FileNotFoundError(

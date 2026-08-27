@@ -123,6 +123,33 @@ def _detect_line(box: dict, image_w: int, image_h: int, class_id: int) -> str | 
     return f"{class_id} {cx:.6f} {cy:.6f} {nw:.6f} {nh:.6f}"
 
 
+def exportable_datasets(library=None) -> tuple[list[str], list[str]]:
+    """``(datasets to export, orphans)``.
+
+    A dataset folder outlives its library row on purpose -- removing a label
+    keeps its images so re-adding the id picks them back up. But an orphan must
+    not reach training: its label was deleted or renamed, so it would become a
+    class no recipe references and no library row describes, quietly competing
+    with the label that replaced it.
+
+    Returned rather than filtered silently, because dropping someone's data
+    without saying so is its own kind of wrong.
+    """
+    from . import persistence
+
+    on_disk = list_datasets()
+    # Read the library from disk rather than trusting the caller's copy. A
+    # window holds its library in memory and can be a label behind, and a
+    # filter run against a stale copy silently drops a dataset that is
+    # perfectly valid -- the worst possible direction for this to be wrong.
+    lib = persistence.load_library()
+    known = {l.label_id for l in lib.all()}
+    if library is not None:
+        known |= {l.label_id for l in library.all()}
+    return ([d for d in on_disk if d in known],
+            [d for d in on_disk if d not in known])
+
+
 def collect_entries(label_id: str, reviewed_only: bool = True) -> list[dataset_logic.Entry]:
     """Exportable images from one label's dataset.
 
@@ -392,8 +419,9 @@ def export_all_labels_yolo(*, task: str = "obb", reviewed_only: bool = True,
     from one has never seen a competing label and will happily report the one
     class it knows on anything label-shaped.
     """
+    datasets, orphans = exportable_datasets(library)
     entries: list[dataset_logic.Entry] = []
-    for label_id in list_datasets():
+    for label_id in datasets:
         entries.extend(collect_entries(label_id, reviewed_only))
     if not entries:
         raise FileNotFoundError(
