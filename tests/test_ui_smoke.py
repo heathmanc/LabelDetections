@@ -407,3 +407,45 @@ def test_the_built_in_guide_describes_the_tool_that_exists():
     assert "Label ids" in text
     assert "Export Two-Stage" in text and "Export All" in text
     assert "battery_side" in text
+
+
+def test_every_tools_action_is_reachable_without_the_menu_bar():
+    """The menu bar is hidden, so a menu action with no shortcut and no button
+    is dead UI. Two diagnostics shipped that way and could not be opened at
+    all -- this is the check that would have caught it."""
+    from PySide6.QtWidgets import QPushButton
+
+    win = _window()
+    buttons = {b.text() for b in win.findChildren(QPushButton)}
+    handlers = {b.text(): b for b in win.findChildren(QPushButton)}
+
+    for label, method in (("Check Label Scale", "show_label_scale_report"),
+                          ("Check Variable Regions", "check_variable_regions")):
+        assert label in buttons, f"{method} has no visible button"
+
+    # And every window-level action either carries a shortcut or has a button.
+    unreachable = []
+    for action in win.actions():
+        text = action.text().replace("&&", "&")
+        if action.shortcut().isEmpty() and text not in buttons:
+            unreachable.append(text)
+    assert not unreachable, f"unreachable with the menu bar hidden: {unreachable}"
+    assert handlers  # the lookup above is the real assertion
+
+
+def test_the_shortcut_sheet_is_generated_not_typed():
+    """It drifted badly -- still offering "U: select bung class" long after
+    those classes stopped existing, and listing none of the newer keys. With
+    the menu bar hidden it is the only way a key is ever discovered."""
+    win = _window()
+    rows = []
+    for action in win.actions():
+        keys = action.shortcut().toString()
+        if keys:
+            rows.append((keys, action.text().replace("&&", "&")))
+    assert rows, "no shortcut actions registered"
+
+    names = {text for _keys, text in rows}
+    assert "Check label scale (single vs two-stage)" in names
+    assert "Keep this live frame + detections" in names
+    assert not any("bung" in n.lower() or "retainer" in n.lower() for n in names)

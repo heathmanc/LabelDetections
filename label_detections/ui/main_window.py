@@ -545,10 +545,12 @@ class MainWindow(QMainWindow):
         tools_menu.addAction(define_regions_action)
 
         edit_regions_action = QAction("Edit read-regions", self)
+        edit_regions_action.setShortcut("Ctrl+Shift+E")
         edit_regions_action.triggered.connect(self._guarded(self.edit_read_regions))
         tools_menu.addAction(edit_regions_action)
 
         replace_artwork_action = QAction("Replace label artwork...", self)
+        replace_artwork_action.setShortcut("Ctrl+Shift+A")
         replace_artwork_action.setToolTip(
             "Re-flatten this label's artwork from the box on this image. Every "
             "region is positioned against it, so this is behind a confirmation.")
@@ -595,6 +597,7 @@ class MainWindow(QMainWindow):
         tools_menu.addAction(keep_json_action)
 
         scale_action = QAction("Check label scale (single vs two-stage)", self)
+        scale_action.setShortcut("Ctrl+Shift+S")
         scale_action.setToolTip(
             "Measure how many pixels wide your labels actually are, and say "
             "whether cropping would help or hurt them.")
@@ -602,6 +605,7 @@ class MainWindow(QMainWindow):
         tools_menu.addAction(scale_action)
 
         variance_action = QAction("Check variable regions", self)
+        variance_action.setShortcut("Ctrl+Shift+G")
         variance_action.setToolTip(
             "Measure how much each label's date codes and serials actually differ "
             "across its images.")
@@ -3104,6 +3108,30 @@ class MainWindow(QMainWindow):
         export_btn_row.setSpacing(6)
         export_btn_row.addWidget(exp)
         export_btn_row.addWidget(exp_all)
+        checks_row = QHBoxLayout()
+        checks_row.setSpacing(6)
+        scale_btn = QPushButton("Check Label Scale")
+        scale_btn.clicked.connect(self.show_label_scale_report)
+        scale_btn.setToolTip(
+            "Measure how many pixels wide your labels actually are, and what "
+            "follows: which export to use, what detector imgsz they need, and "
+            "whether cropping would help or hurt them. (Ctrl+Shift+S)\n\n"
+            "Reads the boxes you have drawn -- no guessing at frame sizes.")
+        variance_btn = QPushButton("Check Variable Regions")
+        variance_btn.clicked.connect(self.check_variable_regions)
+        variance_btn.setToolTip(
+            "Measure how much each label's date codes and serials really differ "
+            "across its images. (Ctrl+Shift+G)")
+        for btn in (scale_btn, variance_btn):
+            btn.setProperty("rightPanelButton", True)
+            btn.setMinimumHeight(24)
+            btn.setMaximumHeight(26)
+            btn.setMinimumWidth(0)
+            btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        checks_row.addWidget(scale_btn)
+        checks_row.addWidget(variance_btn)
+        ev.addLayout(checks_row)
+
         ev.addWidget(QLabel("Export task"))
         ev.addWidget(self.export_task_combo)
         augment_row = QHBoxLayout()
@@ -6166,57 +6194,49 @@ class MainWindow(QMainWindow):
             f"Checked {len(reports)} variable region(s) across {len(entries)} images",
             6000)
     def show_shortcuts_reference(self) -> None:
-        """Cheat-sheet of keyboard shortcuts (the menu bar is hidden)."""
-        groups = [
-            ("Editing", [
-                ("Ctrl+Z / Ctrl+Y", "Undo / Redo"),
-                ("Delete", "Delete selected annotation"),
-                ("Shift+Delete", "Delete captured image"),
-                ("Arrows", "Nudge selected box (Shift = 10px)"),
-            ]),
-            ("File", [
-                ("Ctrl+O", "Open image"),
-                ("Ctrl+S", "Save labels"),
-            ]),
-            ("View", [
-                ("Ctrl + / Ctrl -", "Zoom in / out"),
-                ("Ctrl+0", "Fit image to window"),
-                ("Ctrl+F5", "Refresh recipe index"),
-                ("Mouse wheel", "Zoom; Middle/Alt-drag pans"),
-            ]),
-            ("Class", [
-                ("B", "Select battery class"),
-                ("U", "Select bung class"),
-                ("R", "Select retainer class"),
-            ]),
-            ("Navigate", [
-                ("N / P", "Next / Previous image"),
-                ("Ctrl+U", "Find next unreviewed"),
-                ("Ctrl+Shift+R", "Mark current reviewed"),
-                ("Ctrl+Shift+F", "Force review current"),
-            ]),
-            ("Tools", [
-                ("Ctrl+L", "Auto-label current (model)"),
-                ("Ctrl+Shift+P", "Pre-label unlabeled && review (model)"),
-                ("Ctrl+Shift+V", "Validate current image"),
-                ("Ctrl+Shift+N", "Next in review queue"),
-                ("C", "Capture adjusted frame"),
-                ("F1", "Show this shortcut reference"),
-            ]),
+        """Cheat-sheet of keyboard shortcuts (the menu bar is hidden).
+
+        Generated from the registered actions rather than typed out. The
+        hand-written version drifted -- it was still offering "U: select bung
+        class" long after the classes it named stopped existing, and it listed
+        none of the shortcuts added since. With the menu bar hidden this dialog
+        is the only way anyone discovers a key, so a stale one is not a
+        cosmetic problem.
+        """
+        rows: list[tuple[str, str]] = []
+        for action in self.actions():
+            keys = action.shortcut().toString()
+            if not keys:
+                continue
+            rows.append((keys, action.text().replace("&&", "&")))
+        rows.sort(key=lambda r: r[1].lower())
+
+        # Interactions that are not actions, so nothing can generate them.
+        mouse = [
+            ("Mouse wheel", "Zoom"),
+            ("Middle-drag / Alt-drag", "Pan"),
+            ("Right-click / Ctrl-click", "Select an annotation"),
+            ("Arrows", "Nudge selected box (Shift = 10 px)"),
+            ("Drag", "Draw a box, then adjust its four corners"),
         ]
-        lines = ["<table cellpadding='4'>"]
-        for title, items in groups:
-            lines.append(f"<tr><td colspan='2' style='padding-top:8px'><b style='color:#bfdbfe'>{title}</b></td></tr>")
-            for keys, desc in items:
-                lines.append(
-                    f"<tr><td style='color:#fbbf24'><code>{keys}</code></td>"
-                    f"<td>{desc}</td></tr>"
-                )
+
+        lines = ["<table cellpadding='4'>",
+                 "<tr><td colspan='2'><b style='color:#bfdbfe'>Keys</b></td></tr>"]
+        for keys, desc in rows:
+            lines.append(
+                f"<tr><td style='color:#fbbf24'><code>{keys}</code></td>"
+                f"<td>{desc}</td></tr>")
+        lines.append("<tr><td colspan='2' style='padding-top:10px'>"
+                     "<b style='color:#bfdbfe'>Mouse</b></td></tr>")
+        for keys, desc in mouse:
+            lines.append(
+                f"<tr><td style='color:#fbbf24'><code>{keys}</code></td>"
+                f"<td>{desc}</td></tr>")
         lines.append("</table>")
 
         dlg = QDialog(self)
         dlg.setWindowTitle("Keyboard Shortcuts")
-        dlg.resize(460, 560)
+        dlg.resize(500, 620)
         v = QVBoxLayout(dlg)
         text = QTextEdit()
         text.setReadOnly(True)
@@ -6227,7 +6247,6 @@ class MainWindow(QMainWindow):
         buttons.accepted.connect(dlg.accept)
         v.addWidget(buttons)
         dlg.exec()
-
 
     def _current_image_index(self) -> int:
         if not self.current_image_path:
