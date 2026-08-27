@@ -293,11 +293,6 @@ class TrainingMetricsChart(QWidget):
 
 
 class MainWindow(QMainWindow):
-    # Emitted to hand a frame to the inference worker. A signal, because
-    # moveToThread only makes SIGNAL-slot connections queued -- calling
-    # worker.infer() directly ran the model on the GUI thread, which is what
-    # made a slow model into a slow preview.
-    infer_requested = Signal(object)
 
     def __init__(self) -> None:
         super().__init__()
@@ -2230,7 +2225,6 @@ class MainWindow(QMainWindow):
         self._live_worker.loaded.connect(self._on_live_loaded)
         self._live_worker.failed.connect(self._on_live_failed)
         self._live_worker.result.connect(self._on_live_result)
-        self.infer_requested.connect(self._live_worker.infer)
         self._live_thread.started.connect(self._live_worker.load)
         self._live_thread.start()
 
@@ -2317,15 +2311,18 @@ class MainWindow(QMainWindow):
             return
         self._live_busy = True
         self._live_last_started = now
-        # No copy in threaded mode: CameraSource.read() already hands back a
-        # private array, so copying it again was 13 ms of memcpy per inference
-        # on the GUI thread -- on a 60 MB frame, paid for nothing, and paid on
-        # the thread that draws the preview. Unthreaded backends hand back
-        # OpenCV's reusable buffer, which genuinely must be copied.
-        self._live_frame = (frame if getattr(self.camera, "threaded", False)
-                            else frame.copy())
-        # Queued across the thread boundary by Qt, so this returns immediately.
-        self.infer_requested.emit(self._live_frame)
+        # Copied unconditionally, as it was. Skipping it in threaded mode was
+        # defensible -- read() already returns a private array -- but this whole
+        # path is being put back to what demonstrably ran, and 13 ms of memcpy
+        # is not worth a second opinion about buffer ownership.
+        self._live_frame = frame.copy()
+        # Called directly, on this thread, which is how this ran when it was
+        # stable. Queuing it to the worker was correct in isolation -- and it
+        # is precisely what stopped the display tick being blocked by
+        # inference, taking the whole capture path from about 7 iterations a
+        # second to about 60. That is the change that destabilised the camera.
+        # Correct and destabilising is still destabilising.
+        self._live_worker.infer(self._live_frame)
 
     def _on_live_result(self, items, latency: float) -> None:
         """Results arrive as plain dicts, already identified.
@@ -2943,29 +2940,6 @@ class MainWindow(QMainWindow):
         self.backend_combo.setCurrentText(str(self.camera_settings.get("camera_backend", "V4L2")))
         self.backend_combo.currentTextChanged.connect(self._on_camera_backend_changed)
         self.backend_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-
-        self.pixel_format_combo = QComboBox()
-        self.pixel_format_combo.addItems(
-            ["BayerRG8", "BayerBG8", "BayerGR8", "BayerGB8", "Mono8", "BGR8",
-             "RGB8", "Auto (leave as camera is set)"])
-        self.pixel_format_combo.setCurrentText(
-            str(self.camera_settings.get("pixel_format",
-                                         "Auto (leave as camera is set)")))
-        self.pixel_format_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.pixel_format_combo.setToolTip(
-            "What the Basler puts on the wire. Ignored by other backends.\n\n"
-            "Nothing used to set this, so the camera streamed whatever Pylon "
-            "Viewer last left it in -- a setting made outside this program.\n\n"
-            "BayerRG8 is one byte per pixel against BGR8's three: at 20 MP that "
-            "is a third of the transfer time, which on a USB3 or GigE link is "
-            "the frame rate. The host debayers it to BGR8 for the model.\n\n"
-            "Wrong Bayer order shows immediately -- red and blue swap. Try the "
-            "other three if colours look wrong.\n\n"
-            "Mono8 is the same bandwidth and skips debayering entirely. Use it "
-            "if no label is told apart by colour."
-        )
-        form.addRow("Backend", self.backend_combo)
-        form.addRow("Pixel format", self.pixel_format_combo)
 
         self.source_edit = QLineEdit(str(self.camera_settings.get("camera_source", "0")))
         self.source_edit.setPlaceholderText("0, /dev/video0, video.mp4, rtsp://, or Basler serial")
@@ -3903,10 +3877,6 @@ class MainWindow(QMainWindow):
         is_basler = backend == "Basler/Pylon"
         return (
             backend,
-            # Pixel format is negotiated when the stream starts, so changing it
-            # must reopen the camera rather than appearing to apply live.
-            (self.pixel_format_combo.currentText()
-             if (is_basler and hasattr(self, "pixel_format_combo")) else ""),
             self.source_edit.text().strip() if hasattr(self, "source_edit") else "0",
             self._int_line_value(self.width_spin, 0) if hasattr(self, "width_spin") else 0,
             self._int_line_value(self.height_spin, 0) if hasattr(self, "height_spin") else 0,
@@ -3936,15 +3906,6 @@ class MainWindow(QMainWindow):
         backend_combo.addItems(["Auto", "V4L2", "GStreamer", "GStreamer (native)", "FFmpeg", "Basler/Pylon"])
         backend_combo.setCurrentText(self.backend_combo.currentText())
 
-        # This dialog builds its own copies of the capture-tab controls, so a
-        # field added to one is missing from the other unless it is added
-        # twice. Pixel format was added to the tab only, and this dialog is
-        # where camera settings are actually reached from.
-        pixfmt_combo = QComboBox()
-        pixfmt_combo.addItems([self.pixel_format_combo.itemText(i)
-                               for i in range(self.pixel_format_combo.count())])
-        pixfmt_combo.setCurrentText(self.pixel_format_combo.currentText())
-        pixfmt_combo.setToolTip(self.pixel_format_combo.toolTip())
         source_edit = QLineEdit(self.source_edit.text())
         source_edit.setPlaceholderText("0, /dev/video0, video.mp4, rtsp://, or Basler serial")
 
@@ -3978,7 +3939,6 @@ class MainWindow(QMainWindow):
         format_grid.setColumnStretch(4, 1)
 
         form.addRow("Backend", backend_combo)
-        form.addRow("Pixel format", pixfmt_combo)
         form.addRow("Source", source_edit)
         form.addRow("Format", format_grid)
         layout.addWidget(form_box)
@@ -4030,7 +3990,6 @@ class MainWindow(QMainWindow):
             old_stream_sig = self._camera_stream_signature() if was_open else None
 
             self.backend_combo.setCurrentText(backend_combo.currentText())
-            self.pixel_format_combo.setCurrentText(pixfmt_combo.currentText())
             self.source_edit.setText(source_edit.text().strip())
             self.width_spin.setText(width_edit.text().strip())
             self.height_spin.setText(height_edit.text().strip())
@@ -4054,7 +4013,6 @@ class MainWindow(QMainWindow):
                 self.camera_settings = {
                     "camera_source": self.source_edit.text().strip(),
                     "camera_backend": self.backend_combo.currentText(),
-                    "pixel_format": self.pixel_format_combo.currentText(),
                     "width": self._int_line_value(self.width_spin, 2592),
                     "height": self._int_line_value(self.height_spin, 1944),
                     "fps": self._int_line_value(self.fps_spin, 0),
@@ -4290,10 +4248,6 @@ class MainWindow(QMainWindow):
             self.mjpg_check.setEnabled(not is_basler and not is_gst_native)
         if hasattr(self, "basler_hint_label"):
             self.basler_hint_label.setVisible(is_basler)
-        if hasattr(self, "pixel_format_combo"):
-            # Only Pylon exposes PixelFormat; greying it elsewhere stops it
-            # reading like a setting that is being ignored.
-            self.pixel_format_combo.setEnabled(is_basler)
         if is_basler and hasattr(self, "status"):
             self.status.showMessage("Basler/Pylon selected. Source may be left blank or set to a serial/model filter.", 5000)
         if is_gst_native and hasattr(self, "status"):
@@ -4360,9 +4314,6 @@ class MainWindow(QMainWindow):
             force_v4l2=(False if is_basler else (self.force_v4l2_check.isChecked() if hasattr(self, "force_v4l2_check") else False)),
             exposure_auto=exposure_auto,
             exposure_us=exposure_us,
-            pixel_format=("" if not is_basler else
-                          ("" if self.pixel_format_combo.currentText().startswith("Auto")
-                           else self.pixel_format_combo.currentText())),
         ):
             QMessageBox.warning(
                 self,

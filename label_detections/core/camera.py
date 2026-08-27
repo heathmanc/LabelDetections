@@ -7,18 +7,6 @@ import time
 from dataclasses import dataclass
 
 import cv2
-import numpy as np
-
-# How long one Basler grab may block.
-#
-# Back to 1000, which is what it was before this branch touched it. 200 ms
-# looked like a tidy way to make shutdown responsive, and it is shorter than
-# the frame interval of a 20 MP camera -- which turned timeouts from a rare
-# event into the normal case, hammering pypylon's timeout path thousands of
-# times a minute. Shutdown is handled by close() waiting properly and refusing
-# to release a camera whose reader has not stopped, which does not need the
-# grab to be short.
-BASLER_GRAB_TIMEOUT_MS = 1000
 
 try:
     from pypylon import pylon
@@ -322,25 +310,6 @@ class CameraSource:
     def __init__(self) -> None:
         self.cap = None
         self.converter = None
-        # Surfaced instead of raised: a read that fails must be reportable
-        # without taking the reader thread down with it.
-        self.last_read_error = ""
-        self.read_failures = 0
-        # Cameras whose reader would not stop. Held, not freed: releasing one
-        # still in use is what corrupts the heap.
-        self._abandoned: list = []
-        # Serialises every native call on the pylon camera object. pypylon does
-        # not promise an InstantCamera is safe for arbitrary concurrent use,
-        # and this program has a reader thread inside RetrieveResult while the
-        # GUI reads nodes and asks it questions. Concurrent native access
-        # corrupts the heap, and the corruption is always noticed somewhere
-        # else -- which is why fixing one lifetime bug at a time kept moving
-        # the crash rather than ending it.
-        self._cam_lock = threading.RLock()
-        # is_open() is on the 16 ms display tick and inside the reader loop.
-        # Answering it from a flag keeps the hot path off both the lock and the
-        # camera; the flag is maintained by open() and close().
-        self._basler_open = False
         self._gst: GstNativeCamera | None = None
         self.source: str | int | None = None
         self.last_result = CameraOpenResult(False, "Not opened")
@@ -360,13 +329,6 @@ class CameraSource:
         if self.cap is None or pylon is None:
             return False
         try:
-            with self._cam_lock:
-                return self._set_basler_value_locked(node_name, value)
-        except Exception:
-            return False
-
-    def _set_basler_value_locked(self, node_name: str, value) -> bool:
-        try:
             node = getattr(self.cap, node_name, None)
             if node is None:
                 return False
@@ -381,11 +343,10 @@ class CameraSource:
         if self.cap is None or pylon is None:
             return default
         try:
-            with self._cam_lock:
-                node = getattr(self.cap, node_name, None)
-                if node is None:
-                    return default
-                return node.GetValue()
+            node = getattr(self.cap, node_name, None)
+            if node is None:
+                return default
+            return node.GetValue()
         except Exception:
             return default
 
@@ -421,72 +382,6 @@ class CameraSource:
             return True
         except Exception:
             return False
-
-    # What the camera puts on the wire. Never set before, so the camera streamed
-    # whatever PixelFormat it happened to be left in -- usually by Pylon Viewer,
-    # which persists it in the camera's user set. That makes captures depend on
-    # a setting made outside this program, months ago, by someone else.
-    #
-    # BayerRG8 is one byte per pixel against BGR8's three, so at 20 MP it is a
-    # third of the bandwidth and a third of the transfer time -- which is the
-    # frame rate, on a USB3 or GigE link. The host debayers it, which is real
-    # CPU work but happens in parallel with the next frame's transfer.
-    #
-    # Mono8 is the same bandwidth as BayerRG8 and skips demosaicing entirely.
-    # Worth it if nothing about a label is decided by colour -- and if something
-    # is, LabelDef.color_significant is where that gets recorded.
-    BASLER_PIXEL_FORMATS = ("BayerRG8", "BayerBG8", "BayerGR8", "BayerGB8",
-                            "Mono8", "BGR8", "RGB8", "YCbCr422_8")
-    # Deliberately NOT BayerRG8 any more. Forcing a format changes the payload
-    # on the wire, and it is the only change in this whole run of commits that
-    # alters what the DEVICE does rather than what this program does with the
-    # result -- so it is the only one that can plausibly explain a crash that
-    # appeared alongside them. Bandwidth is worth having, but not before the
-    # camera is stable, and not as something nobody chose.
-    DEFAULT_BASLER_PIXEL_FORMAT = ""
-
-    def _basler_pixel_format_options(self) -> list[str]:
-        """What this camera actually offers, which is model-specific."""
-        try:
-            with self._cam_lock:
-                return [str(v) for v in self.cap.PixelFormat.Symbolics]
-        except Exception:
-            return []
-
-    def _set_basler_pixel_format(self, wanted: str) -> str:
-        """Ask for a pixel format, and report what was actually obtained.
-
-        Reported rather than assumed: a mono camera has no Bayer format at all,
-        and silently falling back would leave the wire format a mystery again --
-        which is the whole problem being fixed.
-        """
-        if self.cap is None:
-            return "no camera"
-        options = self._basler_pixel_format_options()
-        current = ""
-        try:
-            with self._cam_lock:
-                current = str(self.cap.PixelFormat.GetValue())
-        except Exception:
-            pass
-        wanted = str(wanted or "").strip()
-        if not wanted or wanted.lower() == "auto":
-            return f"left as {current or 'camera default'}"
-        if options and wanted not in options:
-            return (f"{wanted} not offered by this camera; left as "
-                    f"{current or 'camera default'}. Available: "
-                    + ", ".join(options[:8]))
-        try:
-            with self._cam_lock:
-                self.cap.PixelFormat.SetValue(wanted)
-        except Exception as exc:
-            return f"could not set {wanted} ({exc}); left as {current or 'default'}"
-        try:
-            with self._cam_lock:
-                got = str(self.cap.PixelFormat.GetValue())
-        except Exception:
-            got = wanted
-        return f"{got}" + ("" if got == wanted else f" (asked for {wanted})")
 
     def _set_basler_aoi(self, width: int | None, height: int | None) -> str:
         """Set Basler AOI deterministically.
@@ -576,7 +471,7 @@ class CameraSource:
         except Exception as e:
             return f"Exposure apply failed: {e}"
 
-    def _open_basler(self, source: str | int, width: int | None, height: int | None, fps: int | None, threaded: bool, exposure_auto: bool = True, exposure_us: int | None = None, pixel_format: str = "") -> bool:
+    def _open_basler(self, source: str | int, width: int | None, height: int | None, fps: int | None, threaded: bool, exposure_auto: bool = True, exposure_us: int | None = None) -> bool:
         if pylon is None:
             self.last_result = CameraOpenResult(False, "Basler/Pylon selected, but pypylon is not installed in this Python environment. Run: pip install pypylon")
             return False
@@ -612,19 +507,11 @@ class CameraSource:
 
             exposure_msg = self._set_basler_exposure(exposure_auto, exposure_us)
 
-            pixfmt_msg = self._set_basler_pixel_format(
-                pixel_format or self.DEFAULT_BASLER_PIXEL_FORMAT)
-
-            # Whatever comes off the wire, the model gets BGR8. A Bayer frame
-            # handed straight to a detector is a mosaic of single-channel
-            # samples, not a picture, and nothing trained on photographs can
-            # read it.
             self.converter = pylon.ImageFormatConverter()
             self.converter.OutputPixelFormat = pylon.PixelType_BGR8packed
             self.converter.OutputBitAlignment = pylon.OutputBitAlignment_MsbAligned
 
             self.cap.StartGrabbing(pylon.GrabStrategy_LatestImageOnly)
-            self._basler_open = True
         except Exception as e:
             self.last_result = CameraOpenResult(False, f"Basler/Pylon open exception: {e}")
             self.close()
@@ -665,7 +552,7 @@ class CameraSource:
 
         self.last_result = CameraOpenResult(
             True,
-            f"Opened Basler/Pylon camera {model} serial {serial}. Actual size {actual_w:.0f}x{actual_h:.0f}, reported FPS {actual_fps:.1f}. {aoi_msg}. Exposure: {exposure_msg}. Pixel format: {pixfmt_msg} (converted to BGR8 on the host). First frame shape: {last_shape}.",
+            f"Opened Basler/Pylon camera {model} serial {serial}. Actual size {actual_w:.0f}x{actual_h:.0f}, reported FPS {actual_fps:.1f}. {aoi_msg}. Exposure: {exposure_msg}. First frame shape: {last_shape}.",
             "Basler/Pylon",
             actual_w,
             actual_h,
@@ -683,82 +570,19 @@ class CameraSource:
         return True
 
     def _read_basler_frame(self, timeout_ms: int = 5000):
-        """One frame, or (False, None). Never raises.
-
-        TimeoutHandling_Return does not return None on a timeout -- it returns
-        an INVALID grab result, and calling GrabSucceeded() on one of those
-        throws. Only `grab is None` was checked, so every timeout raised, and
-        the reader thread had no guard: one slow frame killed the camera for
-        the rest of the session, leaving a traceback on the console and a
-        window showing nothing.
-        """
         if self.cap is None or pylon is None:
             return False, None
-        grab = None
-        try:
-            with self._cam_lock:
-                if self.cap is None or not self.cap.IsGrabbing():
-                    return False, None
-                grab = self.cap.RetrieveResult(timeout_ms,
-                                               pylon.TimeoutHandling_Return)
-            if grab is None:
-                return False, None
-            # IsValid() first: an invalid result cannot be asked anything else.
-            if not grab.IsValid() or not grab.GrabSucceeded():
-                return False, None
-            # COPY before the finally releases the grab.
-            #
-            # grab.Array is a view into pylon's own buffer, and
-            # ImageFormatConverter.Convert() writes into a buffer the converter
-            # reuses on the very next call. Release() hands that memory back to
-            # the pool, so returning either view returns a dangling pointer --
-            # the reader thread then stores it, the GUI reads it a moment later,
-            # and the process dies of heap corruption (0xc0000374) somewhere
-            # else entirely, usually inside the next RetrieveResult.
-            #
-            # It was always wrong. It became reliably fatal when the inference
-            # throttle came off and the frame rate went up an order of
-            # magnitude: buffers started being recycled while the previous
-            # frame was still being read.
-            frame = None
-            if self.converter is not None:
-                # The PylonImage from Convert() must stay referenced until the
-                # copy is finished. Written as
-                #     converter.Convert(grab).GetArray()
-                # it is a temporary: it dies at the end of that expression and
-                # frees its buffer, so copying from the result on the NEXT line
-                # reads memory that has already been returned. That is the
-                # corruption, and it surfaces inside the following Convert when
-                # the converter next touches its own heap -- which is precisely
-                # where the crash moved to once the earlier ones were fixed.
-                image = self.converter.Convert(grab)
-                try:
-                    array = image.GetArray()
-                    if array is not None:
-                        frame = np.array(array, copy=True)
-                finally:
-                    try:
-                        image.Release()
-                    except Exception:
-                        pass
-            else:
-                # grab.Array is likewise a view into pylon's buffer, valid only
-                # until the grab is released in the finally below.
-                array = grab.Array
-                if array is not None:
-                    frame = np.array(array, copy=True)
-            if frame is None:
-                return False, None
-            return True, frame
-        except Exception as exc:
-            self.last_read_error = f"{type(exc).__name__}: {exc}"
+        if not self.cap.IsGrabbing():
             return False, None
+        grab = self.cap.RetrieveResult(timeout_ms, pylon.TimeoutHandling_Return)
+        try:
+            if grab is None or not grab.GrabSucceeded():
+                return False, None
+            frame = self.converter.Convert(grab).GetArray() if self.converter is not None else grab.Array
+            return True, frame
         finally:
             if grab is not None:
-                try:
-                    grab.Release()
-                except Exception:
-                    pass
+                grab.Release()
 
     def open(
         self,
@@ -774,7 +598,6 @@ class CameraSource:
         force_v4l2: bool = False,
         exposure_auto: bool = True,
         exposure_us: int | None = None,
-        pixel_format: str = "",
     ) -> bool:
         self.close()
         self.source = source
@@ -782,9 +605,7 @@ class CameraSource:
         force_message = ""
 
         if backend == "Basler/Pylon":
-            return self._open_basler(source, width, height, fps, threaded=threaded,
-                                     exposure_auto=exposure_auto, exposure_us=exposure_us,
-                                     pixel_format=pixel_format)
+            return self._open_basler(source, width, height, fps, threaded=threaded, exposure_auto=exposure_auto, exposure_us=exposure_us)
 
         if backend == "GStreamer (native)":
             return self._open_gst_native(source, width, height, fps, threaded=threaded, exposure_auto=exposure_auto, exposure_us=exposure_us)
@@ -959,34 +780,13 @@ class CameraSource:
         return True
 
     def _reader_loop(self) -> None:
-        """Pull frames until stopped. One bad read must never end the thread.
-
-        It could, and did: an exception here killed the reader outright, and a
-        dead reader is indistinguishable from a camera that has stopped
-        producing -- except for a traceback on a console nobody is watching.
-        Failures are counted and reported instead, and the loop keeps going.
-        """
         while self._running and self.is_open():
-            try:
-                if self.last_result.backend_name == "Basler/Pylon":
-                    # Short, so the loop returns to its _running check often.
-                    # At 1000 ms the reader could sit inside pylon for a full
-                    # second, which no sane join timeout can wait out.
-                    ok, frame = self._read_basler_frame(
-                        timeout_ms=BASLER_GRAB_TIMEOUT_MS)
-                elif self._gst is not None:
-                    ok, frame = self._gst.read()
-                else:
-                    ok, frame = self.cap.read()
-            except Exception as exc:
-                self.last_read_error = f"{type(exc).__name__}: {exc}"
-                self.read_failures += 1
-                with self._lock:
-                    self._latest_ok = False
-                time.sleep(0.02)
-                continue
-            if not ok:
-                self.read_failures += 1
+            if self.last_result.backend_name == "Basler/Pylon":
+                ok, frame = self._read_basler_frame(timeout_ms=1000)
+            elif self._gst is not None:
+                ok, frame = self._gst.read()
+            else:
+                ok, frame = self.cap.read()
             if ok and frame is not None:
                 with self._lock:
                     self._latest_frame = frame
@@ -1016,7 +816,7 @@ class CameraSource:
                 return self._latest_ok, self._latest_frame.copy()
 
         if self.last_result.backend_name == "Basler/Pylon":
-            return self._read_basler_frame(timeout_ms=BASLER_GRAB_TIMEOUT_MS)
+            return self._read_basler_frame(timeout_ms=1000)
 
         if self._gst is not None:
             return self._gst.read()
@@ -1038,26 +838,10 @@ class CameraSource:
         return int(self._frame_seq)
 
     def drain(self, count: int = 2) -> None:
-        """Throw away buffered frames so the preview shows the newest one.
-
-        OpenCV only. isOpened() and grab() are cv2.VideoCapture methods, and a
-        pylon InstantCamera answers unknown attributes with a
-        PlaceholderParameter -- which is not callable, so this raised the
-        moment it ran against a Basler. It never did while the threaded reader
-        was on, because that returns above; turning the reader off to diagnose
-        something else is what first reached it.
-
-        Nothing to do for Basler regardless: GrabStrategy_LatestImageOnly
-        already discards everything but the newest frame at the driver.
-        """
+        # In threaded mode, the reader loop already keeps only the newest frame.
         if self.threaded:
-            # The reader loop already keeps only the newest frame.
             return
-        if self.cap is None:
-            return
-        if self.last_result.backend_name == "Basler/Pylon":
-            return
-        if not self.cap.isOpened():
+        if self.cap is None or not self.cap.isOpened():
             return
         for _ in range(max(0, count)):
             try:
@@ -1066,44 +850,13 @@ class CameraSource:
                 return
 
     def close(self) -> None:
-        """Stop the reader, THEN release the camera. Never the other way round.
-
-        The join was 0.5 s while a Basler grab blocked for up to 1.0 s, so the
-        join lost that race routinely -- and close() went on to StopGrabbing(),
-        Close() and drop self.cap while the reader thread was still inside
-        RetrieveResult on that same object. Destroying a pylon camera under a
-        live call corrupts the heap, which Windows reports as 0xc0000374 from
-        wherever it is next noticed: normally the next RetrieveResult, which is
-        why the stack blamed the grab rather than the close.
-
-        If the reader will not stop, the camera is deliberately leaked. A
-        leaked camera costs a handle until the process ends; freeing one that
-        is still in use ends the process.
-        """
         self._running = False
-        stopped = True
         if self._thread is not None:
             try:
-                # Generously longer than one grab, so a reader mid-call has
-                # time to come back and see _running.
-                self._thread.join(timeout=(BASLER_GRAB_TIMEOUT_MS / 1000.0) * 6 + 1.0)
-                stopped = not self._thread.is_alive()
+                self._thread.join(timeout=0.5)
             except Exception:
-                stopped = False
+                pass
         self._thread = None
-
-        if not stopped:
-            self._basler_open = False
-            self._abandoned.append(self.cap)
-            self.cap = None
-            self.converter = None
-            self.last_read_error = (
-                "The camera reader did not stop; the device was left open "
-                "rather than closed underneath it.")
-            with self._lock:
-                self._latest_frame = None
-                self._latest_ok = False
-            return
 
         if self._gst is not None:
             try:
@@ -1112,15 +865,13 @@ class CameraSource:
                 pass
         self._gst = None
 
-        self._basler_open = False
         if self.cap is not None:
             try:
                 if self.last_result.backend_name == "Basler/Pylon" and pylon is not None:
-                    with self._cam_lock:
-                        if self.cap.IsGrabbing():
-                            self.cap.StopGrabbing()
-                        if self.cap.IsOpen():
-                            self.cap.Close()
+                    if self.cap.IsGrabbing():
+                        self.cap.StopGrabbing()
+                    if self.cap.IsOpen():
+                        self.cap.Close()
                 else:
                     self.cap.release()
             except Exception:
@@ -1138,11 +889,7 @@ class CameraSource:
             return False
         try:
             if self.last_result.backend_name == "Basler/Pylon" and pylon is not None:
-                # From the flag, not the camera. This is called on the 16 ms
-                # display tick AND in the reader loop, so asking the device
-                # meant two threads making native calls on it several times a
-                # second, forever, while one of them sat inside RetrieveResult.
-                return self._basler_open
+                return bool(self.cap.IsOpen() and self.cap.IsGrabbing())
             return bool(self.cap.isOpened())
         except Exception:
             return False

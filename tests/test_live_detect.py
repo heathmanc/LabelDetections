@@ -236,7 +236,7 @@ def test_nothing_is_handed_to_the_model_while_it_is_busy():
     handed = []
     win._live_thread = object()          # pretend it is running
     win._live_loaded = True              # ...and that the model finished loading
-    win.infer_requested.connect(handed.append)
+    win._live_worker = type("W", (), {"infer": lambda _s, f: handed.append(f)})()
     win._live_busy = True
     # Recent enough that the lost-result watchdog stays out of it, old enough
     # that the minimum-interval floor is satisfied -- so this tests the busy
@@ -249,7 +249,6 @@ def test_nothing_is_handed_to_the_model_while_it_is_busy():
         win._pump_live_detect(np.zeros((10, 10, 3), np.uint8))
         assert len(handed) == 1
     finally:
-        win.infer_requested.disconnect(handed.append)
         win._live_thread = None
         win._live_worker = None
         win._live_busy = False
@@ -1115,7 +1114,7 @@ def test_no_frame_is_pumped_before_the_model_has_loaded():
     usually won to always lost."""
     win = _window()
     handed = []
-    win.infer_requested.connect(handed.append)
+    win._live_worker = type("W", (), {"infer": lambda _s, f: handed.append(f)})()
     win._live_thread = object()
     win._live_loaded = False
     win._live_busy = False
@@ -1129,7 +1128,6 @@ def test_no_frame_is_pumped_before_the_model_has_loaded():
         win._pump_live_detect(np.zeros((10, 10, 3), np.uint8))
         assert len(handed) == 1
     finally:
-        win.infer_requested.disconnect(handed.append)
         win._live_thread = None
         win._live_busy = False
         win._live_loaded = False
@@ -1142,7 +1140,7 @@ def test_a_result_that_never_arrives_does_not_freeze_the_view():
     back but a restart."""
     win = _window()
     handed = []
-    win.infer_requested.connect(handed.append)
+    win._live_worker = type("W", (), {"infer": lambda _s, f: handed.append(f)})()
     win._live_thread = object()
     win._live_loaded = True
     win._live_busy = True
@@ -1151,7 +1149,6 @@ def test_a_result_that_never_arrives_does_not_freeze_the_view():
         win._pump_live_detect(np.zeros((10, 10, 3), np.uint8))
         assert len(handed) == 1, "never recovered from a lost result"
     finally:
-        win.infer_requested.disconnect(handed.append)
         win._live_thread = None
         win._live_busy = False
         win._live_loaded = False
@@ -1239,7 +1236,7 @@ def test_the_inference_rate_is_a_setting_and_governs_the_pump():
     second and destabilised a camera that had been fine."""
     win = _window()
     handed = []
-    win.infer_requested.connect(handed.append)
+    win._live_worker = type("W", (), {"infer": lambda _s, f: handed.append(f)})()
     win._live_thread = object()
     win._live_loaded = True
     win._live_busy = False
@@ -1253,7 +1250,6 @@ def test_the_inference_rate_is_a_setting_and_governs_the_pump():
         win._pump_live_detect(np.zeros((8, 8, 3), np.uint8))
         assert len(handed) == 1
     finally:
-        win.infer_requested.disconnect(handed.append)
         win.live_rate_spin.setValue(1.0 / ld.MIN_INTERVAL_S)   # shared window
         win._live_thread = None
         win._live_busy = False
