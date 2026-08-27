@@ -112,6 +112,15 @@ def should_infer(busy: bool, since_last_s: float,
     return not busy and since_last_s >= float(min_interval_s)
 
 
+# The readout names the *family*, never the label. The detector is trained on
+# families and cannot return a label id -- no SKU is in its class list. Writing
+# "2220-9199: mean 0.94" made the model look like it had identified the label
+# when all it had found was a spec_plate, which is the one misreading that
+# would let a wrong label pass live and look fine.
+def _belongs(label_id: str) -> str:
+    return f"   -- the family {label_id} belongs to" if label_id else ""
+
+
 def frame_summary(counts: dict[str, int], family: str, label_id: str,
                   rolling: Rolling) -> str:
     """The readout under the live view."""
@@ -119,8 +128,8 @@ def frame_summary(counts: dict[str, int], family: str, label_id: str,
     lines = [f"{total} detection(s)   {rolling.mean_ms:.0f} ms   {rolling.rate:.1f}/s"]
     if family:
         found = counts.get(family, 0)
-        state = "found" if found else "NOT FOUND"
-        lines.append(f"{label_id} ({family}): {found} {state}")
+        state = f"{found} found" if found else "NOT FOUND"
+        lines.append(f"{family}: {state}{_belongs(label_id)}")
     for name in sorted(counts):
         if name != family:
             lines.append(f"  {name}: {counts[name]}")
@@ -243,10 +252,10 @@ def track_summary(book: TrackBook, family: str, label_id: str,
         mine = [t for t in rows if t.name == family]
         if mine:
             best = mine[0]
-            lines.append(f"{label_id}: held {best.frames} frames, "
-                         f"mean {best.mean_conf:.2f}")
+            lines.append(f"{family}: held {best.frames} frames, "
+                         f"mean {best.mean_conf:.2f}{_belongs(label_id)}")
         else:
-            lines.append(f"{label_id} ({family}): NOT TRACKED")
+            lines.append(f"{family}: NOT TRACKED{_belongs(label_id)}")
     lines.append("")
     lines.append(book.text())
     return "\n".join(lines)

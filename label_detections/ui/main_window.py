@@ -1821,6 +1821,15 @@ class MainWindow(QMainWindow):
         self.live_readout.setPlaceholderText(
             "Detections, latency and rate appear here once it is running.")
         cv_.addWidget(self.live_readout)
+
+        boundary = QLabel(
+            "The detector returns a family, never a label id -- no SKU is in "
+            "its class list. Which label a detection actually is gets decided "
+            "downstream from its codes and artwork, not here."
+        )
+        boundary.setWordWrap(True)
+        boundary.setStyleSheet("color: #9aa4b2;")
+        cv_.addWidget(boundary)
         layout.addWidget(control_box)
 
         keep_box = QGroupBox("Keep what it fails on")

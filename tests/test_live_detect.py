@@ -104,11 +104,30 @@ def test_the_summary_leads_with_whether_the_active_label_was_found():
     rolling.record(0.02, now=100.2)
     found = ld.frame_summary({"spec_plate": 1, "cert_mark": 2},
                              "spec_plate", "sp_g31", rolling)
-    assert "sp_g31 (spec_plate): 1 found" in found
+    assert "spec_plate: 1 found" in found
     assert "cert_mark: 2" in found
 
     missed = ld.frame_summary({"cert_mark": 1}, "spec_plate", "sp_g31", rolling)
     assert "NOT FOUND" in missed
+
+
+def test_the_readout_never_claims_the_model_identified_the_label():
+    """The detector returns a family. A line reading "2220-9199: mean 0.94"
+    says it returned an identity, and a wrong label would pass live looking
+    perfectly healthy."""
+    rolling = ld.Rolling()
+    rolling.record(0.02, now=100)
+
+    found = ld.frame_summary({"spec_plate": 1}, "spec_plate", "sp_g31", rolling)
+    assert not found.splitlines()[1].startswith("sp_g31")
+    assert "spec_plate" in found and "the family sp_g31 belongs to" in found
+
+    book = ld.TrackBook()
+    book.update([(1, "spec_plate", 0.94)], now=0.0)
+    tracked = ld.track_summary(book, "spec_plate", "sp_g31", rolling)
+    assert not tracked.splitlines()[1].startswith("sp_g31")
+    assert "spec_plate: held" in tracked
+    assert "the family sp_g31 belongs to" in tracked
 
 
 def test_the_armed_note_never_looks_like_it_hung():
@@ -315,7 +334,7 @@ def test_the_untracked_readout_reports_what_the_model_saw():
             [_Results([[10, 10, 40, 40]], {0: "spec_plate"}, [0.9], [0])], 0.02)
         text = win.live_readout.toPlainText()
         assert "1 detection(s)" in text
-        assert "live_readout (spec_plate): 1 found" in text
+        assert "spec_plate: 1 found" in text
     finally:
         win._live_thread = None
         win._live_tracking = True
@@ -338,7 +357,7 @@ def test_the_tracked_readout_reports_a_held_average_not_a_flicker():
                           ids=[7])], 0.02)
         text = win.live_readout.toPlainText()
         assert "1 tracked" in text
-        assert "live_tracked: held 3 frames" in text
+        assert "spec_plate: held 3 frames" in text
         assert "#7 spec_plate:" in text
         assert "0.91 mean over 3 frames" in text
     finally:
@@ -432,7 +451,7 @@ def test_the_track_summary_says_when_the_active_label_is_not_tracked():
     rolling = ld.Rolling()
     rolling.record(0.01, now=100)
     text = ld.track_summary(book, "spec_plate", "sp_g31", rolling)
-    assert "sp_g31 (spec_plate): NOT TRACKED" in text
+    assert "spec_plate: NOT TRACKED" in text
     assert "#1 cert_mark" in text
 
 
