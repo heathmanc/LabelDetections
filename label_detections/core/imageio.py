@@ -21,6 +21,7 @@ import numpy as np
 
 from .storage import (
     IMAGE_SUFFIXES, dataset_folder, image_label_json_path, safe_token,
+    save_annotations,
 )
 
 IMPORT_IMAGE_EXTS = IMAGE_SUFFIXES + (".webp",)

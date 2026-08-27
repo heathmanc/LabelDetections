@@ -5123,10 +5123,17 @@ class MainWindow(QMainWindow):
         self._model_test_overlay_active = False
         self.canvas.push_undo_snapshot()
         self.canvas.set_boxes_from_dicts(box_dicts)
-        extra = "".join(f", {n} {nm}" for nm, n in sorted(other_counts.items()))
+        # Counted off the boxes actually placed, and named the way the classes
+        # are named now. The line this replaces still described the dataset as
+        # batteries and bungs, from three variables that no longer existed --
+        # so the labels landed and then the summary raised on every run.
+        placed: dict[str, int] = {}
+        for box in box_dicts:
+            name = str(box.get("label_id") or box.get("label") or "?")
+            placed[name] = placed.get(name, 0) + 1
+        summary = ", ".join(f"{n} {nm}" for nm, n in sorted(placed.items()))
         self.status.showMessage(
-            f"Auto-labeled {battery_count} batteries, {bung_count} bungs{extra}. "
-            "Correct as needed, then Save Labels.",
+            f"Auto-labeled {summary}. Correct as needed, then Save Labels.",
             8000,
         )
 
@@ -5193,7 +5200,7 @@ class MainWindow(QMainWindow):
                 # A model failure on an image is itself a reason to look at it.
                 scored.append(active_learning.QueueItem(str(p), active_learning.MISS_PENALTY))
                 continue
-            found, total, avg_conf = self._disagreement_from_items(items)
+            found, total, avg_conf = self._detection_disagreement(results)
             score = active_learning.disagreement_score(found, 1, total, avg_conf)
             scored.append(active_learning.QueueItem(str(p), score))
 

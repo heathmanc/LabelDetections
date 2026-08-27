@@ -124,6 +124,19 @@ def make_review_record(reason: str = "operator_review", *, force: bool = False,
     return record
 
 
+def make_background_record() -> dict[str, Any]:
+    """The stamp for an image deliberately marked as containing no objects.
+
+    A background is reviewed by the act of marking it: someone looked at the
+    image and said there is nothing here, which is the same assertion an
+    approval makes. It carries its own reason so the two can be told apart
+    when auditing what a dataset was trained on -- an empty conveyor and an
+    approved unit are both "reviewed, no problems", and they are not the same
+    evidence.
+    """
+    return make_review_record(reason="background")
+
+
 def clear_review(data: dict) -> dict:
     """Strip review markers after an edit that changed what was reviewed.
 

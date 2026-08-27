@@ -1097,3 +1097,99 @@ def test_every_action_with_a_shortcut_is_registered_on_the_window():
         if not action.shortcut().isEmpty() and action not in registered
     })
     assert orphans == []
+
+
+# --- auto-label and the review queue actually finish -----------------------
+
+class _FakeResults:
+    """One Ultralytics result, enough for the overlay extractor."""
+
+    def __init__(self, boxes, names, confs, classes):
+        self.names = names
+        self.obb = None
+
+        class _Boxes:
+            def __init__(self):
+                self.xyxy = np.array(boxes, dtype=np.float32)
+                self.conf = np.array(confs, dtype=np.float32)
+                self.cls = np.array(classes, dtype=np.float32)
+                self.id = None
+
+        self.boxes = _Boxes()
+
+
+def _stub_model(win, monkeypatch, label_id, count=2):
+    """Make the model return `count` boxes of `label_id` on any image."""
+    frame = np.zeros((200, 400, 3), dtype=np.uint8)
+    results = [_FakeResults(
+        [[10 + 40 * i, 10, 50 + 40 * i, 60] for i in range(count)],
+        {0: label_id}, [0.9] * count, [0] * count)]
+    monkeypatch.setattr(win, "_run_test_model_on_image",
+                        lambda path: (frame, results, 0.0, 0.01))
+    win.test_model_edit.setText("/some/model.pt")
+
+
+def test_auto_label_reports_what_it_placed_instead_of_raising(monkeypatch):
+    """The summary named three variables from the bung taxonomy that no longer
+    existed, so the boxes landed and then the line describing them raised --
+    every single run."""
+    win = _window()
+    _define(win, "wf_autolabel")
+    win.set_active_label("wf_autolabel")
+    _capture(win, "wf_autolabel", "auto.jpg")
+    win.canvas.clear_boxes()
+    _stub_model(win, monkeypatch, "wf_autolabel", count=2)
+
+    win.auto_label_current()
+
+    assert len(win.canvas.boxes) == 2
+    message = win.status.currentMessage()
+    assert "2 wf_autolabel" in message
+    assert "bung" not in message.lower()
+
+
+def test_the_review_queue_scores_the_result_it_was_handed(monkeypatch):
+    """It scored on an undefined name, so the queue raised on the first image
+    it looked at -- and nothing reached the ranking at all."""
+    import label_detections.ui.main_window as mw_mod
+
+    win = _window()
+    _define(win, "wf_queue")
+    win.set_active_label("wf_queue")
+    for name in ("q1.jpg", "q2.jpg"):
+        _capture(win, "wf_queue", name)
+    win.canvas.clear_boxes()
+    _stub_model(win, monkeypatch, "wf_queue", count=1)
+
+    monkeypatch.setattr(mw_mod.QMessageBox, "question",
+                        staticmethod(lambda *a, **k: mw_mod.QMessageBox.Yes))
+    monkeypatch.setattr(mw_mod.QMessageBox, "information",
+                        staticmethod(lambda *a, **k: None))
+    monkeypatch.setattr(win, "next_in_review_queue", lambda: None)
+
+    win.build_review_queue()
+    assert len(win._review_queue) == 2
+
+
+def test_marking_an_image_background_writes_a_reviewed_negative():
+    """Background samples are how the model learns a bare fixture is not a
+    label. The stamp they are written with did not exist, so the button raised
+    and nothing was ever marked."""
+    import json
+    from label_detections.core import review as review_logic
+    from label_detections.core import storage
+
+    win = _window()
+    _define(win, "wf_background")
+    win.set_active_label("wf_background")
+    image = _capture(win, "wf_background", "empty_fixture.jpg")
+    win.canvas.clear_boxes()
+
+    win.mark_current_background()
+
+    data = json.loads(storage.image_label_json_path(image).read_text(encoding="utf-8"))
+    assert data["background"] is True
+    assert data["boxes"] == []
+    # Reviewed, and by this tool -- an imported marker must not qualify.
+    assert review_logic.annotation_reviewed(data) is True
+    assert review_logic.annotation_status(data, "wf_background") == "background"
