@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 import traceback
 import time
@@ -1546,6 +1547,7 @@ class MainWindow(QMainWindow):
         self._train_start_time = time.time()
         self._train_stopped = False
         self._results_csv_path = None  # resolved on first successful poll
+        self._train_save_dir = None    # until Ultralytics announces it
 
         if hasattr(self, "_metrics_timer"):
             self._metrics_timer.stop()
@@ -1564,6 +1566,10 @@ class MainWindow(QMainWindow):
         path = getattr(self, "_results_csv_path", None)
         if path is not None and Path(path).exists():
             return Path(path)
+        # Announced by Ultralytics but not written yet -- do NOT fall through
+        # to the glob, which would lock onto some other run's file.
+        if getattr(self, "_train_save_dir", None) is not None:
+            return None
         project = getattr(self, "_train_project", None)
         name = getattr(self, "_train_name", None)
         if not project or not name:
@@ -1611,24 +1617,33 @@ class MainWindow(QMainWindow):
         self.train_log.moveCursor(QTextCursor.End)
         self.train_log.insertPlainText(data)
         self.train_log.moveCursor(QTextCursor.End)
-        # Detect YOLO's "Results saved to <dir>" line so we follow the actual
-        # output directory even when YOLO appended a numeric suffix (bungvision2,
-        # bungvision3 ...) because the run name already existed on disk.
+        self._scan_for_save_dir(data)
+
+    # Ultralytics announces its output directory twice: "Logging results to
+    # <dir>" as training starts, and "Results saved to <dir>" when it ends.
+    # Only the second was being read -- so for the whole of training there was
+    # nothing to follow, and the chart fell back to globbing <project>/<name>*
+    # for a directory Ultralytics does not necessarily use. It resolves the
+    # project against its own runs root, so a project of "data/training" can
+    # land in runs/obb/data/training/<name>, and the glob finds nothing there.
+    # Taking the first line means the chart is right from epoch one, and the
+    # summary no longer depends on a race between the last stdout chunk and
+    # the process-finished signal.
+    _SAVE_DIR_RE = re.compile(
+        r"(?:results saved to|logging results to)\s+(.+)", re.IGNORECASE)
+
+    def _scan_for_save_dir(self, data: str) -> None:
         for line in data.splitlines():
-            line = line.strip()
-            # Ultralytics prints: "Results saved to runs/obb/train2" or similar.
-            # The CWD for the subprocess is the project root so the path may be
-            # relative, and ANSI escape codes may surround it.
-            if "results saved to" in line.lower():
-                import re
-                clean = re.sub(r"\x1b\[[0-9;]*m", "", line)
-                m = re.search(r"results saved to\s+(.+)", clean, re.IGNORECASE)
-                if m:
-                    save_dir = Path(m.group(1).strip())
-                    if not save_dir.is_absolute():
-                        save_dir = Path(DATA_DIR.parent) / save_dir
-                    candidate = save_dir / "results.csv"
-                    self._results_csv_path = candidate
+            clean = re.sub(r"\x1b\[[0-9;]*m", "", line).strip()
+            m = self._SAVE_DIR_RE.search(clean)
+            if not m:
+                continue
+            save_dir = Path(m.group(1).strip().rstrip("."))
+            if not save_dir.is_absolute():
+                # Matches the subprocess's working directory, set on launch.
+                save_dir = Path(DATA_DIR.parent) / save_dir
+            self._train_save_dir = save_dir
+            self._results_csv_path = save_dir / "results.csv"
 
     def _on_train_error(self, _error) -> None:
         if self._train_process is None:

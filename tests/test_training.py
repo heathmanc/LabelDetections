@@ -216,3 +216,68 @@ def test_train_kwargs_omits_empty_optionals():
     k = t.train_kwargs(dict(_worker_params(), device="", project="", name=""))
     assert "device" not in k and "project" not in k and "name" not in k
     assert k["imgsz"] == 960 and k["epochs"] == 50
+
+
+# --- following the run's real output directory ------------------------------
+
+try:
+    from PySide6.QtWidgets import QApplication
+    import os
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    _HAVE_QT = True
+except Exception:
+    _HAVE_QT = False
+
+import pytest
+
+qt_only = pytest.mark.skipif(not _HAVE_QT, reason="PySide6 not available")
+
+_win = None
+
+
+def _window():
+    global _win
+    if _win is None:
+        QApplication.instance() or QApplication([])
+        from label_detections.ui.main_window import MainWindow
+        _win = MainWindow()
+    return _win
+
+
+@qt_only
+def test_the_save_directory_is_taken_from_the_start_of_training_line():
+    """Ultralytics announces its output directory twice: as training starts,
+    and again when it ends. Only the second was read -- so for the whole of
+    training there was nothing to follow, and the chart fell back to globbing
+    <project>/<name>* for a directory Ultralytics does not necessarily use. It
+    resolves the project against its own runs root, so project 'data/training'
+    lands in runs/obb/data/training/<name> and the glob finds nothing."""
+    win = _window()
+    win._results_csv_path = None
+    win._train_save_dir = None
+
+    win._scan_for_save_dir(
+        "\x1b[1mLogging results to \x1b[1mruns/obb/data/training/lv-15\x1b[0m\n")
+    assert win._results_csv_path is not None
+    assert str(win._results_csv_path).endswith("runs/obb/data/training/lv-15/results.csv")
+
+
+@qt_only
+def test_the_end_of_training_line_is_still_read():
+    win = _window()
+    win._results_csv_path = None
+    win._train_save_dir = None
+    win._scan_for_save_dir("Results saved to \x1b[1mruns/obb/train7\x1b[0m")
+    assert str(win._results_csv_path).endswith("runs/obb/train7/results.csv")
+
+
+@qt_only
+def test_an_announced_directory_is_not_second_guessed_by_the_glob():
+    """Once Ultralytics has said where it is writing, an absent results.csv
+    means 'not yet', not 'look elsewhere'. Falling through would lock onto some
+    other run's file and chart the wrong training."""
+    win = _window()
+    win._results_csv_path = None
+    win._train_save_dir = None
+    win._scan_for_save_dir("Logging results to runs/obb/not-written-yet")
+    assert win._resolve_results_csv() is None
