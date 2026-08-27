@@ -1290,3 +1290,26 @@ def test_the_predictor_device_is_checked_not_assumed():
     body = inspect.getsource(InferenceWorker.infer)
     assert 'getattr(self._model, "predictor", None)' in body
     assert "_device_checked" in body, "must report once, not every frame"
+
+
+def test_tracking_uses_bytetrack_not_the_default_botsort():
+    """Turning tracking on took inference from single-digit milliseconds to
+    120, and all of it was BoT-SORT's global motion compensation: sparse
+    optical flow over the whole frame, every frame, to cancel camera movement.
+    On a 20 MP image that costs more than the model. The camera is bolted
+    down, so it cancels nothing."""
+    import inspect
+    from label_detections.ui.live_detect import InferenceWorker
+
+    worker = InferenceWorker("d.pt", 640, 0.25, 0, track=True)
+    assert worker._tracker == "bytetrack.yaml"
+    assert "tracker=self._tracker" in inspect.getsource(InferenceWorker.infer)
+
+
+def test_the_tracker_stays_overridable():
+    """A camera that does move would want BoT-SORT back."""
+    from label_detections.ui.live_detect import InferenceWorker
+
+    worker = InferenceWorker("d.pt", 640, 0.25, 0, track=True,
+                             tracker="botsort.yaml")
+    assert worker._tracker == "botsort.yaml"

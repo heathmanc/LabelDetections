@@ -122,7 +122,8 @@ class InferenceWorker(QObject):
     result = Signal(object, float, object)
 
     def __init__(self, model_path: str, imgsz: int, conf: float, device,
-                 track: bool = True, classifier_path: str = "",
+                 track: bool = True, tracker: str = "bytetrack.yaml",
+                 classifier_path: str = "",
                  crop_px: int = 224, margin: float = 0.06,
                  identity_floor: float = 0.55):
         super().__init__()
@@ -131,6 +132,7 @@ class InferenceWorker(QObject):
         self._conf = float(conf)
         self._device = device
         self._track = bool(track)
+        self._tracker = str(tracker or "bytetrack.yaml")
         self._classifier_path = str(classifier_path or "")
         self._crop_px = int(crop_px)
         self._margin = float(margin)
@@ -284,7 +286,16 @@ class InferenceWorker(QObject):
                 # persist=True is what carries the tracker's state between
                 # calls; without it every frame starts a fresh tracker and each
                 # object is "new" forever, which is the same as not tracking.
-                results = self._model.track(frame, persist=True, **args)
+                #
+                # bytetrack, not the default botsort. BoT-SORT runs global
+                # motion compensation -- sparse optical flow over the WHOLE
+                # frame, every frame -- to cancel out camera movement. On a
+                # 20 MP frame that is the entire cost of tracking, and it buys
+                # nothing here: the camera is bolted down. Turning tracking on
+                # took inference from single-digit milliseconds to 120, and all
+                # of it was this.
+                results = self._model.track(frame, persist=True,
+                                            tracker=self._tracker, **args)
             else:
                 results = self._model.predict(frame, **args)
         except Exception as exc:

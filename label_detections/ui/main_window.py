@@ -2094,6 +2094,10 @@ class MainWindow(QMainWindow):
             "average instead of a per-frame flicker.\n\n"
             "An object that keeps being lost and re-acquired under a new id is "
             "the failure a single confidence number hides completely.\n\n"
+            "Uses ByteTrack. Ultralytics defaults to BoT-SORT, which runs "
+            "optical flow over the whole frame every frame to cancel camera "
+            "movement -- on a 20 MP image that costs more than the model does, "
+            "and a bolted-down camera has no movement to cancel.\n\n"
             "Takes effect on the next Start.")
         cv_.addWidget(self.live_track_check)
 
