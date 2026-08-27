@@ -894,13 +894,35 @@ def test_a_throttled_rate_is_called_out_next_to_the_latency():
     r = ld.Rolling()
     for i in range(10):
         r.record(0.008, now=100 + i * 0.15)
-    note = ld.throughput_note(r)
+    note = ld.throughput_note(r, interval_s=0.15)
     assert "could run" in note and "not the GPU" in note
 
     fast = ld.Rolling()
     for i in range(10):
         fast.record(0.008, now=100 + i * 0.009)
-    assert ld.throughput_note(fast) == "", "no note when the rate matches latency"
+    assert ld.throughput_note(fast, interval_s=0.01) == "", \
+        "no note when the rate matches latency"
+
+
+def test_the_note_names_the_ceiling_actually_in_force():
+    """It quoted MIN_INTERVAL_S, the module default, rather than the interval
+    in force -- so with the rate set to 30/s it still reported a "150 ms start
+    floor" that had not applied for some time. And it offered the camera and
+    the floor as alternatives without saying which, when the numbers to tell
+    them apart are right there."""
+    r = ld.Rolling()
+    for i in range(10):
+        r.record(0.020, now=100 + i * 0.058)      # 20 ms model, ~17/s achieved
+
+    # Rate raised well above the camera: the camera is the limit.
+    camera_bound = ld.throughput_note(r, interval_s=1 / 30, camera_fps=17.0)
+    assert "the camera, at 17/s" in camera_bound
+    assert "150 ms" not in camera_bound
+
+    # Rate left low: the floor is the limit, and it is quoted correctly.
+    floor_bound = ld.throughput_note(r, interval_s=0.15, camera_fps=17.0)
+    assert "150 ms start floor" in floor_bound
+    assert "camera" not in floor_bound
 
 
 def test_the_three_rates_are_reported_separately():

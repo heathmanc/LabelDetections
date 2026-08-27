@@ -2310,8 +2310,7 @@ class MainWindow(QMainWindow):
             self.live_status_label.setText(
                 "A frame's result never came back; carrying on. If this repeats, "
                 "the model is failing on every frame -- check the message above.")
-        interval = (1.0 / max(0.5, float(self.live_rate_spin.value()))
-                    if hasattr(self, "live_rate_spin") else live_logic.MIN_INTERVAL_S)
+        interval = self._infer_interval()
         if not live_logic.should_infer(self._live_busy, now - self._live_last_started,
                                        min_interval_s=interval):
             return
@@ -2335,6 +2334,12 @@ class MainWindow(QMainWindow):
         # second to about 60. That is the change that destabilised the camera.
         # Correct and destabilising is still destabilising.
         self._live_worker.infer(self._live_frame)
+
+    def _infer_interval(self) -> float:
+        """Seconds between inference starts, from the configured rate."""
+        if hasattr(self, "live_rate_spin"):
+            return 1.0 / max(0.5, float(self.live_rate_spin.value()))
+        return live_logic.MIN_INTERVAL_S
 
     def _on_live_result(self, items, latency: float, speed=None) -> None:
         """Results arrive as plain dicts, already identified.
@@ -2374,10 +2379,14 @@ class MainWindow(QMainWindow):
         else:
             self.live_readout.setPlainText(live_logic.frame_summary(
                 counts, self.label_id, self._live_rolling))
+        interval = self._infer_interval()
         rates = live_logic.rate_line(
             getattr(self, "_preview_fps", 0.0),
             self.camera.read_fps() if hasattr(self.camera, "read_fps") else 0.0,
             self._live_rolling, getattr(self, "_gui_ms", 0.0))
+        rates += live_logic.throughput_note(
+            self._live_rolling, interval,
+            self.camera.read_fps() if hasattr(self.camera, "read_fps") else 0.0)
         rates += live_logic.phase_line(self._live_speed)
         self.live_readout.setPlainText(
             rates + "\n" + self.live_readout.toPlainText()

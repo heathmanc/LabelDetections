@@ -162,20 +162,32 @@ def quiet_hint(empty_frames: int, conf: float, imgsz: int,
     return "\n".join(lines)
 
 
-def throughput_note(rolling: "Rolling") -> str:
-    """Say when the rate is far below what the measured latency allows.
+def throughput_note(rolling: "Rolling", interval_s: float = MIN_INTERVAL_S,
+                    camera_fps: float = 0.0) -> str:
+    """Say when the rate is far below what the measured latency allows, and
+    name the thing actually holding it back.
 
-    The two numbers sit side by side in the readout and only mean something
-    together: 8 ms per inference alongside 6/s is not a slow model, it is a
-    throttled one, and nothing about the pair says so on its own.
+    It used to quote MIN_INTERVAL_S, the module default, rather than the
+    interval in force -- so with the rate set to 30/s it still reported a
+    "150 ms start floor" that had not applied for some time. And it offered
+    the camera and the floor as alternatives without saying which, when the
+    numbers to tell them apart are right there.
     """
     if not rolling.mean_ms or rolling.rate <= 0:
         return ""
     possible = 1000.0 / rolling.mean_ms
-    if possible > rolling.rate * 1.8:
-        return (f"   (model could run ~{possible:.0f}/s; the gap is the camera "
-                f"or the {MIN_INTERVAL_S * 1000:.0f} ms start floor, not the GPU)")
-    return ""
+    if possible <= rolling.rate * 1.8:
+        return ""
+
+    floor_fps = 1.0 / interval_s if interval_s > 0 else float("inf")
+    # Whichever ceiling is lowest is the one in force.
+    if camera_fps and camera_fps <= floor_fps and camera_fps < possible:
+        cause = f"the camera, at {camera_fps:.0f}/s"
+    elif floor_fps < possible:
+        cause = f"the {interval_s * 1000:.0f} ms start floor ({floor_fps:.0f}/s)"
+    else:
+        cause = "something upstream of the model"
+    return f"   (model could run ~{possible:.0f}/s; the limit is {cause}, not the GPU)"
 
 
 def frame_summary(counts: dict[str, int], label_id: str,
@@ -183,7 +195,7 @@ def frame_summary(counts: dict[str, int], label_id: str,
     """The readout under the live view."""
     total = sum(counts.values())
     lines = [f"{total} detection(s)   {rolling.mean_ms:.0f} ms   "
-             f"{rolling.rate:.1f}/s{throughput_note(rolling)}"]
+             f"{rolling.rate:.1f}/s"]
     if label_id:
         found = counts.get(label_id, 0)
         lines.append(f"{label_id}: {found} found" if found
@@ -309,7 +321,7 @@ def track_summary(book: TrackBook, label_id: str, rolling: Rolling) -> str:
     """The readout when tracking is on."""
     rows = book.rows()
     lines = [f"{len(rows)} tracked   {rolling.mean_ms:.0f} ms   "
-             f"{rolling.rate:.1f}/s{throughput_note(rolling)}"]
+             f"{rolling.rate:.1f}/s"]
     mine = [t for t in rows if t.name == label_id] if label_id else []
     if label_id and not mine:
         # The one thing worth a line of its own: the label being trained is
