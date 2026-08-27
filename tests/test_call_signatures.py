@@ -74,8 +74,11 @@ def test_the_guard_actually_catches_a_stale_call(tmp_path):
     bad = tmp_path / "stale.py"
     bad.write_text(
         "from label_detections.core.yolo_export import export_all_labels_yolo\n"
-        "export_all_labels_yolo(class_mode='label_names')\n",
+        # A parameter that genuinely no longer exists. The example used to be
+        # class_mode, which has since become real -- so the guard rightly
+        # stopped flagging it and this test stopped testing anything.
+        "export_all_labels_yolo(families_only=True)\n",
         encoding="utf-8",
     )
     problems = _mismatches(bad)
-    assert problems and "class_mode" in problems[0]
+    assert problems and "families_only" in problems[0]

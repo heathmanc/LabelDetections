@@ -37,7 +37,23 @@ DEFAULT_SPLIT_TRAIN = 0.8
 DEFAULT_SEED = 0
 
 
-def _class_name(box: dict) -> str:
+# What the detector's classes mean. Two ways to train, and they answer
+# different questions.
+#
+# "label_id" -- one class per label. One model, one pass, and it reports the id
+# the recipe is written in. Detection and fine-grained identity share a head,
+# so near-identical labels are separated on however many pixels the label
+# occupies in the full frame.
+#
+# "generic" -- every label is one class, `label`. The detector answers only
+# "where is a label", which is a geometric question that generalises to labels
+# it has never seen, and identity is left to a classifier over the crops. A new
+# label then needs no detector training at all.
+CLASS_MODES = ("label_id", "generic")
+GENERIC_CLASS = "label"
+
+
+def _class_name(box: dict, mode: str = "label_id") -> str:
     """The detector class for a box: its label id.
 
     ``label_id`` wins over ``label`` so annotations drawn before the detector
@@ -48,8 +64,12 @@ def _class_name(box: dict) -> str:
     """
     for key in ("label_id", "label"):
         name = str(box.get(key, "") or "").strip()
-        if name:
-            return safe_token(name).lower()
+        if not name:
+            continue
+        name = safe_token(name).lower()
+        if mode == "generic" and name not in labels_mod.STRUCTURAL_CLASSES:
+            return GENERIC_CLASS
+        return name
     cls = box.get("class_id")
     return f"class_{int(cls)}" if cls is not None else "unknown"
 
@@ -142,14 +162,15 @@ def collect_entries(label_id: str, reviewed_only: bool = True) -> list[dataset_l
 
 
 def _write_label_file(out: Path, split: str, stem: str, data: dict,
-                      class_index: dict[str, int], task: str) -> int:
+                      class_index: dict[str, int], task: str,
+                      class_mode: str = "label_id") -> int:
     """Write one label file and return how many boxes it carried."""
     line_for = _obb_line if task == "obb" else _detect_line
     width = int(data.get("width", 0) or 0)
     height = int(data.get("height", 0) or 0)
     lines: list[str] = []
     for box in data.get("boxes", []) or []:
-        name = _class_name(box)
+        name = _class_name(box, class_mode)
         if name not in class_index:
             continue
         line = line_for(box, width, height, class_index[name])
@@ -161,7 +182,7 @@ def _write_label_file(out: Path, split: str, stem: str, data: dict,
 
 
 def _write_split(out: Path, entries: list[dataset_logic.Entry], class_index: dict[str, int],
-                 split: str, task: str) -> list[str]:
+                 split: str, task: str, class_mode: str = "label_id") -> list[str]:
     """Copy images and write label files for one split; returns manifest rows."""
     (out / "images" / split).mkdir(parents=True, exist_ok=True)
     (out / "labels" / split).mkdir(parents=True, exist_ok=True)
@@ -177,7 +198,7 @@ def _write_split(out: Path, entries: list[dataset_logic.Entry], class_index: dic
         except OSError:
             continue
         boxes = _write_label_file(out, split, Path(out_name).stem,
-                                  entry.annotation, class_index, task)
+                                  entry.annotation, class_index, task, class_mode)
         rows.append(f"{split},{entry.label_id},{out_name},{boxes},"
                     f"{entry.session or entry.source or ''},0")
     return rows
@@ -185,7 +206,8 @@ def _write_split(out: Path, entries: list[dataset_logic.Entry], class_index: dic
 
 def _write_augmented(out: Path, entries: list[dataset_logic.Entry],
                      class_index: dict[str, int], task: str, library,
-                     copies: int, seed: int) -> tuple[list[str], list[str]]:
+                     copies: int, seed: int,
+                     class_mode: str = "label_id") -> tuple[list[str], list[str]]:
     """Extra training images with each label's variable regions replaced.
 
     Train only, never validation: recombined images validate nothing except how
@@ -232,7 +254,7 @@ def _write_augmented(out: Path, entries: list[dataset_logic.Entry],
                 except Exception:
                     continue
                 boxes = _write_label_file(out, "train", stem, entry.annotation,
-                                          class_index, task)
+                                          class_index, task, class_mode)
                 rows.append(f"train,{label_id},{target.name},{boxes},"
                             f"{entry.session or entry.source or ''},1")
                 written += 1
@@ -245,8 +267,10 @@ def _write_augmented(out: Path, entries: list[dataset_logic.Entry],
 def write_dataset(out: Path, entries: list[dataset_logic.Entry], *, task: str = "obb",
                   split_train: float = DEFAULT_SPLIT_TRAIN, seed: int = DEFAULT_SEED,
                   reviewed_only: bool = True, library=None,
-                  augment: int = 0) -> Path:
+                  augment: int = 0, class_mode: str = "label_id") -> Path:
     """Write a YOLO dataset from already-collected entries.
+
+    ``class_mode`` picks what the detector's classes mean -- see CLASS_MODES.
 
     ``augment`` asks for that many extra training copies per image of any label
     whose variable regions turn out to be constant across the dataset -- see
@@ -261,7 +285,7 @@ def write_dataset(out: Path, entries: list[dataset_logic.Entry], *, task: str = 
         if boxes:
             labeled += 1
         for box in boxes:
-            name = _class_name(box)
+            name = _class_name(box, class_mode)
             if name not in seen:
                 seen.add(name)
                 class_names.append(name)
@@ -289,11 +313,11 @@ def write_dataset(out: Path, entries: list[dataset_logic.Entry], *, task: str = 
     out.mkdir(parents=True, exist_ok=True)
 
     rows = ["split,label_id,image,boxes,group,augmented"]
-    rows += _write_split(out, train, class_index, "train", task)
-    rows += _write_split(out, val, class_index, "val", task)
+    rows += _write_split(out, train, class_index, "train", task, class_mode)
+    rows += _write_split(out, val, class_index, "val", task, class_mode)
 
     augmented_rows, augment_notes = _write_augmented(
-        out, train, class_index, task, library, augment, seed)
+        out, train, class_index, task, library, augment, seed, class_mode)
     rows += augmented_rows
 
     names_block = "\n".join(f"  {i}: {name}" for i, name in enumerate(class_names))
@@ -332,6 +356,7 @@ def write_dataset(out: Path, entries: list[dataset_logic.Entry], *, task: str = 
 def export_label_yolo(label_id: str, *, task: str = "obb", reviewed_only: bool = True,
                       split_train: float = DEFAULT_SPLIT_TRAIN,
                       seed: int = DEFAULT_SEED, out: Path | None = None,
+                      class_mode: str = "label_id",
                       library=None, augment: int = 0) -> Path:
     """Export one label's dataset on its own.
 
@@ -348,12 +373,13 @@ def export_label_yolo(label_id: str, *, task: str = "obb", reviewed_only: bool =
     target = out or (EXPORT_DIR / f"{safe_token(label_id)}_{task}")
     return write_dataset(target, entries, task=task, split_train=split_train,
                          seed=seed, reviewed_only=reviewed_only,
-                         library=library, augment=augment)
+                         library=library, augment=augment, class_mode=class_mode)
 
 
 def export_all_labels_yolo(*, task: str = "obb", reviewed_only: bool = True,
                            split_train: float = DEFAULT_SPLIT_TRAIN,
                            seed: int = DEFAULT_SEED, out: Path | None = None,
+                           class_mode: str = "label_id",
                            library=None, augment: int = 0) -> Path:
     """Export every label's dataset into one training set.
 
@@ -377,4 +403,4 @@ def export_all_labels_yolo(*, task: str = "obb", reviewed_only: bool = True,
     target = out or (EXPORT_DIR / f"all_labels_{task}")
     return write_dataset(target, entries, task=task, split_train=split_train,
                          seed=seed, reviewed_only=reviewed_only,
-                         library=library, augment=augment)
+                         library=library, augment=augment, class_mode=class_mode)

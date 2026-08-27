@@ -3017,6 +3017,25 @@ class MainWindow(QMainWindow):
             btn.setMaximumHeight(26)
             btn.setMinimumWidth(0)
             btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        exp_two = QPushButton("Export Two-Stage")
+        exp_two.clicked.connect(self.export_two_stage)
+        exp_two.setToolTip(
+            "Write both halves of a detect-then-classify pipeline from the same "
+            "annotations: a detector that finds WHERE a label is (one generic "
+            "class), and 224 px crops foldered by label id for a classifier "
+            "that decides WHICH.\n\n"
+            "Worth it when labels differ in fine detail. A label 100 px wide in "
+            "the frame gives the detector 100 px to read a revision letter off; "
+            "the same label cropped and resized gives the classifier 224.\n\n"
+            "Both halves share one split and seed, so they hold out the same "
+            "batteries."
+        )
+        for btn in (exp_two,):
+            btn.setProperty("rightPanelButton", True)
+            btn.setMinimumHeight(24)
+            btn.setMaximumHeight(26)
+            btn.setMinimumWidth(0)
+            btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         export_btn_row = QHBoxLayout()
         export_btn_row.setSpacing(6)
         export_btn_row.addWidget(exp)
@@ -3028,6 +3047,7 @@ class MainWindow(QMainWindow):
         augment_row.addWidget(self.export_augment_spin, 1)
         ev.addLayout(augment_row)
         ev.addLayout(export_btn_row)
+        ev.addWidget(exp_two)
         export_note = QLabel("Exports annotation class names as-is. Reviewed and force-reviewed images only.")
         export_note.setWordWrap(True)
         export_note.setStyleSheet("color: #94a3b8;")
@@ -6191,6 +6211,41 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "export_augment_spin"):
             return 0
         return int(self.export_augment_spin.value())
+
+    def export_two_stage(self) -> None:
+        """Write a detector dataset and a classifier crop dataset together.
+
+        Offered as a pair rather than two buttons because exporting them
+        separately is how the two halves end up with different splits, and a
+        classifier validated on crops of batteries the detector trained on
+        reports an accuracy that does not survive the line.
+        """
+        from label_detections.core import classify_export
+
+        task = self._export_task()
+        try:
+            detect_dir, classify_dir = classify_export.export_two_stage(
+                task=task, reviewed_only=self._export_reviewed_only(),
+                library=self.library)
+        except FileNotFoundError as exc:
+            QMessageBox.information(self, "Export Two-Stage", str(exc))
+            return
+        except Exception as exc:
+            QMessageBox.critical(self, "Export Two-Stage", f"Export failed:\n{exc}")
+            return
+
+        classes = (classify_dir / "classes.txt").read_text(encoding="utf-8").split()
+        QMessageBox.information(
+            self, "Export complete",
+            f"Detector (finds where a label is):\n{detect_dir}\n"
+            f"  {detect_dir / 'data.yaml'}\n\n"
+            f"Classifier ({len(classes)} label(s)):\n{classify_dir}\n\n"
+            f"Both share one split and seed, so they hold out the same "
+            f"batteries.\n\nSuggested commands:\n"
+            f"  yolo {task} train data={detect_dir / 'data.yaml'} model=yolo11s-obb.pt\n"
+            f"  yolo classify train data={classify_dir} model=yolo11s-cls.pt imgsz=224"
+        )
+        self.status.showMessage(f"Exported two-stage datasets to {classify_dir.parent}", 8000)
 
     def _export_task(self) -> str:
         return self.export_task_combo.currentData() if hasattr(self, "export_task_combo") else "obb"

@@ -216,3 +216,82 @@ def test_the_battery_face_holds_class_zero(monkeypatch):
     win.export_all_yolo()
     yaml = (EXPORT_DIR / "all_labels_obb" / "data.yaml").read_text()
     assert "0: battery_side" in yaml
+
+
+# --- the two-stage pipeline: detect where, classify which --------------------
+
+def test_the_two_stage_detector_learns_where_a_label_is_not_which(monkeypatch):
+    """Under a crop pipeline the detector's job is location. Keeping one class
+    per label there would put fine-grained identity back in the stage that has
+    the fewest pixels to decide it with."""
+    from label_detections.core import classify_export, storage
+
+    _window()
+    _dataset("ts_det_a", images=3)
+    _dataset("ts_det_b", images=3)
+    detect_dir, _ = classify_export.export_two_stage(
+        out=storage.EXPORT_DIR / "ts_test_a")
+
+    yaml = (detect_dir / "data.yaml").read_text()
+    assert "0: battery_side" in yaml
+    assert "1: label" in yaml
+    assert "ts_det_a" not in yaml and "ts_det_b" not in yaml
+
+
+def test_the_classifier_gets_one_folder_per_label_id(monkeypatch):
+    from label_detections.core import classify_export, storage
+
+    _window()
+    _dataset("ts_cls_a", images=3)
+    _, classify_dir = classify_export.export_two_stage(
+        out=storage.EXPORT_DIR / "ts_test_b")
+
+    classes = (classify_dir / "classes.txt").read_text().split()
+    assert "ts_cls_a" in classes
+    crops = list((classify_dir / "train" / "ts_cls_a").glob("*.jpg"))
+    assert crops
+
+
+def test_both_halves_hold_out_the_same_batteries(monkeypatch):
+    """Split them separately and a crop of a battery the detector validates on
+    can land in the classifier's training set. The measured accuracy then
+    describes nothing."""
+    from label_detections.core import classify_export, storage
+
+    _window()
+    for name in ("ts_split_a", "ts_split_b", "ts_split_c"):
+        _dataset(name, images=4)
+    detect_dir, classify_dir = classify_export.export_two_stage(
+        out=storage.EXPORT_DIR / "ts_test_c")
+
+    def groups(path, split_col=0, group_col=-1):
+        out = {"train": set(), "val": set()}
+        for row in path.read_text().splitlines()[1:]:
+            parts = row.split(",")
+            out.setdefault(parts[split_col], set()).add(parts[group_col])
+        return out
+
+    det = groups(detect_dir / "manifest.csv", group_col=4)
+    cls = groups(classify_dir / "manifest.csv", group_col=3)
+    assert det["val"] and cls["val"]
+    assert not (cls["train"] & det["val"]), "a held-out battery leaked into training"
+    assert det["train"] == cls["train"] and det["val"] == cls["val"]
+
+
+def test_the_battery_face_is_never_offered_to_the_classifier():
+    """battery_side is the face, not a label. A classifier taught to call it
+    one would report it on every battery."""
+    from label_detections.core import classify_export as ce
+
+    data = {"boxes": [
+        {"label": "battery_side", "points": [[0, 0], [9, 0], [9, 9], [0, 9]]},
+        {"label": "sp", "label_id": "sp", "points": [[1, 1], [4, 1], [4, 4], [1, 4]]},
+    ]}
+    assert [lid for lid, _ in ce.crop_targets(data)] == ["sp"]
+
+
+def test_a_box_with_no_identity_is_skipped_rather_than_guessed():
+    from label_detections.core import classify_export as ce
+
+    data = {"boxes": [{"kind": "obb", "points": [[0, 0], [9, 0], [9, 9], [0, 9]]}]}
+    assert ce.crop_targets(data) == []
