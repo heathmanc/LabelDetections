@@ -52,6 +52,14 @@ DEFAULT_IMGSZ = 640
 # already there, single-stage" above "a clean two-stage win" below. A threshold
 # worth arguing about is worth arguing about once.
 ADEQUATE_PX = 256
+# What the detector needs to FIND a label, which is a far lower bar than
+# identifying one and was the number missing from the two-stage advice. YOLO's
+# finest stride is 8, so an object wants to span several cells to be located
+# well; below about 32 px it is in the small-object regime where recall falls
+# off, and 96 px is comfortable. Under two-stage this is the ONLY thing the
+# detector's input has to satisfy -- identity is the crop's job -- which is
+# exactly why the detector can stay small and cheap.
+LOCALISE_FLOOR_PX = 96
 
 
 @dataclass
@@ -142,6 +150,40 @@ def recommend_crop(scales: dict[str, LabelScale], imgsz: int = DEFAULT_IMGSZ) ->
     if worst <= 0:
         return 224
     return min(MAX_CROP, int(math.ceil(worst / STRIDE) * STRIDE))
+
+
+def min_imgsz_for_localisation(scales: dict[str, LabelScale],
+                               floor: float = LOCALISE_FLOOR_PX) -> int:
+    """Smallest detector input at which every label can be reliably FOUND.
+
+    Sized from the smallest label, which runs out of pixels first. Under
+    two-stage this is the whole requirement on the detector.
+    """
+    need = 0.0
+    for sc in scales.values():
+        ratios = [f / side for side, f in zip(sc.long_sides, sc.frame_sides) if side]
+        if ratios:
+            need = max(need, floor * max(ratios))
+    if need <= 0:
+        return DEFAULT_IMGSZ
+    return int(math.ceil(need / STRIDE) * STRIDE)
+
+
+def crop_for_identity(scales: dict[str, LabelScale],
+                      floor: float = ADEQUATE_PX) -> int:
+    """Crop size for a two-stage pipeline.
+
+    Deliberately NOT recommend_crop(). That one asks "does the crop lose detail
+    against the detector", which is the right question when the detector is
+    also doing identity and the wrong one here -- under two-stage the detector
+    never identifies anything, so its resolution is not the bar to clear.
+
+    The crop resizes every label to the same size, so any crop at or above the
+    identity floor clears it for every label regardless of native size. One
+    step above the floor, for headroom against the fine print a read-region
+    would reveal.
+    """
+    return int(math.ceil(floor / STRIDE) * STRIDE) + STRIDE * 2
 
 
 def under_resolved(scales: dict[str, LabelScale], imgsz: int,
@@ -392,6 +434,12 @@ def advise(scales: dict[str, LabelScale], library=None,
     at_now = smallest.detector_px(imgsz, "median")
     crop = recommend_crop(scales, imgsz)
     weak = under_resolved(scales, imgsz)
+    # Two-stage sizes its own two numbers rather than inheriting whatever the
+    # detector happens to be set to. Its detector answers a different and much
+    # smaller question, and its crop is sized for identity rather than against
+    # the detector's resolution.
+    loc = min_imgsz_for_localisation(scales)
+    two_stage_crop = crop_for_identity(scales)
 
     lines = ["RECOMMENDATION", ""]
 
@@ -424,10 +472,11 @@ def advise(scales: dict[str, LabelScale], library=None,
             f"One detector doing identity too would need imgsz {need}, which is "
             f"slow and memory-hungry enough not to be worth it.",
             "",
-            f"So: detector at imgsz {imgsz} trained to LOCALISE only (one "
-            f"generic `label` class), then identity from a "
-            f"full-resolution crop at {crop} px. Finding a "
-            f"{at_now:.0f} px label is easy; identifying one is not.",
+            f"So: detector at imgsz {loc} trained to LOCALISE only (one "
+            f"generic `label` class -- {LOCALISE_FLOOR_PX} px of the smallest "
+            f"label is all it needs), then identity from a full-resolution "
+            f"crop at {two_stage_crop} px. Finding a label is easy; "
+            f"identifying one is not.",
         ]
     else:
         count = len(library.all()) if library is not None else len(scales)
@@ -440,9 +489,10 @@ def advise(scales: dict[str, LabelScale], library=None,
             f"{(need / max(imgsz, 1)) ** 2:.1f}x the inference time of {imgsz} "
             f"and more memory to train.",
             "",
-            f"B) Two-stage: detector stays at {imgsz} and only localises, "
-            f"identity comes from a {crop} px crop of the full-resolution "
-            f"frame. Two models to train and keep matched.",
+            f"B) Two-stage. Detector at imgsz {loc} -- sized only to FIND a "
+            f"label ({LOCALISE_FLOOR_PX} px of the smallest one), which is all "
+            f"it has to do. Classifier at {two_stage_crop} px on crops of the "
+            f"full-resolution frame. Two models to train and keep matched.",
             "",
         ]
         if count >= MANY_LABELS:

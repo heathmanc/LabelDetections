@@ -1291,17 +1291,21 @@ class MainWindow(QMainWindow):
         }
 
     def fill_training_from_scale(self) -> None:
-        """Put the measured numbers into both stages.
+        """Put the measured numbers into both stages, and into inference.
 
-        The two image sizes are exactly the settings that quietly cost accuracy
-        when guessed: a detector too small to resolve the smallest label, and a
-        classifier fed a size it did not train at.
+        Which pipeline is filled follows the export that actually exists, so
+        the fields describe the dataset on disk rather than an architecture
+        nobody has exported. The inference image size is set alongside the
+        training one: they were separate fields with no link, and a detector
+        trained at 1664 while Live Detect ran at 448 gave the model a twelfth
+        of the pixels it learned on, which looks exactly like a model that
+        does not work.
         """
         from label_detections.core import scale_report, yolo_export
         from label_detections.core.storage import EXPORT_DIR
 
+        datasets, _orphans = yolo_export.exportable_datasets(self.library)
         entries = []
-        datasets, orphans = yolo_export.exportable_datasets(self.library)
         for label_id in datasets:
             entries.extend(yolo_export.collect_entries(label_id, reviewed_only=False))
         scales = scale_report.measure(entries)
@@ -1311,44 +1315,62 @@ class MainWindow(QMainWindow):
                 "No boxes measured yet -- draw and save some labels first.")
             return
 
-        notes = []
         two_stage = EXPORT_DIR / "two_stage_detect_obb"
         classify_dir = EXPORT_DIR / "two_stage_classify"
-
-        need = scale_report.min_imgsz_for_identity(scales)
-        if need > scale_report.IMPRACTICAL_IMGSZ:
-            # Localise-then-crop: the detector only has to FIND labels, so it
-            # keeps a modest input and the resolution is spent on the crop.
-            det_imgsz = int(self.train_imgsz_spin.value())
-            notes.append(
-                f"Detector left at {det_imgsz}: it only has to find labels here. "
-                f"Identifying them at detector resolution would need {need}.")
-        else:
-            det_imgsz = need
-            self.train_imgsz_spin.setValue(det_imgsz)
-            notes.append(f"Detector image size set to {det_imgsz}, sized so the "
-                         f"smallest label still clears "
-                         f"{scale_report.IDENTITY_FLOOR_PX} px.")
+        single = EXPORT_DIR / "all_labels_obb"
+        notes: list[str] = []
 
         if (two_stage / "data.yaml").exists():
+            det_imgsz = scale_report.min_imgsz_for_localisation(scales)
+            crop = (self._live_crop_px(str(classify_dir / "x.pt"))
+                    if classify_dir.exists()
+                    else scale_report.crop_for_identity(scales))
             self.train_data_edit.setText(str(two_stage / "data.yaml"))
-            notes.append(f"Detector data: {two_stage / 'data.yaml'}")
-        else:
-            notes.append("No two-stage detector export found -- run Export "
-                         "Two-Stage, then fill again.")
-
-        if classify_dir.exists():
-            self.cls_data_edit.setText(str(classify_dir))
-            crop = self._live_crop_px(str(classify_dir / "x.pt"))
+            self.train_imgsz_spin.setValue(det_imgsz)
             self.cls_imgsz_spin.setValue(int(crop))
-            notes.append(f"Classifier data: {classify_dir}")
-            notes.append(f"Classifier image size set to {crop}, read from the "
-                         f"crops that export actually wrote.")
+            if classify_dir.exists():
+                self.cls_data_edit.setText(str(classify_dir))
+            notes += [
+                "Two-stage export found, so both stages are filled for it.",
+                f"Detector imgsz {det_imgsz} -- sized only to FIND a label "
+                f"({scale_report.LOCALISE_FLOOR_PX} px of the smallest). It does "
+                f"not identify anything, so it does not need more.",
+                f"Classifier imgsz {crop}"
+                + (" -- read from the crops the export wrote."
+                   if classify_dir.exists() else " -- sized for identity."),
+            ]
+            infer_imgsz = det_imgsz
+        elif (single / "data.yaml").exists():
+            need = scale_report.min_imgsz_for_identity(scales)
+            self.train_data_edit.setText(str(single / "data.yaml"))
+            self.train_imgsz_spin.setValue(need)
+            notes += [
+                "Single-stage export found, so the detector is filled for it.",
+                f"Detector imgsz {need} -- sized so the smallest label clears "
+                f"{scale_report.ADEQUATE_PX} px, which is what identifying it "
+                f"from artwork takes.",
+            ]
+            infer_imgsz = need
         else:
-            notes.append("No classifier crops found -- run Export Two-Stage first.")
+            QMessageBox.information(
+                self, "Fill From Label Scale",
+                "No export found yet. Run Export All (single-stage) or Export "
+                "Two-Stage first -- the fields are filled to match whichever "
+                "dataset is actually on disk.")
+            return
+
+        if hasattr(self, "test_imgsz_spin"):
+            was = int(self.test_imgsz_spin.value())
+            self.test_imgsz_spin.setValue(int(infer_imgsz))
+            if was != infer_imgsz:
+                notes.append(
+                    f"Inference image size moved {was} -> {infer_imgsz} to match "
+                    f"training. A model run at a size it did not train on is the "
+                    f"single most common reason a good model appears to find "
+                    f"nothing.")
 
         QMessageBox.information(self, "Filled from label scale", "\n\n".join(notes))
-        self.status.showMessage("Training fields filled from the measured boxes", 6000)
+        self.status.showMessage("Training and inference sizes set from the measured boxes", 8000)
 
     def start_classifier_training(self) -> None:
         self._start_training_run(self._gather_classifier_params(), "classifier")

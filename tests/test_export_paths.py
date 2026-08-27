@@ -622,3 +622,45 @@ def test_a_small_library_is_still_advised_toward_the_simpler_option():
     scales = {"a": sr.LabelScale("a", [872.0] * 81, [5496.0] * 81)}
     text = sr.advise(scales, lib, imgsz=1024)
     assert "A is the simpler place to start" in text
+
+
+def test_two_stage_sizes_its_detector_for_finding_not_identifying():
+    """The number that was missing. A detector that only localises needs far
+    less than one that identifies, and quoting the user's current setting back
+    at them was not a recommendation."""
+    from label_detections.core import scale_report as sr
+
+    scales = {"small": sr.LabelScale("small", [872.0] * 81, [5496.0] * 81),
+              "big": sr.LabelScale("big", [3820.0] * 15, [5496.0] * 15)}
+    loc = sr.min_imgsz_for_localisation(scales)
+    ident = sr.min_imgsz_for_identity(scales)
+    assert loc < ident, "localising must be cheaper than identifying"
+    assert loc % sr.STRIDE == 0
+    # The smallest label must clear the localisation floor at that size.
+    assert scales["small"].detector_px(loc, "median") >= sr.LOCALISE_FLOOR_PX
+
+
+def test_the_two_stage_crop_is_sized_for_identity_not_against_the_detector():
+    """recommend_crop asks 'does this lose against the detector', which is the
+    wrong question when the detector never identifies anything."""
+    from label_detections.core import scale_report as sr
+
+    scales = {"small": sr.LabelScale("small", [872.0] * 81, [5496.0] * 81),
+              "big": sr.LabelScale("big", [3820.0] * 15, [5496.0] * 15)}
+    crop = sr.crop_for_identity(scales)
+    assert crop >= sr.ADEQUATE_PX
+    assert crop % sr.STRIDE == 0
+
+
+def test_the_advice_quotes_concrete_numbers_for_both_options():
+    from label_detections.core import scale_report as sr
+    from label_detections.core.labels import LabelDef, LabelLibrary
+
+    lib = LabelLibrary([LabelDef(label_id="a"), LabelDef(label_id="b")])
+    scales = {"a": sr.LabelScale("a", [872.0] * 81, [5496.0] * 81),
+              "b": sr.LabelScale("b", [3820.0] * 15, [5496.0] * 15)}
+    text = sr.advise(scales, lib, imgsz=448)
+    assert str(sr.min_imgsz_for_identity(scales)) in text        # option A
+    assert str(sr.min_imgsz_for_localisation(scales)) in text    # option B detector
+    assert str(sr.crop_for_identity(scales)) in text             # option B classifier
+    assert "detector stays at" not in text, "echoed the setting instead of advising"
