@@ -625,3 +625,45 @@ def test_stopping_never_frees_the_model_from_another_thread():
     assert "_stopping = True" in body
     assert "self._model = None" not in body, "still tearing down across threads"
     assert "self._classifier = None" not in body
+
+
+def test_a_basler_frame_survives_the_buffer_being_recycled():
+    """The crash: 0xc0000374, heap corruption, inside pypylon's RetrieveResult.
+
+    grab.Array is a view into pylon's own buffer and Convert() writes into one
+    the converter reuses next call. Release() hands that memory back to the
+    pool, so returning either view returned a dangling pointer -- the reader
+    stored it, the GUI read it a moment later, and the process died somewhere
+    else entirely. Always wrong; reliably fatal once the frame rate went up an
+    order of magnitude and buffers began recycling under a frame still in use.
+    """
+    import types
+    import numpy as np
+    from label_detections.core import camera as cam
+
+    if cam.pylon is None:
+        cam.pylon = types.SimpleNamespace(TimeoutHandling_Return=0)
+
+    pool = np.full((4, 4, 3), 7, np.uint8)
+
+    class Grab:
+        Array = pool
+
+        def IsValid(self):
+            return True
+
+        def GrabSucceeded(self):
+            return True
+
+        def Release(self):
+            pool[:] = 99          # exactly what pylon does: reuse the buffer
+
+    src = cam.CameraSource()
+    src.cap = type("C", (), {"IsGrabbing": lambda s: True,
+                             "RetrieveResult": lambda s, t, h: Grab()})()
+    src.converter = None
+
+    ok, frame = src._read_basler_frame(timeout_ms=10)
+    assert ok and frame is not None
+    assert frame[0, 0, 0] == 7, "the returned frame aliased a released buffer"
+    assert not np.shares_memory(frame, pool), "still a view into pylon memory"

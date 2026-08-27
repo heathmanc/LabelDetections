@@ -7,6 +7,7 @@ import time
 from dataclasses import dataclass
 
 import cv2
+import numpy as np
 
 try:
     from pypylon import pylon
@@ -658,8 +659,25 @@ class CameraSource:
             # IsValid() first: an invalid result cannot be asked anything else.
             if not grab.IsValid() or not grab.GrabSucceeded():
                 return False, None
-            frame = (self.converter.Convert(grab).GetArray()
-                     if self.converter is not None else grab.Array)
+            # COPY before the finally releases the grab.
+            #
+            # grab.Array is a view into pylon's own buffer, and
+            # ImageFormatConverter.Convert() writes into a buffer the converter
+            # reuses on the very next call. Release() hands that memory back to
+            # the pool, so returning either view returns a dangling pointer --
+            # the reader thread then stores it, the GUI reads it a moment later,
+            # and the process dies of heap corruption (0xc0000374) somewhere
+            # else entirely, usually inside the next RetrieveResult.
+            #
+            # It was always wrong. It became reliably fatal when the inference
+            # throttle came off and the frame rate went up an order of
+            # magnitude: buffers started being recycled while the previous
+            # frame was still being read.
+            view = (self.converter.Convert(grab).GetArray()
+                    if self.converter is not None else grab.Array)
+            frame = np.array(view, copy=True) if view is not None else None
+            if frame is None:
+                return False, None
             return True, frame
         except Exception as exc:
             self.last_read_error = f"{type(exc).__name__}: {exc}"
