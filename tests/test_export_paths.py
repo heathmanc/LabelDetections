@@ -747,3 +747,26 @@ def test_the_default_report_is_the_settings_and_little_else():
                  "clean two-stage win", "Two ways to fix"):
         assert gone not in text, f"still carrying the long-form argument: {gone!r}"
     assert len(text.splitlines()) < 30, "short means short"
+
+
+def test_the_export_writes_the_crop_size_the_report_recommends():
+    """They used different rules and disagreed: the export wrote 448 px crops
+    while every report said 320. One pipeline, one number."""
+    from label_detections.core import classify_export, scale_report as sr, storage
+
+    _window()
+    _dataset("crop_agree_a", images=3)
+    _dataset("crop_agree_b", images=3)
+
+    entries = []
+    from label_detections.core import yolo_export
+    for label_id in ("crop_agree_a", "crop_agree_b"):
+        entries.extend(yolo_export.collect_entries(label_id, reviewed_only=True))
+    recommended = sr.crop_for_identity(sr.measure(entries))
+
+    _, classify_dir = classify_export.export_two_stage(
+        out=storage.EXPORT_DIR / "crop_agree", imgsz=640)
+    import cv2
+    written = cv2.imread(str(next(classify_dir.rglob("*.jpg")))).shape[0]
+    assert written == recommended, (
+        f"export wrote {written} px, report recommends {recommended} px")

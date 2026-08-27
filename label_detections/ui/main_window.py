@@ -1330,6 +1330,7 @@ class MainWindow(QMainWindow):
             self.cls_imgsz_spin.setValue(int(crop))
             if classify_dir.exists():
                 self.cls_data_edit.setText(str(classify_dir))
+            wanted = scale_report.crop_for_identity(scales)
             notes += [
                 "Two-stage export found, so both stages are filled for it.",
                 f"Detector imgsz {det_imgsz} -- sized only to FIND a label "
@@ -1339,6 +1340,16 @@ class MainWindow(QMainWindow):
                 + (" -- read from the crops the export wrote."
                    if classify_dir.exists() else " -- sized for identity."),
             ]
+            if classify_dir.exists() and int(crop) != int(wanted):
+                # The classifier must be trained at the size its crops actually
+                # are, so the export wins -- but silently filling a number that
+                # disagrees with every report is what made this confusing.
+                notes.append(
+                    f"Note: {crop} comes from the crops on disk, but the current "
+                    f"recommendation is {wanted}. That export was written by an "
+                    f"older rule. Re-run Export Two-Stage to get {wanted} px "
+                    f"crops, or train at {crop} to match what is there -- either "
+                    f"is fine, mixing them is not.")
             infer_imgsz = det_imgsz
         elif (single / "data.yaml").exists():
             need = scale_report.min_imgsz_for_identity(scales)

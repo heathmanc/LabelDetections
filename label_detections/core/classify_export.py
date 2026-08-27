@@ -179,11 +179,10 @@ def export_two_stage(*, task: str = "obb", reviewed_only: bool = True,
     crop of a battery the detector validates on can land in the classifier's
     training set, and the pipeline's measured accuracy stops meaning anything.
 
-    ``size`` defaults to whatever the collected boxes say it should be rather
-    than to a fixed number. A 224 px crop is a large gain for a small label and
-    an outright loss for one the detector already resolves to 500 px, so a
-    dataset with a wide spread of label sizes cannot be served by a constant --
-    see ``core/scale_report``.
+    ``size`` defaults to the size identity actually needs -- every crop is
+    resized to it regardless of the label's native size, so the bar is the
+    identity floor and not the detector's resolution. See
+    ``scale_report.crop_for_identity``.
     """
     from . import yolo_export
 
@@ -204,7 +203,13 @@ def export_two_stage(*, task: str = "obb", reviewed_only: bool = True,
         library=library, class_mode="generic")
     if size is None:
         from . import scale_report
-        size = scale_report.recommend_crop(scale_report.measure(entries), imgsz)
+        # crop_for_identity, NOT recommend_crop. recommend_crop asks whether a
+        # crop loses detail against the detector, which is the right question
+        # only when the detector also identifies. Here it never does, so its
+        # resolution is not the bar -- and using it made the export write 448 px
+        # crops while every report recommended 320, two rules disagreeing about
+        # one number in one pipeline.
+        size = scale_report.crop_for_identity(scale_report.measure(entries))
     classify_dir = write_crop_dataset(
         base / "two_stage_classify", entries, size=int(size), margin=margin,
         split_train=split_train, seed=seed)
