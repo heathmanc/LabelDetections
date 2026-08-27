@@ -2048,6 +2048,27 @@ class MainWindow(QMainWindow):
         cv_.addWidget(QLabel("Stage 2 classifier"))
         cv_.addLayout(cls_row)
 
+        crop_row = QHBoxLayout()
+        self.live_crop_spin = QSpinBox()
+        self.live_crop_spin.setRange(32, 2048)
+        self.live_crop_spin.setSingleStep(32)
+        self.live_crop_spin.setValue(
+            int((load_test_settings() or {}).get("crop_px", 224)))
+        self.live_crop_spin.valueChanged.connect(lambda _v: self._save_test_settings())
+        self.live_crop_spin.setToolTip(
+            "The size the classifier was TRAINED at -- the Stage 2 image size "
+            "on the Train tab.\n\n"
+            "It was guessed before, by looking for the export's classes.txt "
+            "near the weights. Weights live under runs/, the dataset does not, "
+            "so the guess failed and quietly fell back to 224 -- a classifier "
+            "fed a size it did not train at loses accuracy with nothing to "
+            "show for it.\n\n"
+            "Filled in automatically when the crops can be found beside the "
+            "model; set it by hand when they cannot.")
+        crop_row.addWidget(QLabel("Stage 2 image size"))
+        crop_row.addWidget(self.live_crop_spin, 1)
+        cv_.addLayout(crop_row)
+
         self.live_track_check = QCheckBox("Track objects across frames")
         self.live_track_check.setChecked(True)
         self.live_track_check.setToolTip(
@@ -2182,7 +2203,7 @@ class MainWindow(QMainWindow):
             model_path, int(self.test_imgsz_spin.value()),
             float(self.test_conf_spin.value()), self._model_test_device_arg(),
             track=self._live_tracking, classifier_path=classifier_path,
-            crop_px=self._live_crop_px(classifier_path))
+            crop_px=int(self.live_crop_spin.value()))
         self._live_worker.moveToThread(self._live_thread)
         self._live_worker.loaded.connect(self._on_live_loaded)
         self._live_worker.failed.connect(self._on_live_failed)
@@ -4595,6 +4616,8 @@ class MainWindow(QMainWindow):
                 "device": self.test_device_edit.text().strip(),
                 "classifier": (self.live_classifier_edit.text().strip()
                                if hasattr(self, "live_classifier_edit") else ""),
+                "crop_px": (int(self.live_crop_spin.value())
+                            if hasattr(self, "live_crop_spin") else 224),
                 "hide_saved_labels": bool(self.test_hide_saved_labels_check.isChecked()),
             })
         except Exception:
@@ -6634,6 +6657,45 @@ class MainWindow(QMainWindow):
             self, "Stage 2 classifier", "", "PyTorch weights (*.pt);;All files (*)")
         if path:
             self.live_classifier_edit.setText(path)
+            self._sync_live_crop_size(path)
+
+    def _sync_live_crop_size(self, classifier_path: str) -> None:
+        """Fill the stage 2 size from the crops, when they can be found.
+
+        Only when found. Overwriting a hand-set value with a fallback guess is
+        how the wrong size gets in without anyone choosing it.
+        """
+        if not hasattr(self, "live_crop_spin") or not classifier_path:
+            return
+        found = self._live_crop_px_or_none(classifier_path)
+        if found:
+            self.live_crop_spin.setValue(int(found))
+            self.status.showMessage(
+                f"Stage 2 image size set to {found} from the crops beside this "
+                f"model.", 6000)
+
+    def _live_crop_px_or_none(self, classifier_path: str):
+        """The crop size the export wrote, or None when it cannot be found."""
+        from pathlib import Path as _P
+
+        if not classifier_path:
+            return None
+        try:
+            parents = list(_P(classifier_path).resolve().parents)
+        except Exception:
+            return None
+        for parent in parents:
+            if (parent / "classes.txt").exists():
+                sample = next((parent / "train").rglob("*.jpg"), None)
+                if sample is None:
+                    return None
+                try:
+                    import cv2
+                    probe = cv2.imread(str(sample))
+                    return int(probe.shape[0]) if probe is not None else None
+                except Exception:
+                    return None
+        return None
 
     def _live_crop_px(self, classifier_path: str) -> int:
         """The size stage 2 was trained at, from the export that produced it.

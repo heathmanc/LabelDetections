@@ -1140,3 +1140,45 @@ def test_a_result_that_never_arrives_does_not_freeze_the_view():
         win._live_thread = None
         win._live_busy = False
         win._live_loaded = False
+
+
+@ui
+def test_the_stage_two_size_is_settable_and_persisted():
+    """It was only guessable -- by looking for the export's classes.txt near
+    the weights. Weights live under runs/, the dataset does not, so the guess
+    failed and fell back to 224 with nothing said."""
+    from label_detections.core.storage import load_test_settings
+
+    win = _window()
+    win.live_crop_spin.setValue(320)
+    assert (load_test_settings() or {}).get("crop_px") == 320
+
+
+@ui
+def test_the_size_is_only_auto_filled_when_the_crops_are_really_there():
+    """Overwriting a hand-set value with a fallback guess is how the wrong size
+    gets in without anyone choosing it."""
+    import tempfile
+    from pathlib import Path
+
+    win = _window()
+    win.live_crop_spin.setValue(320)
+
+    # Weights with no dataset beside them: leave the operator's value alone.
+    orphan = Path(tempfile.mkdtemp()) / "runs" / "classify" / "weights"
+    orphan.mkdir(parents=True)
+    (orphan / "best.pt").write_bytes(b"x")
+    assert win._live_crop_px_or_none(str(orphan / "best.pt")) is None
+    win._sync_live_crop_size(str(orphan / "best.pt"))
+    assert win.live_crop_spin.value() == 320, "a guess overwrote a real setting"
+
+    # Weights inside an export: take the real size.
+    root = Path(tempfile.mkdtemp())
+    (root / "train" / "a").mkdir(parents=True)
+    (root / "classes.txt").write_text("a\n")
+    cv2.imwrite(str(root / "train" / "a" / "c.jpg"), np.zeros((448, 448, 3), np.uint8))
+    inside = root / "w"
+    inside.mkdir()
+    (inside / "best.pt").write_bytes(b"x")
+    win._sync_live_crop_size(str(inside / "best.pt"))
+    assert win.live_crop_spin.value() == 448
