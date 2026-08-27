@@ -543,7 +543,7 @@ class MainWindow(QMainWindow):
         tools_menu.addSeparator()
 
         define_regions_action = QAction("Define read-regions from this image", self)
-        define_regions_action.setShortcut("Ctrl+Shift+R")
+        define_regions_action.setShortcut("Ctrl+Shift+D")
         define_regions_action.triggered.connect(self._guarded(self.define_read_regions))
         tools_menu.addAction(define_regions_action)
 
@@ -586,10 +586,16 @@ class MainWindow(QMainWindow):
         live_detect_action.triggered.connect(self._guarded(self.toggle_live_detect))
         tools_menu.addAction(live_detect_action)
 
-        keep_frame_action = QAction("Keep this live frame", self)
+        keep_frame_action = QAction("Keep this live frame (image only)", self)
         keep_frame_action.setShortcut("Ctrl+K")
         keep_frame_action.triggered.connect(self._guarded(self.keep_live_frame))
         tools_menu.addAction(keep_frame_action)
+
+        keep_json_action = QAction("Keep this live frame + detections", self)
+        keep_json_action.setShortcut("Ctrl+Shift+K")
+        keep_json_action.triggered.connect(
+            self._guarded(self.keep_live_frame_with_detections))
+        tools_menu.addAction(keep_json_action)
 
         variance_action = QAction("Check variable regions", self)
         variance_action.setToolTip(
@@ -624,7 +630,7 @@ class MainWindow(QMainWindow):
             capture_action, auto_label_action, validate_action,
             prelabel_action, next_queue_action, shortcuts_action, regions_action,
             define_regions_action, edit_regions_action, replace_artwork_action,
-            variance_action, live_detect_action, keep_frame_action,
+            variance_action, live_detect_action, keep_frame_action, keep_json_action,
         ):
             self.addAction(action)
 
@@ -1824,18 +1830,38 @@ class MainWindow(QMainWindow):
         note = QLabel(
             "A frame the model handles badly is the most valuable training image "
             "available. Keeping it puts it straight into this label's dataset, "
-            "un-reviewed, ready to label."
+            "un-reviewed, ready to label.\n\n"
+            "Keep the image alone when the model got it wrong: a bad box gets "
+            "nudged rather than redrawn, so wrong proposals end up in the "
+            "dataset as slightly-wrong truth. Keep the detections too when it "
+            "was close, and correct them instead of drawing from nothing."
         )
         note.setWordWrap(True)
         note.setStyleSheet("color: #9aa4b2;")
         kv.addWidget(note)
 
-        self.live_keep_btn = QPushButton("Keep This Frame")
-        self.live_keep_btn.setToolTip("Save the frame currently on screen into "
-                                      "this label's dataset. (Ctrl+K)")
+        self.live_keep_btn = QPushButton("Keep Image Only")
+        self.live_keep_btn.setToolTip(
+            "Save the frame currently on screen into this label's dataset, with "
+            "no annotation at all. Label it from scratch. (Ctrl+K)")
         self.live_keep_btn.clicked.connect(self.keep_live_frame)
-        self.live_keep_btn.setProperty("compactCaptureButton", True)
-        kv.addWidget(self.live_keep_btn)
+
+        self.live_keep_json_btn = QPushButton("Keep Image + Detections")
+        self.live_keep_json_btn.setToolTip(
+            "Save the frame together with a sidecar holding the boxes the model "
+            "just found, so review is correction rather than drawing.\n\n"
+            "Saves the frame the boxes were computed on, which can be a frame or "
+            "two behind the preview -- an image and boxes that disagree would be "
+            "worse than either alone.\n\n"
+            "Written un-reviewed, and marked as machine-proposed. (Ctrl+Shift+K)")
+        self.live_keep_json_btn.clicked.connect(self.keep_live_frame_with_detections)
+
+        for _b in (self.live_keep_btn, self.live_keep_json_btn):
+            _b.setProperty("compactCaptureButton", True)
+        keep_row = QHBoxLayout()
+        keep_row.addWidget(self.live_keep_btn)
+        keep_row.addWidget(self.live_keep_json_btn)
+        kv.addLayout(keep_row)
 
         self.live_auto_check = QCheckBox("Keep frames the model struggles with")
         self.live_auto_check.setToolTip(
@@ -1843,7 +1869,9 @@ class MainWindow(QMainWindow):
             "itself. Rate-limited and capped per session: one battery it cannot "
             "handle would otherwise produce hundreds of near-identical frames, "
             "which is worse than none -- they all say the same thing and each "
-            "costs a review.")
+            "costs a review.\n\n"
+            "Always image-only. It fires on frames the model disagreed with "
+            "itself about, which is exactly where its boxes are worth least.")
         self.live_auto_check.toggled.connect(self._on_live_auto_toggled)
         kv.addWidget(self.live_auto_check)
 
@@ -1882,10 +1910,12 @@ class MainWindow(QMainWindow):
         self._live_busy = False
         self._live_frame = None
         self._live_counts = {}
+        self._live_result_frame = None
+        self._live_result_items = []
+        self._live_session = live_logic.proposal_session(time.time())
 
         self._live_thread = QThread(self)
         self._live_tracking = self.live_track_check.isChecked()
-        self._live_tracks = live_logic.TrackBook()
         self._live_worker = InferenceWorker(
             model_path, int(self.test_imgsz_spin.value()),
             float(self.test_conf_spin.value()), self._model_test_device_arg(),
@@ -1961,6 +1991,11 @@ class MainWindow(QMainWindow):
         self._live_rolling.record(latency)
         items, counts = self._detection_overlay_items(results)
         self._live_counts = counts
+        # Hold the frame *these* boxes came from. By the time an operator
+        # clicks, _live_frame has usually moved on, and saving a newer image
+        # against older boxes writes a sidecar that is wrong everywhere.
+        self._live_result_frame = self._live_frame
+        self._live_result_items = items
         if hasattr(self.canvas, "set_model_test_overlays"):
             self.canvas.set_model_test_overlays(
                 self._scaled_overlay_items(items, self._live_overlay_scale))
@@ -2034,6 +2069,28 @@ class MainWindow(QMainWindow):
             return
         self._keep_frame(frame, "kept by hand")
 
+    def keep_live_frame_with_detections(self) -> None:
+        """Save the last inferred frame plus the boxes the model found on it.
+
+        Deliberately the frame inference ran on, not the freshest one on
+        screen: those boxes describe that image and no other.
+        """
+        frame = getattr(self, "_live_result_frame", None)
+        items = getattr(self, "_live_result_items", None) or []
+        if frame is None:
+            QMessageBox.information(
+                self, "Keep Frame",
+                "Nothing has been through the model yet. Start live detect and "
+                "give it a frame first.")
+            return
+        if not items:
+            # Degrade rather than refuse: the operator wanted this frame kept,
+            # and an empty sidecar would read as "labeled, nothing in it".
+            self._keep_frame(frame, "kept by hand -- no detections to propose")
+            return
+        self._keep_frame(frame, f"kept with {len(items)} proposed box(es)",
+                         items=items)
+
     def closeEvent(self, event) -> None:
         """Bring the inference thread down before the window goes.
 
@@ -2049,7 +2106,13 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         super().closeEvent(event)
-    def _keep_frame(self, frame, reason: str) -> None:
+    def _keep_frame(self, frame, reason: str, items=None) -> None:
+        """Save a live frame into the open label's dataset.
+
+        With ``items`` it also writes an un-reviewed sidecar holding those
+        detections as proposals. Without, no sidecar is written at all and the
+        image lands unlabeled.
+        """
         if not self.label_id:
             QMessageBox.information(
                 self, "Keep Frame",
@@ -2058,6 +2121,16 @@ class MainWindow(QMainWindow):
         raw_path, _adjusted = save_capture(self.label_id, frame, None, save_raw=True)
         if raw_path is None:
             return
+        if items:
+            label = self.library.get(self.label_id)
+            height, width = (int(frame.shape[0]), int(frame.shape[1])) \
+                if getattr(frame, "shape", None) else (0, 0)
+            data = live_logic.proposed_annotation(
+                raw_path.name, self.label_id,
+                str(getattr(label, "family", "") or ""), items,
+                width=width, height=height,
+                session=getattr(self, "_live_session", ""))
+            persistence.save_annotation(self.label_id, raw_path.name, data)
         if hasattr(self, "_live_gate"):
             self._live_gate.mark()
         self._last_capture_path = raw_path
@@ -5049,7 +5122,7 @@ class MainWindow(QMainWindow):
                 })
                 counts[name] = counts.get(name, 0) + 1
         return items, counts
-    @staticmethod
+
     @staticmethod
     def _safe_np(obj, attr):
         """An Ultralytics tensor attribute as numpy, or [] if it is not there.

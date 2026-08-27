@@ -250,3 +250,89 @@ def track_summary(book: TrackBook, family: str, label_id: str,
     lines.append("")
     lines.append(book.text())
     return "\n".join(lines)
+
+
+# --- keeping a frame, with or without what the model proposed --------------
+#
+# Two ways to keep a live frame, and the difference matters more than it looks.
+#
+# Image only is right when the model got it *wrong*. Pre-filling boxes a human
+# is about to correct anchors them: a labeler nudges a bad box far more often
+# than they delete it and draw the right one, so wrong proposals do not just
+# waste time, they leak into the dataset as slightly-wrong truth.
+#
+# Image plus proposals is right when the model is mostly there. Correcting
+# four boxes is minutes of work; drawing them is not.
+#
+# Either way the sidecar written here is **never** review-marked. A machine
+# proposal that could pass for an operator's approval is the one failure this
+# whole marker discipline exists to prevent.
+
+PROPOSED_BY = "live_detect"
+
+
+def proposal_session(started_at: float) -> str:
+    """The capture-session id for one live-detect run.
+
+    Frames kept from a single run are near-duplicates of each other -- same
+    lens, same light, seconds apart -- so they must not straddle the train/val
+    split. Stamping them with one session is what makes the group-aware split
+    keep them together.
+    """
+    return "live_" + time.strftime("%Y%m%d_%H%M%S", time.localtime(started_at))
+
+
+def _item_points(item: dict) -> list[list[float]]:
+    """Four corners for a detection, whether it came back oriented or not."""
+    points = item.get("points")
+    if points and len(points) >= 4:
+        return [[float(p[0]), float(p[1])] for p in points[:4]]
+    xyxy = item.get("xyxy")
+    if xyxy and len(xyxy) >= 4:
+        x1, y1, x2, y2 = (float(v) for v in xyxy[:4])
+        from . import geometry as geo
+        return geo.rect_corners(x1, y1, x2 - x1, y2 - y1)
+    return []
+
+
+def proposed_boxes(items, family: str, label_id: str) -> list[dict]:
+    """Sidecar boxes from live detections, as proposals.
+
+    The detector only ever returns a **family**, so that is what goes in
+    ``label``. ``label_id`` is filled in only where the detected family is the
+    open label's own -- a ``battery_side`` box is not this label and must not
+    be handed its identity. Where it is filled in it is still a guess: the
+    dataset is being collected for this label, so that is the likeliest
+    answer, and the review pass is where a wrong one gets fixed.
+    """
+    from . import annotations as ann
+
+    out: list[dict] = []
+    for item in items or []:
+        name = str(item.get("name", "") or "")
+        points = _item_points(item)
+        if not name or not points:
+            continue
+        extra: dict = {"proposed_by": PROPOSED_BY}
+        if item.get("track_id") is not None:
+            extra["track_id"] = int(item["track_id"])
+        out.append(ann.make_box(
+            name, points,
+            label_id=label_id if (family and name == family) else "",
+            confidence=float(item.get("conf", 0.0)),
+            **extra))
+    return out
+
+
+def proposed_annotation(image: str, label_id: str, family: str, items,
+                        width: int = 0, height: int = 0,
+                        session: str = "") -> dict:
+    """A sidecar pre-filled with what the model just found. Never reviewed."""
+    from . import annotations as ann
+
+    meta: dict = {"proposed_by": PROPOSED_BY}
+    if session:
+        meta["session"] = session
+    data = ann.new_annotation(image, label_id, width, height, **meta)
+    data["boxes"] = proposed_boxes(items, family, label_id)
+    return data

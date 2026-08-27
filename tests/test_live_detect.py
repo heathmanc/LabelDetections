@@ -438,3 +438,244 @@ def test_the_track_summary_says_when_the_active_label_is_not_tracked():
 
 def test_an_empty_book_reads_as_empty_rather_than_blank():
     assert ld.TrackBook().text() == "No tracked objects."
+
+
+# --- proposals: keeping a frame with what the model found -------------------
+
+def _item(name, conf=0.9, track_id=None, xyxy=None, points=None):
+    item = {"name": name, "conf": conf}
+    if track_id is not None:
+        item["track_id"] = track_id
+    if xyxy is not None:
+        item["xyxy"] = xyxy
+    if points is not None:
+        item["points"] = points
+    return item
+
+
+def test_a_proposal_carries_the_family_the_detector_actually_returned():
+    boxes = ld.proposed_boxes([_item("spec_plate", xyxy=[0, 0, 4, 4])],
+                              "spec_plate", "sp_9199")
+    assert boxes[0]["label"] == "spec_plate"
+
+
+def test_only_the_open_labels_family_is_handed_its_identity():
+    """A battery_side box is not this label. Filling in label_id anyway would
+    put the wrong identity on a box a reviewer is likely to accept."""
+    items = [_item("spec_plate", xyxy=[0, 0, 4, 4]),
+             _item("battery_side", xyxy=[0, 0, 9, 9])]
+    boxes = ld.proposed_boxes(items, "spec_plate", "sp_9199")
+    assert boxes[0]["label_id"] == "sp_9199"
+    assert "label_id" not in boxes[1]
+
+
+def test_an_axis_aligned_detection_becomes_four_corners():
+    boxes = ld.proposed_boxes([_item("spec_plate", xyxy=[10, 20, 30, 50])],
+                              "spec_plate", "sp")
+    assert boxes[0]["points"] == [[10.0, 20.0], [30.0, 20.0],
+                                  [30.0, 50.0], [10.0, 50.0]]
+
+
+def test_an_oriented_detection_keeps_its_own_corners():
+    pts = [[0, 0], [10, 2], [9, 12], [-1, 10]]
+    boxes = ld.proposed_boxes([_item("spec_plate", points=pts)], "spec_plate", "sp")
+    assert boxes[0]["points"] == [[0.0, 0.0], [10.0, 2.0], [9.0, 12.0], [-1.0, 10.0]]
+
+
+def test_confidence_and_track_id_survive_into_the_sidecar():
+    boxes = ld.proposed_boxes(
+        [_item("spec_plate", conf=0.83, track_id=4, xyxy=[0, 0, 4, 4])],
+        "spec_plate", "sp")
+    assert boxes[0]["confidence"] == pytest.approx(0.83)
+    assert boxes[0]["track_id"] == 4
+
+
+def test_a_detection_with_no_geometry_is_dropped_rather_than_written_empty():
+    assert ld.proposed_boxes([_item("spec_plate")], "spec_plate", "sp") == []
+    assert ld.proposed_boxes([_item("", xyxy=[0, 0, 1, 1])], "spec_plate", "sp") == []
+
+
+def test_every_proposed_box_is_marked_as_the_machines_work():
+    boxes = ld.proposed_boxes([_item("spec_plate", xyxy=[0, 0, 4, 4])],
+                              "spec_plate", "sp")
+    assert boxes[0]["proposed_by"] == ld.PROPOSED_BY
+
+
+def test_a_proposed_sidecar_is_never_review_marked():
+    """The one thing that must not happen: a machine proposal that reads as an
+    operator's approval and exports as truth."""
+    from label_detections.core import review
+
+    data = ld.proposed_annotation(
+        "f.jpg", "sp", "spec_plate",
+        [_item("spec_plate", xyxy=[0, 0, 4, 4])], 640, 480)
+    assert review.annotation_reviewed(data) is False
+    assert review.annotation_status(data, "sp") == "needs_review"
+    assert review.export_ready(review.annotation_status(data, "sp")) is False
+
+
+def test_a_proposed_sidecar_records_the_frame_it_describes():
+    data = ld.proposed_annotation(
+        "f.jpg", "sp", "spec_plate",
+        [_item("spec_plate", xyxy=[0, 0, 4, 4])], 640, 480)
+    assert data["image"] == "f.jpg"
+    assert data["label_id"] == "sp"
+    assert (data["width"], data["height"]) == (640, 480)
+    assert data["proposed_by"] == ld.PROPOSED_BY
+
+
+def test_one_live_run_is_one_capture_group_so_near_duplicates_do_not_split():
+    """Frames from a single run are seconds apart under one lens. Letting them
+    straddle train/val validates the model against its own training images."""
+    from label_detections.core import dataset
+
+    session = ld.proposal_session(0.0)
+    entries = [
+        dataset.entry_from_annotation(
+            "sp", f"f{i}.jpg",
+            ld.proposed_annotation(f"f{i}.jpg", "sp", "spec_plate",
+                                   [_item("spec_plate", xyxy=[0, 0, 4, 4])],
+                                   session=session))
+        for i in range(4)
+    ]
+    assert len({e.group_key() for e in entries}) == 1
+
+
+def test_two_runs_are_two_groups_rather_than_one_lump():
+    """A constant provenance string would collapse every live capture ever
+    taken into a single group, which is the same bug wearing a hat."""
+    from label_detections.core import dataset
+
+    a = ld.proposal_session(0.0)
+    b = ld.proposal_session(3600.0)
+    assert a != b
+    entries = [
+        dataset.entry_from_annotation(
+            "sp", f"{s}.jpg",
+            ld.proposed_annotation(f"{s}.jpg", "sp", "spec_plate",
+                                   [_item("spec_plate", xyxy=[0, 0, 4, 4])],
+                                   session=s))
+        for s in (a, b)
+    ]
+    assert len({e.group_key() for e in entries}) == 2
+
+
+# --- the two keep buttons ---------------------------------------------------
+
+@ui
+def test_keeping_image_only_writes_no_sidecar_at_all():
+    """The whole point of the plain button: nothing pre-drawn to anchor on."""
+    from label_detections.core import persistence, storage
+
+    win = _window()
+    label_id = _label(win, "live_plain")
+    win._live_frame = np.zeros((60, 80, 3), np.uint8)
+    win.keep_live_frame()
+    name = sorted(p.name for p in storage.list_images(label_id))[-1]
+    assert persistence.load_annotation(label_id, name) is None
+
+
+@ui
+def test_keeping_with_detections_writes_the_boxes_the_model_found():
+    from label_detections.core import persistence, storage
+
+    win = _window()
+    label_id = _label(win, "live_json", family="spec_plate")
+    win._live_result_frame = np.zeros((60, 80, 3), np.uint8)
+    win._live_result_items = [
+        {"name": "spec_plate", "conf": 0.91, "xyxy": [4.0, 6.0, 40.0, 30.0]}]
+    win._live_session = "live_20260827_120000"
+    win.keep_live_frame_with_detections()
+
+    name = sorted(p.name for p in storage.list_images(label_id))[-1]
+    data = persistence.load_annotation(label_id, name)
+    assert data is not None
+    assert len(data["boxes"]) == 1
+    assert data["boxes"][0]["label"] == "spec_plate"
+    assert data["boxes"][0]["label_id"] == label_id
+    # The frame's own dimensions, not the preview's.
+    assert (data["width"], data["height"]) == (80, 60)
+    assert data["session"] == "live_20260827_120000"
+
+
+@ui
+def test_a_kept_proposal_still_has_to_be_reviewed_by_a_person():
+    from label_detections.core import persistence, review, storage
+
+    win = _window()
+    label_id = _label(win, "live_json_unrev", family="spec_plate")
+    win._live_result_frame = np.zeros((60, 80, 3), np.uint8)
+    win._live_result_items = [
+        {"name": "spec_plate", "conf": 0.91, "xyxy": [4.0, 6.0, 40.0, 30.0]}]
+    win.keep_live_frame_with_detections()
+
+    name = sorted(p.name for p in storage.list_images(label_id))[-1]
+    data = persistence.load_annotation(label_id, name)
+    assert review.annotation_status(data, label_id) == "needs_review"
+
+
+@ui
+def test_the_saved_image_is_the_one_the_boxes_were_computed_on():
+    """Inference lags the preview by a frame or two. Save the newest image
+    against the last result's boxes and every box is in the wrong place."""
+    from label_detections.core import persistence, storage
+
+    win = _window()
+    label_id = _label(win, "live_pair", family="spec_plate")
+
+    inferred = np.zeros((60, 80, 3), np.uint8)      # what the model saw
+    inferred[:] = 40
+    win._live_result_frame = inferred
+    win._live_result_items = [
+        {"name": "spec_plate", "conf": 0.9, "xyxy": [4.0, 6.0, 40.0, 30.0]}]
+    win._live_frame = np.full((60, 80, 3), 200, np.uint8)   # newer, unmodelled
+
+    win.keep_live_frame_with_detections()
+    name = sorted(p.name for p in storage.list_images(label_id))[-1]
+    saved = cv2.imread(str(storage.dataset_folder(label_id) / name))
+    assert saved is not None
+    assert int(saved.mean()) < 128, "saved the preview frame, not the inferred one"
+    assert persistence.load_annotation(label_id, name)["boxes"]
+
+
+@ui
+def test_with_no_detections_it_keeps_the_image_instead_of_refusing():
+    """The operator asked for this frame. An empty sidecar would read as
+    'labeled, nothing on it', which is worse than no sidecar."""
+    from label_detections.core import persistence, storage
+
+    win = _window()
+    label_id = _label(win, "live_empty", family="spec_plate")
+    win._live_result_frame = np.zeros((60, 80, 3), np.uint8)
+    win._live_result_items = []
+    before = len(storage.list_images(label_id))
+    win.keep_live_frame_with_detections()
+    assert len(storage.list_images(label_id)) == before + 1
+    name = sorted(p.name for p in storage.list_images(label_id))[-1]
+    assert persistence.load_annotation(label_id, name) is None
+
+
+@ui
+def test_both_buttons_are_actually_connected_to_their_handlers():
+    """Clicked, not introspected: a button wired to nothing looks perfect
+    from the outside and does nothing at all under a finger."""
+    from label_detections.core import persistence, storage
+
+    win = _window()
+    label_id = _label(win, "live_clicks", family="spec_plate")
+    frame = np.zeros((60, 80, 3), np.uint8)
+    win._live_frame = frame
+    win._live_result_frame = frame
+    win._live_result_items = [
+        {"name": "spec_plate", "conf": 0.9, "xyxy": [4.0, 6.0, 40.0, 30.0]}]
+
+    win.live_keep_btn.click()
+    plain = sorted(p.name for p in storage.list_images(label_id))[-1]
+    assert persistence.load_annotation(label_id, plain) is None
+
+    win.live_keep_json_btn.click()
+    names = sorted(p.name for p in storage.list_images(label_id))
+    assert len(names) == 2
+    proposed = [n for n in names if n != plain][0]
+    assert persistence.load_annotation(label_id, proposed)["boxes"]
+    assert win.live_keep_btn.text() != win.live_keep_json_btn.text()
