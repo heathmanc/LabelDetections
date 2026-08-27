@@ -877,12 +877,16 @@ def test_a_silent_view_says_why_rather_than_showing_nothing():
     assert "stage 2 classifier is set" not in ld.quiet_hint(20, 0.45, 1024, True)
 
 
-def test_the_start_floor_does_not_cap_a_fast_card():
-    """It was 0.15 -- a 6.7/s ceiling on any hardware, which on a card running
-    the model in 8 ms threw away 94% of the throughput and looked exactly like
-    the GPU not being used."""
-    assert ld.MIN_INTERVAL_S <= 0.02, "the floor is a throughput ceiling"
-    assert 1.0 / ld.MIN_INTERVAL_S >= 50
+def test_the_start_floor_is_adjustable_rather_than_fixed():
+    """It is a throughput ceiling -- 0.15 caps any hardware at 6.7/s -- but
+    lowering it for everyone destabilised a camera that had been fine, because
+    it also unblocked the display tick and drove the whole capture path nine
+    times harder. So it is conservative by default and adjustable, instead of
+    being chosen for the user by someone with no access to the hardware."""
+    assert ld.MIN_INTERVAL_S > 0
+    # should_infer takes it as an argument: the default is a default, not a law.
+    assert ld.should_infer(False, 0.02, min_interval_s=0.01) is True
+    assert ld.should_infer(False, 0.02, min_interval_s=0.5) is False
 
 
 def test_a_throttled_rate_is_called_out_next_to_the_latency():
@@ -1225,3 +1229,37 @@ def test_the_crash_handler_is_armed_at_startup():
     assert "faulthandler.enable()" in src
     assert "all_threads=True" in src, "the crashing thread may not be the main one"
     assert "labelvision_crash.log" in src, "a console from a shortcut disappears"
+
+
+@ui
+def test_the_inference_rate_is_a_setting_and_governs_the_pump():
+    """Raising it drives the whole capture path harder, not just the GPU: with
+    inference off the GUI thread, the display tick is free to come round again
+    as soon as it is dispatched. 6.7 -> 100 took that tick from ~7 to ~60 a
+    second and destabilised a camera that had been fine."""
+    win = _window()
+    handed = []
+    win.infer_requested.connect(handed.append)
+    win._live_thread = object()
+    win._live_loaded = True
+    win._live_busy = False
+    try:
+        win.live_rate_spin.setValue(2.0)          # one inference per 500 ms
+        win._live_last_started = time.monotonic() - 0.1
+        win._pump_live_detect(np.zeros((8, 8, 3), np.uint8))
+        assert handed == [], "ignored the configured rate"
+
+        win._live_last_started = time.monotonic() - 0.6
+        win._pump_live_detect(np.zeros((8, 8, 3), np.uint8))
+        assert len(handed) == 1
+    finally:
+        win.infer_requested.disconnect(handed.append)
+        win._live_thread = None
+        win._live_busy = False
+        win._live_loaded = False
+
+
+@ui
+def test_the_default_rate_is_the_one_that_ran_stably():
+    win = _window()
+    assert abs(win.live_rate_spin.value() - 1.0 / ld.MIN_INTERVAL_S) < 0.2

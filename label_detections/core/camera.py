@@ -9,10 +9,16 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
-# How long one Basler grab may block. Short on purpose: the reader loop can
-# only notice a stop request between grabs, so this is also the worst-case
-# delay on shutting the camera down cleanly.
-BASLER_GRAB_TIMEOUT_MS = 200
+# How long one Basler grab may block.
+#
+# Back to 1000, which is what it was before this branch touched it. 200 ms
+# looked like a tidy way to make shutdown responsive, and it is shorter than
+# the frame interval of a 20 MP camera -- which turned timeouts from a rare
+# event into the normal case, hammering pypylon's timeout path thousands of
+# times a minute. Shutdown is handled by close() waiting properly and refusing
+# to release a camera whose reader has not stopped, which does not need the
+# grab to be short.
+BASLER_GRAB_TIMEOUT_MS = 1000
 
 try:
     from pypylon import pylon

@@ -21,14 +21,20 @@ from dataclasses import dataclass, field
 # Inference is skipped while a previous frame is still in flight, so this is a
 # floor on how often it starts rather than a target rate. Well under a camera's
 # frame interval: the preview must never wait on the model.
-# A floor on how often inference may START. Its only job is to leave the GUI
-# thread room to breathe, because the "busy" check already guarantees one
-# inference at a time -- which is what actually protects the preview.
+# A floor on how often inference may START.
 #
-# It was 0.15, which is a 6.7/s ceiling on ANY hardware. On a card that runs
-# the model in 8 ms that threw away 94% of the throughput and looked exactly
-# like the GPU not being used, which is how it was found.
-MIN_INTERVAL_S = 0.01
+# Back to 0.15, the value this branch inherited and ran stably on. Lowering it
+# to 0.01 was defensible in isolation -- 6.7/s is a hard ceiling on any
+# hardware -- but it did not happen in isolation: with inference also moved off
+# the GUI thread, the display tick stopped being blocked by it and went from
+# ~7 to ~60 iterations a second, so everything downstream, the camera included,
+# was driven nine times harder. That is what destabilised a camera path that
+# had been fine.
+#
+# It is a setting now rather than a constant, so the rate can be raised
+# deliberately and watched, instead of being raised for everyone by someone
+# who could not test it against the hardware.
+MIN_INTERVAL_S = 0.15
 
 # How long to wait for a result before assuming it is never coming. The busy
 # flag is cleared by the result, so a result that never arrives -- a worker

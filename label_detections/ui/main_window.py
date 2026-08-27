@@ -2069,6 +2069,28 @@ class MainWindow(QMainWindow):
         crop_row.addWidget(self.live_crop_spin, 1)
         cv_.addLayout(crop_row)
 
+        rate_row = QHBoxLayout()
+        self.live_rate_spin = QDoubleSpinBox()
+        self.live_rate_spin.setRange(0.5, 60.0)
+        self.live_rate_spin.setSingleStep(0.5)
+        self.live_rate_spin.setDecimals(1)
+        self.live_rate_spin.setValue(
+            float((load_test_settings() or {}).get(
+                "max_infer_rate", 1.0 / live_logic.MIN_INTERVAL_S)))
+        self.live_rate_spin.valueChanged.connect(lambda _v: self._save_test_settings())
+        self.live_rate_spin.setToolTip(
+            "How often inference may start, per second.\n\n"
+            "This is not only an inference setting. While the model runs, the "
+            "display tick is free to come round again, so raising this drives "
+            "the whole capture path harder -- including the camera. Taking it "
+            "from 6.7 to 100 took the display tick from about 7 to about 60 "
+            "iterations a second and destabilised a camera that had been fine.\n\n"
+            "Raise it a little at a time and watch, rather than assuming the "
+            "GPU is the only thing affected.")
+        rate_row.addWidget(QLabel("Max inference rate /s"))
+        rate_row.addWidget(self.live_rate_spin, 1)
+        cv_.addLayout(rate_row)
+
         self.live_track_check = QCheckBox("Track objects across frames")
         self.live_track_check.setChecked(True)
         self.live_track_check.setToolTip(
@@ -2288,7 +2310,10 @@ class MainWindow(QMainWindow):
             self.live_status_label.setText(
                 "A frame's result never came back; carrying on. If this repeats, "
                 "the model is failing on every frame -- check the message above.")
-        if not live_logic.should_infer(self._live_busy, now - self._live_last_started):
+        interval = (1.0 / max(0.5, float(self.live_rate_spin.value()))
+                    if hasattr(self, "live_rate_spin") else live_logic.MIN_INTERVAL_S)
+        if not live_logic.should_infer(self._live_busy, now - self._live_last_started,
+                                       min_interval_s=interval):
             return
         self._live_busy = True
         self._live_last_started = now
@@ -4667,6 +4692,8 @@ class MainWindow(QMainWindow):
                                if hasattr(self, "live_classifier_edit") else ""),
                 "crop_px": (int(self.live_crop_spin.value())
                             if hasattr(self, "live_crop_spin") else 224),
+                "max_infer_rate": (float(self.live_rate_spin.value())
+                                   if hasattr(self, "live_rate_spin") else 6.7),
                 "hide_saved_labels": bool(self.test_hide_saved_labels_check.isChecked()),
             })
         except Exception:
