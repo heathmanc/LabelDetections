@@ -6263,12 +6263,16 @@ class MainWindow(QMainWindow):
             entries.extend(yolo_export.collect_entries(label_id, reviewed_only=False))
         imgsz = int(self.test_imgsz_spin.value()) if hasattr(self, "test_imgsz_spin") else 640
         scales = scale_report.measure(entries)
-        text = scale_report.report(scales, imgsz=imgsz)
+        text = scale_report.full_report(scales, self.library, imgsz=imgsz)
 
         box = QMessageBox(self)
         box.setWindowTitle("Label scale")
-        box.setText("How big your labels really are, and what that means for "
-                    "single-stage vs two-stage.")
+        box.setText(
+            f"How big your labels really are at imgsz {imgsz}, and what that means "
+            f"for single-stage vs two-stage.\n\n"
+            f"imgsz comes from the Test Models tab -- set it there to match what "
+            f"you actually train and run at, or these numbers describe a pipeline "
+            f"you do not have.")
         box.setDetailedText(text)
         box.setIcon(QMessageBox.Information)
         box.exec()

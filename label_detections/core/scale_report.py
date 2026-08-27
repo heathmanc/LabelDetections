@@ -32,10 +32,19 @@ from . import labels as labels_mod
 
 # Classifier inputs are conventionally multiples of 32.
 STRIDE = 32
-# Above this a "classifier" is costing detector money, and the crop is no
-# longer the cheap stage it was supposed to be.
-MAX_SENSIBLE_CROP = 640
+# Above this a "classifier" costs detector money and the crop stops being the
+# cheap second stage it was sold as. It is a warning threshold, not a silent
+# ceiling: the recommendation goes above it when the data demands and says so,
+# because a capped number that reads like an answer is worse than a large one.
+COSTLY_CROP = 512
+# A hard ceiling only to stop a pathological dataset asking for something absurd.
+MAX_CROP = 1024
 DEFAULT_IMGSZ = 640
+
+# Roughly the label width at which fine-grained identity stops being limited by
+# resolution and starts being limited by the model. A rule of thumb, and the
+# reason the report prefers per-region numbers wherever read-regions exist.
+ADEQUATE_PX = 256
 
 
 @dataclass
@@ -125,7 +134,20 @@ def recommend_crop(scales: dict[str, LabelScale], imgsz: int = DEFAULT_IMGSZ) ->
     worst = max((s.detector_px(imgsz, "median") for s in scales.values()), default=0.0)
     if worst <= 0:
         return 224
-    return min(MAX_SENSIBLE_CROP, int(math.ceil(worst / STRIDE) * STRIDE))
+    return min(MAX_CROP, int(math.ceil(worst / STRIDE) * STRIDE))
+
+
+def under_resolved(scales: dict[str, LabelScale], imgsz: int,
+                   adequate: float = ADEQUATE_PX) -> list[str]:
+    """Labels the detector alone does not resolve well enough for identity.
+
+    These are the labels a crop stage is actually for. A label the detector
+    already receives at 600 px does not need one, and saying so matters: sizing
+    the crop to protect labels that never needed protecting is what pushes the
+    classifier up into detector-sized inputs.
+    """
+    return sorted(k for k, s in scales.items()
+                  if 0 < s.detector_px(imgsz, "median") < adequate)
 
 
 def verdict(scale: LabelScale, imgsz: int, crop: int) -> str:
@@ -169,22 +191,104 @@ def report(scales: dict[str, LabelScale], imgsz: int = DEFAULT_IMGSZ,
                      f"{det:>11.0f}  {min(float(crop), s.median_px):>7.0f}  {v}")
 
     lines.append("")
+    weak = under_resolved(scales, imgsz)
+    if weak:
+        lines.append(
+            f"Under-resolved by the detector alone (< {ADEQUATE_PX:.0f} px of label): "
+            + ", ".join(weak))
+        lines.append("These are the labels a crop stage is actually for.")
+    else:
+        lines.append(
+            f"Every label reaches the detector at {ADEQUATE_PX:.0f} px or more. Nothing "
+            f"here is resolution-starved, so single-stage is the simpler answer -- one "
+            f"model, one pass, nothing to keep in step.")
+    lines.append("")
+
     if loses:
         needed = recommend_crop(scales, imgsz)
         lines.append(
-            f"{loses} label(s) would arrive at the classifier with LESS detail than the "
-            f"detector already had. A crop of {needed} px fixes that -- below it you are "
-            f"trading your biggest labels away to help your smallest.")
-    if helps and not loses:
+            f"{loses} label(s) would reach the classifier with LESS detail than the "
+            f"detector already had. A crop of {needed} px removes that entirely.")
+        if needed > COSTLY_CROP:
+            lines.append(
+                f"But {needed} px is a big classifier -- at that size the 'cheap second "
+                f"stage' is no longer cheap. Consider whether your LARGEST labels need "
+                f"the crop at all: a label the detector already sees at 600 px is not "
+                f"the problem, and sizing the crop to protect it is what forced this "
+                f"number up. A smaller crop that serves {', '.join(weak) or 'the small ones'} "
+                f"may be the better trade, made knowingly.")
+    elif helps:
         lines.append(
-            f"Every label is at least as well resolved after cropping, and {helps} "
-            f"materially better. Two-stage is the stronger choice here.")
-    if not helps and not loses:
-        lines.append(
-            "Cropping changes little either way at this size, so single-stage is the "
-            "simpler answer: one model, one pass, nothing to keep in step.")
+            f"No label loses detail at {crop} px, and {helps} gain materially. This is "
+            f"a clean two-stage win.")
+
+    lines.append("")
     lines.append(
-        "Detail is only half of it: a classifier is also easier to retrain for a new "
-        "label (no boxes to draw, no detector retrain) and its softmax gives a real "
-        "'not recognised' threshold. Weigh those too.")
+        "Caveat on all of the above: this measures the whole LABEL. What decides "
+        "identity is often one small part of it -- a revision letter, a language "
+        "line. Where a label has read-regions defined, the per-region numbers below "
+        "are the ones that actually matter.")
+    lines.append(
+        "Detail is only half of it either way: a classifier is easier to retrain for a "
+        "new label (no boxes to draw, no detector retrain) and its softmax gives a real "
+        "'not recognised' threshold.")
     return "\n".join(lines)
+
+
+# --- what the deciding detail gets, rather than the whole label -------------
+
+def region_report(scales: dict[str, LabelScale], library, imgsz: int,
+                  crop: int) -> str:
+    """Pixels across each read-region, at each stage.
+
+    The label-level numbers above answer "how much of the label does each stage
+    see". This answers the question that actually decides identity: how much of
+    the part that *differs* does each stage see. A 2000 px label whose only
+    distinguishing mark is a 4% wide revision block is carrying 80 px of
+    evidence, not 2000, and every conclusion drawn from the label width is off
+    by that factor.
+
+    For codes there is a real threshold to check against rather than a feeling:
+    CodeSpec.min_pixels_needed() is what the symbology needs to decode.
+    """
+    if library is None:
+        return ""
+    rows: list[str] = []
+    for label_id in sorted(scales):
+        label = library.get(label_id)
+        if label is None:
+            continue
+        regions: list[tuple[str, float, float]] = []
+        for i, code in enumerate(getattr(label, "codes", []) or []):
+            if len(getattr(code, "region", []) or []) >= 4:
+                regions.append((f"code[{code.role}]", float(code.region[2]),
+                                code.min_pixels_needed()))
+        for field_ in getattr(label, "text_fields", []) or []:
+            if len(getattr(field_, "region", []) or []) >= 4:
+                regions.append((f"text[{field_.name}]", float(field_.region[2]), 0.0))
+        if not regions:
+            continue
+        scale = scales[label_id]
+        det_label = scale.detector_px(imgsz, "median")
+        for name, frac, needed in regions:
+            det_px = frac * det_label
+            crop_px = frac * min(float(crop), scale.median_px)
+            note = ""
+            if needed:
+                note = ("decodes after crop" if crop_px >= needed >= det_px else
+                        "decodes at both" if det_px >= needed else
+                        f"NEITHER reaches the {needed:.0f} px this symbology needs")
+            rows.append(f"  {label_id} {name}: {frac:.0%} of label -> "
+                        f"{det_px:.0f} px at detector, {crop_px:.0f} px after crop"
+                        + (f"   [{note}]" if note else ""))
+    if not rows:
+        return ("\nNo read-regions defined yet. Draw them (Define Regions) and this "
+                "report can size the crop from the detail that actually decides "
+                "identity instead of from the whole label.")
+    return "\nRead-regions -- the detail identity actually turns on:\n" + "\n".join(rows)
+
+
+def full_report(scales: dict[str, LabelScale], library=None,
+                imgsz: int = DEFAULT_IMGSZ, crop: int | None = None) -> str:
+    crop = int(crop or recommend_crop(scales, imgsz))
+    return report(scales, imgsz, crop) + "\n" + region_report(scales, library, imgsz, crop)

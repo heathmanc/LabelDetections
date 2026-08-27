@@ -365,3 +365,68 @@ def test_the_export_sizes_its_crops_from_the_data_not_a_default(monkeypatch):
     crop = cv2.imread(str(next(classify_dir.rglob("*.jpg"))))
     assert crop is not None and crop.shape[0] == crop.shape[1]
     assert crop.shape[0] % 32 == 0
+
+
+def test_the_crop_recommendation_is_never_silently_capped():
+    """A capped number that reads like an answer is worse than a large one.
+    At imgsz 1280 a 2000 px label needs 672, which used to clamp to 640 with
+    nothing said."""
+    from label_detections.core import scale_report as sr
+
+    scales = {"big": sr.LabelScale("big", [2000.0] * 4, [3840.0] * 4)}
+    assert sr.recommend_crop(scales, imgsz=1280) == 672
+    assert sr.COSTLY_CROP < 672, "the costly-crop warning must still fire here"
+
+
+def test_the_report_says_when_a_recommendation_is_expensive():
+    from label_detections.core import scale_report as sr
+
+    scales = {"big": sr.LabelScale("big", [2000.0] * 4, [3840.0] * 4),
+              "small": sr.LabelScale("small", [300.0] * 4, [3840.0] * 4)}
+    text = sr.report(scales, imgsz=1280, crop=224)
+    assert "no longer cheap" in text
+    assert "small" in text.split("crop stage is actually for")[0]
+
+
+def test_labels_the_detector_already_resolves_are_not_the_ones_needing_a_crop():
+    from label_detections.core import scale_report as sr
+
+    scales = {"big": sr.LabelScale("big", [2000.0] * 4, [3840.0] * 4),
+              "small": sr.LabelScale("small", [300.0] * 4, [3840.0] * 4)}
+    assert sr.under_resolved(scales, imgsz=1280) == ["small"]
+
+
+def test_a_region_is_measured_not_the_label_it_sits_on():
+    """A 2000 px label whose revision block is 6% of it carries 120 px of
+    deciding evidence, not 2000. Every conclusion from label width is off by
+    that factor."""
+    from label_detections.core import scale_report as sr
+    from label_detections.core.labels import LabelDef, LabelLibrary, TextField
+
+    lib = LabelLibrary([LabelDef(
+        label_id="big", text_fields=[TextField(name="rev", region=[0.05, 0.4, 0.06, 0.08])])])
+    scales = {"big": sr.LabelScale("big", [2000.0] * 4, [3840.0] * 4)}
+    text = sr.region_report(scales, lib, imgsz=1280, crop=224)
+    assert "6% of label" in text
+    # 6% of 667 px at the detector; 6% of 224 after the crop -- the crop is worse.
+    assert "40 px at detector" in text and "13 px after crop" in text
+
+
+def test_a_code_is_checked_against_what_its_symbology_needs():
+    from label_detections.core import scale_report as sr
+    from label_detections.core.labels import CodeSpec, LabelDef, LabelLibrary
+
+    lib = LabelLibrary([LabelDef(label_id="big", codes=[CodeSpec(
+        role="part_number", symbology="code128", region=[0.05, 0.7, 0.30, 0.2],
+        code_width_mm=40, x_dim_mm=0.33)])])
+    scales = {"big": sr.LabelScale("big", [2000.0] * 4, [3840.0] * 4)}
+    assert "NEITHER reaches" in sr.region_report(scales, lib, imgsz=1280, crop=224)
+
+
+def test_no_read_regions_says_so_rather_than_reporting_nothing():
+    from label_detections.core import scale_report as sr
+    from label_detections.core.labels import LabelDef, LabelLibrary
+
+    lib = LabelLibrary([LabelDef(label_id="plain")])
+    scales = {"plain": sr.LabelScale("plain", [500.0] * 2, [3840.0] * 2)}
+    assert "No read-regions defined yet" in sr.region_report(scales, lib, 1280, 224)
