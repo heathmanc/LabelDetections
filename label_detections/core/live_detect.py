@@ -196,10 +196,11 @@ def frame_summary(counts: dict[str, int], label_id: str,
     total = sum(counts.values())
     lines = [f"{total} detection(s)   {rolling.mean_ms:.0f} ms   "
              f"{rolling.rate:.1f}/s"]
-    if label_id:
-        found = counts.get(label_id, 0)
-        lines.append(f"{label_id}: {found} found" if found
-                     else f"{label_id}: NOT FOUND")
+    # Only when it is actually there. The label open in the labeling tab is
+    # not what the operator is presenting -- a line saying it is missing is a
+    # complaint about the wrong thing, on every frame of every other label.
+    if label_id and counts.get(label_id):
+        lines.append(f"{label_id}: {counts[label_id]} found")
     for name in sorted(counts):
         if name != label_id:
             lines.append(f"  {name}: {counts[name]}")
@@ -322,11 +323,11 @@ def track_summary(book: TrackBook, label_id: str, rolling: Rolling) -> str:
     rows = book.rows()
     lines = [f"{len(rows)} tracked   {rolling.mean_ms:.0f} ms   "
              f"{rolling.rate:.1f}/s"]
+    # Marked when present, silent when not: the open label is not necessarily
+    # the one in front of the camera, and "NOT TRACKED" both named the wrong
+    # mechanism -- nothing had lost a track -- and filled the readout with a
+    # complaint about a label nobody was presenting.
     mine = [t for t in rows if t.name == label_id] if label_id else []
-    if label_id and not mine:
-        # The one thing worth a line of its own: the label being trained is
-        # not on screen at all.
-        lines.append(f"{label_id} NOT TRACKED")
     for track in rows:
         # Marked rather than filtered: the other labels on the battery are
         # what the recipe counts too, so they stay visible.

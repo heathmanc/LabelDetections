@@ -99,7 +99,7 @@ def test_resetting_the_gate_starts_a_fresh_session():
 
 # --- the readout -----------------------------------------------------------
 
-def test_the_summary_leads_with_whether_the_active_label_was_found():
+def test_the_summary_leads_with_the_active_label_when_it_is_there():
     rolling = ld.Rolling()
     rolling.record(0.02, now=100)
     rolling.record(0.02, now=100.2)
@@ -107,8 +107,16 @@ def test_the_summary_leads_with_whether_the_active_label_was_found():
     assert "sp_g31: 1 found" in found
     assert "warn_g31: 2" in found
 
+
+def test_the_summary_says_nothing_about_a_label_that_is_not_presented():
+    """The label open in the labeling tab is not necessarily the one under the
+    camera. Saying it is missing complains about the wrong thing on every
+    frame of every other label."""
+    rolling = ld.Rolling()
+    rolling.record(0.02, now=100)
     missed = ld.frame_summary({"warn_g31": 1}, "sp_g31", rolling)
-    assert "NOT FOUND" in missed
+    assert "sp_g31" not in missed
+    assert "warn_g31: 1" in missed
 
 
 def test_the_readout_names_the_id_the_recipe_is_written_in():
@@ -465,14 +473,28 @@ def test_detections_with_no_id_are_ignored_by_the_book():
     assert book.rows() == []
 
 
-def test_the_track_summary_says_when_the_active_label_is_not_tracked():
+def test_the_track_summary_reports_what_is_there_not_what_is_open():
+    """"NOT TRACKED" named the wrong mechanism -- nothing had lost a track --
+    and it fired whenever the operator presented any label but the open one."""
     book = ld.TrackBook()
     book.update([(1, "cert_mark", 0.9)], now=100)
     rolling = ld.Rolling()
     rolling.record(0.01, now=100)
     text = ld.track_summary(book, "sp_g31", rolling)
-    assert "sp_g31 NOT TRACKED" in text
+    assert "sp_g31" not in text
     assert "#1 cert_mark" in text
+
+
+def test_the_open_label_is_marked_when_it_is_one_of_the_tracks():
+    """Silent when absent, but still pointed out when present -- that costs no
+    line and answers "which of these is the one I am labeling"."""
+    book = ld.TrackBook()
+    book.update([(1, "cert_mark", 0.9), (2, "sp_g31", 0.8)], now=100)
+    rolling = ld.Rolling()
+    rolling.record(0.01, now=100)
+    text = ld.track_summary(book, "sp_g31", rolling)
+    assert "#2 sp_g31 0.80  <-- this label" in text
+    assert "<-- this label" not in text.split("\n")[1]
 
 
 def test_an_empty_book_reads_as_empty_rather_than_blank():
