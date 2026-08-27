@@ -825,3 +825,39 @@ def test_with_no_library_given_nothing_is_stamped():
     visible failure."""
     item = {"name": "2220-9199", "conf": 0.9, "xyxy": [0, 0, 4, 4]}
     assert "label_id" not in ld.proposed_boxes([item])[0]
+
+
+def test_a_classifier_run_never_lands_in_the_detector_field():
+    """The bug that made live detect go silent. The routing test asked whether
+    the path contained "classify" -- and the default run name is "classifier",
+    which does not contain it. So the classifier went into the detector field,
+    where a classification model returns probabilities and no boxes."""
+    assert "classify" not in "classifier", "the substring test that failed"
+
+
+@ui
+def test_weights_are_routed_by_the_stage_that_made_them():
+    from pathlib import Path
+
+    win = _window()
+    win.test_model_edit.setText("")
+    win.live_classifier_edit.setText("")
+
+    win._use_trained_as_active(Path("/runs/classifier/weights/best.pt"), "classifier")
+    assert win.live_classifier_edit.text().endswith("best.pt")
+    assert win.test_model_edit.text() == "", "a classifier reached the detector field"
+
+    win._use_trained_as_active(Path("/runs/detector/weights/best.pt"), "detector")
+    assert win.test_model_edit.text().endswith("best.pt")
+
+
+def test_a_silent_view_says_why_rather_than_showing_nothing():
+    """A live view finding nothing looks the same whether the camera is on a
+    wall, the threshold is too high, or the wrong model is loaded."""
+    assert ld.quiet_hint(3, 0.45, 1024, False) == ""
+    hint = ld.quiet_hint(ld.QUIET_FRAMES + 5, 0.45, 1024, False)
+    assert "Confidence is 0.45" in hint
+    assert "DETECTOR run, not the classifier" in hint
+    assert "stage 2 classifier is set" in hint
+    # With stage 2 configured, that last line is noise.
+    assert "stage 2 classifier is set" not in ld.quiet_hint(20, 0.45, 1024, True)

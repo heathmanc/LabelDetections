@@ -57,9 +57,29 @@ class InferenceWorker(QObject):
         except Exception as exc:
             self.failed.emit(f"Could not load the model:\n{self._path}\n\n{exc}")
             return
+
+        # A classification model loads perfectly happily as a "detector" and
+        # then returns probabilities and no boxes, so the view simply goes
+        # quiet with nothing anywhere saying why. Refuse it by name instead.
+        task = str(getattr(self._model, "task", "") or "")
+        if task == "classify":
+            self._model = None
+            self.failed.emit(
+                f"That is a CLASSIFIER, not a detector:\n{self._path}\n\n"
+                f"It has no boxes to give, which is why nothing would appear.\n\n"
+                f"Put it in the 'Stage 2 classifier' field on this tab, and put "
+                f"the detector run's best.pt in the Test Models field.")
+            return
         if self._classifier_path:
             try:
                 self._classifier = YOLO(self._classifier_path)
+                cls_task = str(getattr(self._classifier, "task", "") or "")
+                if cls_task and cls_task != "classify":
+                    self._classifier = None
+                    self.failed.emit(
+                        f"The stage 2 model is a '{cls_task}' model, not a "
+                        f"classifier:\n{self._classifier_path}\n\n"
+                        f"Running stage 1 only -- boxes will have no identity.")
             except Exception as exc:
                 self.failed.emit(
                     f"Detector loaded, but the classifier did not:\n"
@@ -67,7 +87,7 @@ class InferenceWorker(QObject):
                     f"Running stage 1 only -- boxes will have no identity.")
                 self._classifier = None
         which = ("detector + classifier" if self._classifier is not None
-                 else "detector only")
+                 else f"{task or 'detector'} only, no stage 2")
         self.loaded.emit(f"Loaded {which}: {self._path}")
 
     @Slot(object)

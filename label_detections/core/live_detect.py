@@ -114,6 +114,35 @@ def should_infer(busy: bool, since_last_s: float,
 
 # The detector is trained on label ids, so what it returns *is* the identity
 # the recipe is written in. The readout says it plainly.
+# After this many consecutive empty frames, silence is a symptom rather than
+# an absence, and the readout should say what usually causes it.
+QUIET_FRAMES = 12
+
+
+def quiet_hint(empty_frames: int, conf: float, imgsz: int,
+               has_classifier: bool) -> str:
+    """Why a running model might be showing nothing at all.
+
+    A live view that finds nothing looks identical whether the camera is
+    pointed at a wall, the threshold is too high, or a classifier was loaded
+    into the detector slot. The operator cannot tell those apart from an empty
+    screen, so the readout names the usual causes rather than leaving them to
+    be guessed one at a time.
+    """
+    if empty_frames < QUIET_FRAMES:
+        return ""
+    lines = [f"", f"Nothing found in {empty_frames} frames. Usual causes:",
+             f"  - Confidence is {conf:.2f}. A fresh model often needs 0.25 to "
+             f"show anything.",
+             f"  - Image size {imgsz} should match what the model trained at.",
+             "  - Is the model in the Test Models field the DETECTOR run, not "
+             "the classifier?"]
+    if not has_classifier:
+        lines.append("  - Under a two-stage export, boxes read 'label' until a "
+                     "stage 2 classifier is set on this tab.")
+    return "\n".join(lines)
+
+
 def frame_summary(counts: dict[str, int], label_id: str,
                   rolling: Rolling) -> str:
     """The readout under the live view."""

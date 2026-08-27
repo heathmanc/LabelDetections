@@ -346,6 +346,10 @@ class MainWindow(QMainWindow):
         self._live_tracks = live_logic.TrackBook()
         self._live_tracking = True
         self._live_last_started = 0.0
+        # Set here rather than in start_live_detect: results can arrive on
+        # paths that never went through it, and an unset counter turns a quiet
+        # view into a crash.
+        self._live_empty = 0
         # The last frame of a capture burst, opened when the preview stops.
         self._last_capture_path: Path | None = None
         self._session_captures = 0
@@ -1215,6 +1219,9 @@ class MainWindow(QMainWindow):
         self._train_process = None
         self._train_queue: list[tuple[dict, str]] = []
         self._train_stage = "detector"
+        # Which run produced which weights, so the summary can wire the whole
+        # pipeline instead of offering one file and guessing where it goes.
+        self._stage_weights: dict[str, Path] = {}
         self._metrics_timer = QTimer(self)
         self._metrics_timer.setInterval(3000)
         self._metrics_timer.timeout.connect(self._poll_training_metrics)
@@ -1604,6 +1611,10 @@ class MainWindow(QMainWindow):
         # actually succeeded. Chaining a classifier onto a failed or cancelled
         # detector run just burns an hour producing the second half of a
         # pipeline whose first half does not exist.
+        stage = getattr(self, "_train_stage", "detector")
+        if weights and Path(weights).exists():
+            self._stage_weights[stage] = Path(weights)
+
         queued = getattr(self, "_train_queue", None)
         if queued and exit_code == 0 and not stopped:
             params, stage = queued.pop(0)
@@ -1698,27 +1709,50 @@ class MainWindow(QMainWindow):
             else:
                 # Completed run: continue from best.pt as a fresh fine-tune run.
                 train_more_btn = box.addButton("Train more from best.pt", QMessageBox.ActionRole)
+        both_btn = None
+        det_weights = self._stage_weights.get("detector")
+        cls_weights = self._stage_weights.get("classifier")
+        if det_weights and cls_weights:
+            both_btn = box.addButton("Use both (detector + classifier)",
+                                     QMessageBox.AcceptRole)
         box.addButton(QMessageBox.Ok)
         box.exec()
-
         clicked = box.clickedButton()
-        if have_weights and clicked is use_btn:
+        if both_btn is not None and clicked is both_btn:
+            self._use_trained_as_active(det_weights, "detector")
+            self._use_trained_as_active(cls_weights, "classifier")
+            QMessageBox.information(
+                self, "Pipeline wired",
+                f"Detector: {det_weights}\n"
+                f"Classifier: {cls_weights}\n\n"
+                f"Both fields on Live Detect now point at this run.")
+        elif have_weights and clicked is use_btn:
             self._use_trained_as_active(Path(weights))
         elif can_resume and clicked is resume_btn:
             self._resume_training_from(last_weights)
         elif have_weights and clicked is train_more_btn:
             self._finetune_training_from(Path(weights))
 
-    def _use_trained_as_active(self, weights: Path) -> None:
-        """Make a finished run's best.pt the active model for Test/Auto-label/etc."""
-        if hasattr(self, "test_model_edit"):
-            self.test_model_edit.setText(str(weights))
-        # A classifier run's weights belong in the Live Detect stage-2 field,
-        # not the detector field: pointing the detector at a classifier fails
-        # at load with an error that says nothing about which box was wrong.
-        if "classify" in str(weights).lower() or "-cls" in str(weights).lower():
+    def _use_trained_as_active(self, weights: Path, stage: str = "") -> None:
+        """Put a finished run's best.pt in the field that stage belongs to.
+
+        Routed by which stage produced the weights, never by reading the path.
+        The filename test that used to do this asked whether the path contained
+        "classify" -- and the default classifier run is named "classifier",
+        which does not contain it. So the classifier landed in the DETECTOR
+        field, where a classification model returns probabilities and no boxes,
+        and live detect went quiet with nothing to say why.
+        """
+        stage = stage or getattr(self, "_train_stage", "detector")
+        if stage == "classifier":
             if hasattr(self, "live_classifier_edit"):
                 self.live_classifier_edit.setText(str(weights))
+            self.status.showMessage(
+                f"Stage 2 classifier set to {weights.name} on the Live Detect tab.",
+                8000)
+            return
+        if hasattr(self, "test_model_edit"):
+            self.test_model_edit.setText(str(weights))
         if hasattr(self, "_test_tab_widget") and hasattr(self, "tabs"):
             self.tabs.setCurrentWidget(self._test_tab_widget)
         self.status.showMessage(
@@ -2063,8 +2097,10 @@ class MainWindow(QMainWindow):
         self._live_busy = False
         self._live_frame = None
         self._live_counts = {}
+        self._live_empty = 0
         self._live_result_frame = None
         self._live_result_items = []
+        self._live_empty = 0
         self._live_session = live_logic.proposal_session(time.time())
 
         self._live_thread = QThread(self)
@@ -2153,6 +2189,7 @@ class MainWindow(QMainWindow):
         for item in items:
             counts[item["name"]] = counts.get(item["name"], 0) + 1
         self._live_counts = counts
+        self._live_empty = (self._live_empty + 1) if not items else 0
         # Hold the frame *these* boxes came from. By the time an operator
         # clicks, _live_frame has usually moved on, and saving a newer image
         # against older boxes writes a sidecar that is wrong everywhere.
@@ -2171,6 +2208,12 @@ class MainWindow(QMainWindow):
         else:
             self.live_readout.setPlainText(live_logic.frame_summary(
                 counts, self.label_id, self._live_rolling))
+        hint = live_logic.quiet_hint(
+            self._live_empty, float(self.test_conf_spin.value()),
+            int(self.test_imgsz_spin.value()),
+            bool(self.live_classifier_edit.text().strip()))
+        if hint:
+            self.live_readout.setPlainText(self.live_readout.toPlainText() + hint)
 
         if not self.live_auto_check.isChecked():
             return
