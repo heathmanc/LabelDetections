@@ -104,7 +104,7 @@ def count_summary(out: Path) -> str:
 
     classes = class_names(out)
     if classes:
-        lines.append(f"Detector families ({len(classes)}): " + ", ".join(classes))
+        lines.append(f"Detector classes ({len(classes)}): " + ", ".join(classes))
 
     split_report = out / "split_report.txt"
     if split_report.exists():

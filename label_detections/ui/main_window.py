@@ -71,7 +71,6 @@ from label_detections.core.imageio import (
 from label_detections.core.storage import (
     DATA_DIR,
     EXPORT_DIR,
-    class_names_from_config,
     dataset_folder,
     image_label_json_path,
     label_folder,
@@ -84,7 +83,6 @@ from label_detections.core.storage import (
     load_training_settings,
     save_annotations,
     save_camera_settings,
-    save_class_config,
     save_test_settings,
     save_training_settings,
 )
@@ -323,7 +321,6 @@ class MainWindow(QMainWindow):
         self._review_queue_pos = -1
         self.camera_settings = load_camera_settings()
         self.class_config = load_class_config()
-        self.class_names = class_names_from_config(self.class_config)
         self._test_model = None
         self._test_model_path = ""
         self._model_test_overlay_active = False
@@ -358,6 +355,9 @@ class MainWindow(QMainWindow):
         # images and nothing else's. There is no recipe here: which labels a
         # battery must carry, and where, is the front end's business.
         self.library = persistence.load_library()
+        # Derived, so it cannot drift from the labels it is meant to describe.
+        # Must follow the library load for that reason.
+        self.class_names = self.library.detector_classes()
         self.label_id: str = self._initial_label_id()
 
         self.canvas = ImageCanvas()
@@ -477,22 +477,19 @@ class MainWindow(QMainWindow):
         refresh_index_action.triggered.connect(lambda: self._refresh_images(force=True))
         view_menu.addAction(refresh_index_action)
 
-        # One shortcut per detector family, built from the class config rather
-        # than hardcoded: adding a family should not mean editing the menu.
-        _family_keys = {
-            "battery_side": "B", "spec_plate": "S", "warning_label": "W",
-            "cert_mark": "C", "trace_tag": "T", "promo_label": "M",
-            "code_patch": "K",
-        }
+        # Two shortcuts, not one per class. Class names are label ids now, so
+        # there is no fixed set to assign letters to -- and there is no need:
+        # the tool is scoped to one label, so the only two things ever drawn on
+        # an image are that label and the battery face.
         class_actions = []
-        for _cls in self.class_config:
-            _name = str(_cls.get("name", ""))
-            _action = QAction(f"Class: {_name}", self)
-            _key = _family_keys.get(_name)
-            if _key:
-                _action.setShortcut(_key)
-            _action.triggered.connect(
-                self._guarded(lambda _checked=False, n=_name: self.set_class_by_name(n)))
+        for _name, _key, _text in (
+            ("battery_side", "B", "Class: battery face"),
+            ("", "L", "Class: the label being trained"),
+        ):
+            _action = QAction(_text, self)
+            _action.setShortcut(_key)
+            _action.triggered.connect(self._guarded(
+                lambda _checked=False, n=_name: self.set_class_by_name(n or self.label_id)))
             class_menu.addAction(_action)
             class_actions.append(_action)
 
@@ -1720,8 +1717,8 @@ class MainWindow(QMainWindow):
             "1. Label tab -> Add Label... Answer the wizard: size in mm, artwork,\n"
             "   surface, rotation, any barcodes and where they sit on the artwork.\n"
             "2. Capture or import images of that label into its dataset.\n"
-            "3. Pick the label's family in the Class box, draw its oriented box, and\n"
-            "   set its identity so the box carries the label id.\n"
+            "3. Pick the label in the Class box and draw its oriented box. The class\n"
+            "   IS the label id, so the box carries its identity as drawn.\n"
             "4. Save. An image carrying the label is approved by saving; one that does\n"
             "   not is saved un-reviewed, because editing is not approving.\n"
             "5. Mark Background for negatives -- a bare fixture, a battery without\n"
@@ -1732,10 +1729,11 @@ class MainWindow(QMainWindow):
             "7. Dataset Health shows how close each label is to its training target.\n"
             "8. Export All, then Train.\n"
             "\n"
-            "Export trains every family at once\n"
+            "Export trains every label at once\n"
             "Labels are gathered and reviewed one at a time, but they are TRAINED\n"
-            "together: one detector over all the families. A model trained on a single\n"
-            "class has nothing to tell it apart from.\n"
+            "together: one detector over every label id. A model trained on a single\n"
+            "label has nothing to tell it apart from, and will report the one class it\n"
+            "knows on anything label-shaped.\n"
             "The split never separates a capture group -- burst frames of the same\n"
             "physical label stay on one side, or validation just measures memorisation.\n"
             "split_report.txt ships inside every export so you can check that.\n"
@@ -1753,11 +1751,17 @@ class MainWindow(QMainWindow):
             "Labels sit on curved, tilted faces, so oriented boxes are the norm; an\n"
             "axis-aligned box around a rotated label swallows its neighbours.\n"
             "\n"
-            "Detector families\n"
-            "Add a family only for a genuinely new KIND of label. Changing this list\n"
-            "costs a retrain; adding a label to an existing family costs nothing.\n"
-            "Class IDs should stay stable once you have trained a model -- rename a\n"
-            "family rather than reordering them."
+            "Detector classes\n"
+            "One class per label id, plus battery_side for the whole face. The class\n"
+            "list IS the label library -- there is nothing separate to maintain, and\n"
+            "nothing that can disagree with it.\n"
+            "So the model reports the id the recipe is written in, with no second step\n"
+            "to resolve what it found. The price is that a new label is not detected\n"
+            "until it has images and a training run: define it, gather its dataset,\n"
+            "Export All, retrain.\n"
+            "battery_side holds class 0 and the rest sort by id, so the numbering only\n"
+            "shifts when labels are added -- retrain after that, since a model maps\n"
+            "class id to name by position."
         )
         layout.addWidget(body)
         return outer
@@ -1823,9 +1827,10 @@ class MainWindow(QMainWindow):
         cv_.addWidget(self.live_readout)
 
         boundary = QLabel(
-            "The detector returns a family, never a label id -- no SKU is in "
-            "its class list. Which label a detection actually is gets decided "
-            "downstream from its codes and artwork, not here."
+            "The detector is trained on label ids, so what it reports here is "
+            "the same identity the recipe is written in -- no resolution step "
+            "in between. A label absent from the trained model cannot appear, "
+            "however clearly it is on the battery."
         )
         boundary.setWordWrap(True)
         boundary.setStyleSheet("color: #9aa4b2;")
@@ -2009,18 +2014,15 @@ class MainWindow(QMainWindow):
             self.canvas.set_model_test_overlays(
                 self._scaled_overlay_items(items, self._live_overlay_scale))
 
-        label = self.library.get(self.label_id) if self.label_id else None
-        family = str(getattr(label, "family", "") or "") if label else ""
-        name = self.label_id or "no label"
         if getattr(self, "_live_tracking", False):
             self._live_tracks.update(
                 [(i.get("track_id"), i.get("name"), i.get("conf", 0.0)) for i in items])
             self.live_readout.setPlainText(
-                live_logic.track_summary(self._live_tracks, family, name,
+                live_logic.track_summary(self._live_tracks, self.label_id,
                                          self._live_rolling))
         else:
             self.live_readout.setPlainText(live_logic.frame_summary(
-                counts, family, name, self._live_rolling))
+                counts, self.label_id, self._live_rolling))
 
         if not self.live_auto_check.isChecked():
             return
@@ -2131,12 +2133,10 @@ class MainWindow(QMainWindow):
         if raw_path is None:
             return
         if items:
-            label = self.library.get(self.label_id)
             height, width = (int(frame.shape[0]), int(frame.shape[1])) \
                 if getattr(frame, "shape", None) else (0, 0)
             data = live_logic.proposed_annotation(
-                raw_path.name, self.label_id,
-                str(getattr(label, "family", "") or ""), items,
+                raw_path.name, self.label_id, items,
                 width=width, height=height,
                 session=getattr(self, "_live_session", ""))
             persistence.save_annotation(self.label_id, raw_path.name, data)
@@ -2166,14 +2166,12 @@ class MainWindow(QMainWindow):
         self.label_id_label = QLabel("—")
         self.label_id_label.setWordWrap(True)
         self.label_id_label.setStyleSheet("color: #93c5fd; font-weight: 700;")
-        self.label_family_label = QLabel("—")
         self.label_meta_label = QLabel("—")
         self.label_meta_label.setWordWrap(True)
         self.label_meta_label.setStyleSheet("color: #94a3b8;")
         self.label_progress_label = QLabel("—")
         self.label_progress_label.setWordWrap(True)
         info.addRow("Label", self.label_id_label)
-        info.addRow("Family", self.label_family_label)
         info.addRow("Details", self.label_meta_label)
         info.addRow("Dataset", self.label_progress_label)
 
@@ -2207,20 +2205,13 @@ class MainWindow(QMainWindow):
         self.label_search_edit.setPlaceholderText("Filter labels...")
         self.label_search_edit.setClearButtonEnabled(True)
         self.label_search_edit.setToolTip(
-            "Every word has to appear somewhere -- id, description, family, "
-            "revision, part number or vendor -- in any order.\n\n"
+            "Every word has to appear somewhere -- id, description, revision, "
+            "part number or vendor -- in any order.\n\n"
             "So \"g31 warn\" finds the G31 warning label without having to "
             "remember whether it was named warning_g31 or g31_warning.")
         # Filtering on each keystroke: the library is in memory and the list is
         # a few hundred rows at worst, so there is nothing to debounce.
         self.label_search_edit.textChanged.connect(lambda _t: self._refresh_labels())
-
-        self.label_filter_combo = QComboBox()
-        self.label_filter_combo.setToolTip("Show only labels in one detector family.")
-        self.label_filter_combo.currentIndexChanged.connect(lambda _i: self._refresh_labels())
-        filter_row = QHBoxLayout()
-        filter_row.addWidget(QLabel("Show family"))
-        filter_row.addWidget(self.label_filter_combo, 1)
 
         self.label_count_label = QLabel()
         self.label_count_label.setStyleSheet("color: #94a3b8;")
@@ -2263,25 +2254,10 @@ class MainWindow(QMainWindow):
         layout.addLayout(label_btn_row)
         layout.addWidget(remove_btn)
         layout.addWidget(self.label_search_edit)
-        layout.addLayout(filter_row)
         layout.addWidget(self.label_count_label)
         layout.addWidget(self.label_list)
         layout.addWidget(library_box)
-        self._reload_family_filter_combo()
         return outer
-
-    def _reload_family_filter_combo(self) -> None:
-        if not hasattr(self, "label_filter_combo"):
-            return
-        previous = self.label_filter_combo.currentText()
-        families = sorted({str(l.family) for l in self.library.all()})
-        self.label_filter_combo.blockSignals(True)
-        self.label_filter_combo.clear()
-        self.label_filter_combo.addItem("All families")
-        self.label_filter_combo.addItems(families)
-        index = self.label_filter_combo.findText(previous)
-        self.label_filter_combo.setCurrentIndex(index if index >= 0 else 0)
-        self.label_filter_combo.blockSignals(False)
 
     def _refresh_labels(self) -> None:
         """Repopulate the library list and the active-label summary.
@@ -2290,14 +2266,9 @@ class MainWindow(QMainWindow):
         so the list doubles as the answer to "what is left to do" without
         opening anything.
         """
-        self._reload_family_filter_combo()
-        wanted = ""
-        if hasattr(self, "label_filter_combo") and self.label_filter_combo.currentIndex() > 0:
-            wanted = self.label_filter_combo.currentText()
         query = (self.label_search_edit.text()
                  if hasattr(self, "label_search_edit") else "")
-
-        matched = self.library.search(query, wanted)
+        matched = self.library.search(query)
         self.label_list.clear()
         for label in matched:
             statuses = list(persistence.dataset_statuses(label.label_id).values())
@@ -2305,7 +2276,7 @@ class MainWindow(QMainWindow):
             target = max(1, int(getattr(label, "train_target", 150) or 150))
             mark = "✓" if ready >= target else " "
             item = QListWidgetItem(
-                f"{mark} {label.label_id}  [{label.family}]  {ready}/{target}")
+                f"{mark} {label.label_id}  {ready}/{target}")
             item.setData(Qt.ItemDataRole.UserRole, label.label_id)
             self.label_list.addItem(item)
 
@@ -2342,7 +2313,6 @@ class MainWindow(QMainWindow):
         label = self.library.get(self.label_id) if self.label_id else None
         if label is None:
             self.label_id_label.setText(self.label_id or "No label selected")
-            self.label_family_label.setText("—")
             self.label_meta_label.setText(
                 "Add a label to define what to train, or open one from the list below."
                 if not self.library else
@@ -2352,7 +2322,6 @@ class MainWindow(QMainWindow):
             return
 
         self.label_id_label.setText(label.label_id)
-        self.label_family_label.setText(str(label.family))
         bits = []
         if label.revision:
             bits.append(f"rev {label.revision}")
@@ -2390,15 +2359,19 @@ class MainWindow(QMainWindow):
     def set_active_label(self, label_id: str) -> None:
         """Point the whole app at one label's dataset.
 
-        The Class combo follows to that label's family, because the next thing
-        the operator does is draw one -- and a box drawn under the wrong family
+        The Class combo follows to that label, because the next thing the
+        operator does is draw one -- and a box drawn under the wrong class
         is a mislabel that survives all the way into training.
         """
         self.label_id = str(label_id)
         self._disarm_reference_capture()
+        # Re-derive first: a label added since construction is not in the combo
+        # yet, and set_class_by_name would silently leave the class on
+        # battery_side -- every box then drawn would carry the wrong identity.
+        self._refresh_class_combo()
         label = self.library.get(self.label_id)
         if label is not None:
-            self.set_class_by_name(str(label.family))
+            self.set_class_by_name(str(label.label_id))
         self.current_image_path = None
         self.canvas.clear_boxes()
         self._dataset_index_dirty = True
@@ -2415,6 +2388,8 @@ class MainWindow(QMainWindow):
         if label is None:
             return
         self.library = persistence.load_library()
+        self._refresh_class_combo()
+        self._refresh_class_list_widget()
         self._refresh_labels()
         self.set_active_label(label.label_id)
 
@@ -2427,6 +2402,8 @@ class MainWindow(QMainWindow):
         if wizards.edit_label(self, existing) is None:
             return
         self.library = persistence.load_library()
+        self._refresh_class_combo()
+        self._refresh_class_list_widget()
         self._refresh_labels()
 
     def remove_selected_label(self) -> None:
@@ -2452,21 +2429,19 @@ class MainWindow(QMainWindow):
         self.status.showMessage(f"Removed {label_id} from the library", 5000)
 
     def _assign_active_label(self, boxes: list[dict]) -> list[dict]:
-        """Stamp the active label id onto predictions of its own family.
+        """Carry each prediction's identity across, and fill in its regions.
 
-        Model predictions come back as families -- ``spec_plate``, not
-        ``spec_plate_31agm``. Only the ones matching the active label's family
-        get an identity, and the rest stay unnamed on purpose: guessing which
-        SKU a detection is, is precisely the mistake the two-field design
-        exists to prevent.
+        The detector is trained on label ids, so a prediction already names
+        which label it is -- there is nothing to guess. Every box whose class
+        is a library label gets that label's id, not just the one being
+        trained: a battery carries several labels and the recipe counts them
+        all, so throwing away the others would be discarding real answers.
         """
-        label = self.library.get(self.label_id) if self.label_id else None
-        if label is None:
-            return boxes
-        family = str(getattr(label, "family", "") or "")
         for box in boxes:
-            if family and str(box.get("label", "")) == family:
-                box["label_id"] = self.label_id
+            name = str(box.get("label", ""))
+            label = self.library.get(name) if name else None
+            if label is not None:
+                box["label_id"] = name
                 # The read-regions follow from the four corners just drawn, so
                 # the operator confirms a barcode box rather than drawing one.
                 # Hand-adjusted regions are preserved.
@@ -2984,57 +2959,31 @@ class MainWindow(QMainWindow):
         v.addLayout(button_row(delete, clear))
         v.addWidget(clear_saved)
 
-        class_box = QGroupBox("Detector Families")
+        class_box = QGroupBox("Detector Classes")
         cv = QVBoxLayout(class_box)
         cv.setContentsMargins(8, 8, 8, 8)
         cv.setSpacing(4)
+        class_note = QLabel(
+            "The classes the model is trained on: one per label, plus the "
+            "battery face. This list is the label library -- add a label to add "
+            "a class. Every new one needs a retrain before it is detected."
+        )
+        class_note.setWordWrap(True)
+        class_note.setStyleSheet("color: #9aa4b2;")
+        cv.addWidget(class_note)
         self.class_list_widget = QListWidget()
         self.class_list_widget.setMaximumHeight(120)
         self.class_list_widget.setToolTip(
-            "The classes the model is trained on. Adding one costs a retrain; adding a\n"
-            "label to an existing family costs nothing."
+            "Derived from the label library, so it cannot disagree with what the\n"
+            "detector is actually trained on. Read-only on purpose: a class list\n"
+            "edited separately from the labels is two answers to one question."
         )
-        self.new_class_edit = QLineEdit()
-        self.new_class_edit.setPlaceholderText("a new KIND of label, e.g. hologram_seal")
-        self.new_class_tool_combo = QComboBox()
-        self.new_class_tool_combo.addItem("OBB / 4-corner", "OBB")
-        self.new_class_tool_combo.addItem("Box fallback", "BOX")
-        self.new_class_tool_combo.setCurrentIndex(0)
-        self.new_class_tool_combo.setToolTip(
-            "Default annotation tool. OBB is the normal workflow -- labels sit on curved,\n"
-            "tilted faces and an axis-aligned box around a rotated one swallows its\n"
-            "neighbours. Box is a compatibility fallback."
-        )
-        add_class_btn = QPushButton("Add Class")
-        add_class_btn.clicked.connect(self.add_custom_class)
-        remove_class_btn = QPushButton("Remove Selected")
-        remove_class_btn.setToolTip("Remove the selected class from the config (does not delete existing labels).")
-        remove_class_btn.clicked.connect(self.remove_selected_class)
-        apply_tool_btn = QPushButton("Apply Tool to Selected")
-        apply_tool_btn.setToolTip("Change the default tool for the selected class in the list.")
-        apply_tool_btn.clicked.connect(self.apply_selected_class_tool_default)
-        for btn in (add_class_btn, remove_class_btn, apply_tool_btn):
-            btn.setProperty("rightPanelButton", True)
-            btn.setMinimumHeight(24)
-            btn.setMaximumHeight(26)
-            btn.setMinimumWidth(0)
-            btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        class_btn_row = QHBoxLayout()
-        class_btn_row.setSpacing(4)
-        class_btn_row.addWidget(add_class_btn)
-        class_btn_row.addWidget(remove_class_btn)
         cv.addWidget(self.class_list_widget)
         self.class_counts_label = QLabel("Current image: no labels")
         self.class_counts_label.setWordWrap(True)
         self.class_counts_label.setStyleSheet("color: #94a3b8;")
         self.class_counts_label.setToolTip("Per-class box counts for the image currently on the canvas.")
         cv.addWidget(self.class_counts_label)
-        cv.addWidget(QLabel("New class name"))
-        cv.addWidget(self.new_class_edit)
-        cv.addWidget(QLabel("Default tool"))
-        cv.addWidget(self.new_class_tool_combo)
-        cv.addLayout(class_btn_row)
-        cv.addWidget(apply_tool_btn)
         self._refresh_class_list_widget()
 
         export_box = QGroupBox("Export")
@@ -3060,7 +3009,7 @@ class MainWindow(QMainWindow):
         exp_all.clicked.connect(self.export_all_yolo)
         exp_all.setToolTip(
             "Combine every label's dataset into one training set. This is the "
-            "normal export: the detector learns all its families at once."
+            "normal export: the detector learns every label at once."
         )
         for btn in (exp, exp_all):
             btn.setProperty("rightPanelButton", True)
@@ -3130,7 +3079,7 @@ class MainWindow(QMainWindow):
         return "OBB"
 
     def _refresh_class_combo(self) -> None:
-        self.class_names = class_names_from_config(self.class_config)
+        self.class_names = self.library.detector_classes()
         if not hasattr(self, "class_combo"):
             return
         current = self.class_combo.currentIndex()
@@ -3142,129 +3091,31 @@ class MainWindow(QMainWindow):
         self._class_changed(self.class_combo.currentIndex())
 
     def _refresh_class_list_widget(self) -> None:
-        """List the detector families, with how many library labels use each.
+        """The detector's classes, with how many export-ready images back each.
 
-        The count is the useful number: a family with no labels behind it is a
-        class the model will be trained on and never asked about.
+        The count is the useful number: a class with no images behind it is one
+        the model is asked to learn and given nothing to learn it from, which
+        is how a class ends up detected nowhere or everywhere.
         """
         if not hasattr(self, "class_list_widget"):
             return
-        in_use: dict[str, int] = {}
-        for label in self.library.all():
-            key = str(label.family)
-            in_use[key] = in_use.get(key, 0) + 1
-
         self.class_list_widget.clear()
-        for c in sorted(self.class_config, key=lambda x: int(x.get("id", 0))):
-            if not c.get("enabled", True):
-                continue
-            name = str(c.get("name", ""))
-            tool = "BOX" if str(c.get("default_tool", "OBB")).upper() == "BOX" else "OBB"
-            used = in_use.get(name, 0)
-            suffix = f"{used} label(s)" if used else "no labels yet"
-            item = QListWidgetItem(f"{int(c.get('id', 0))}: {name} ({suffix}, {tool})")
-            item.setData(Qt.ItemDataRole.UserRole, int(c.get("id", 0)))
+        for name in self.library.detector_classes():
+            if name in labels_mod.STRUCTURAL_CLASSES:
+                suffix = "the battery face"
+            else:
+                statuses = list(persistence.dataset_statuses(name).values())
+                ready = sum(1 for st in statuses if review_logic.export_ready(st))
+                # Deliberately no class number here. The export numbers classes
+                # from what the annotations actually contain, so a label with
+                # nothing reviewed is absent from the model and every class
+                # after it sits at a different index than this list would
+                # imply. Names are what inference returns; a number shown here
+                # would be a number that is right only by luck.
+                suffix = f"{ready} ready" if ready else "not in the model yet"
+            item = QListWidgetItem(f"{name}  ({suffix})")
+            item.setData(Qt.ItemDataRole.UserRole, name)
             self.class_list_widget.addItem(item)
-    def _add_class_record(self, name: str, default_tool: str = "OBB") -> bool:
-        """Append a detector family to the class config.
-
-        Ids are append-only and never reused: a trained model maps class id to
-        family by position, so renumbering silently relabels an entire dataset.
-        """
-        safe = "".join(c if c.isalnum() or c in ("_", "-") else "_" for c in name).strip("_") or "family"
-        existing = {str(c.get("name", "")).lower() for c in self.class_config}
-        if safe.lower() in existing:
-            QMessageBox.information(self, "Detector Family", f"Family already exists: {safe}")
-            return False
-        next_id = max([int(c.get("id", -1)) for c in self.class_config], default=-1) + 1
-        tool = "BOX" if str(default_tool).upper() == "BOX" else "OBB"
-        self.class_config.append({
-            "id": next_id,
-            "name": safe,
-            "default_tool": tool,
-            "enabled": True,
-            "tool_locked": True,
-        })
-        save_class_config(self.class_config)
-        self.class_names = class_names_from_config(self.class_config)
-        self._refresh_class_combo()
-        self._refresh_class_list_widget()
-        try:
-            idx = self.class_names.index(safe)
-            self.class_combo.setCurrentIndex(idx)
-        except ValueError:
-            self.class_combo.setCurrentIndex(max(0, self.class_combo.count() - 1))
-        self.status.showMessage(
-            f"Added family {next_id}: {safe} ({tool}). It needs a retrain before "
-            "the model can find it.", 8000)
-        return True
-    def apply_selected_class_tool_default(self) -> None:
-        if not hasattr(self, "class_list_widget") or not hasattr(self, "new_class_tool_combo"):
-            return
-        item = self.class_list_widget.currentItem()
-        if item is None:
-            QMessageBox.information(self, "Class Tool", "Select a class in the list first.")
-            return
-        class_id = int(item.data(Qt.ItemDataRole.UserRole))
-        tool = "BOX" if str(self.new_class_tool_combo.currentData()).upper() == "BOX" else "OBB"
-        changed = False
-        for c in self.class_config:
-            if int(c.get("id", -1)) == class_id:
-                c["default_tool"] = tool
-                c["tool_locked"] = True
-                changed = True
-                break
-        if not changed:
-            QMessageBox.warning(self, "Class Tool", "Could not find the selected class in the class configuration.")
-            return
-        save_class_config(self.class_config)
-        self._refresh_class_combo()
-        self._refresh_class_list_widget()
-        self.status.showMessage(f"Set class {class_id} default tool to {tool}", 5000)
-
-    def remove_selected_class(self) -> None:
-        if not hasattr(self, "class_list_widget"):
-            return
-        item = self.class_list_widget.currentItem()
-        if item is None:
-            QMessageBox.information(self, "Remove Class", "Select a class in the list first.")
-            return
-        class_id = int(item.data(Qt.ItemDataRole.UserRole))
-        name = ""
-        for c in self.class_config:
-            if int(c.get("id", -1)) == class_id:
-                name = str(c.get("name", ""))
-                break
-        reply = QMessageBox.question(
-            self, "Remove Class",
-            f"Remove class '{name}' (id {class_id}) from the configuration?\n\n"
-            "Existing labels in saved sidecar files are NOT deleted — they will just\n"
-            "map to 'unknown' until you re-add a matching class or relabel them.",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
-        )
-        if reply != QMessageBox.Yes:
-            return
-        self.class_config = [c for c in self.class_config if int(c.get("id", -1)) != class_id]
-        save_class_config(self.class_config)
-        self.class_names = class_names_from_config(self.class_config)
-        self._refresh_class_combo()
-        self._refresh_class_list_widget()
-        self.status.showMessage(f"Removed class {class_id}: {name}", 5000)
-
-    def add_custom_class(self) -> None:
-        name = self.new_class_edit.text().strip() if hasattr(self, "new_class_edit") else ""
-        if not name:
-            QMessageBox.information(
-                self, "Detector Family",
-                "Name the new family first -- a new KIND of label, such as "
-                "hologram_seal.\n\nA new SKU of an existing kind does not belong "
-                "here: add it to the label library instead, and it trains under the "
-                "family it already has.")
-            return
-        safe = "".join(c if c.isalnum() or c in ("_", "-") else "_" for c in name).strip("_") or "family"
-        default_tool = self.new_class_tool_combo.currentData() if hasattr(self, "new_class_tool_combo") else "OBB"
-        if self._add_class_record(safe, str(default_tool)):
-            self.new_class_edit.clear()
 
 
     def set_class_by_name(self, name: str) -> None:
@@ -4279,8 +4130,8 @@ class MainWindow(QMainWindow):
         if label is None:
             self._awaiting_reference_box = False
             return False
-        family = str(getattr(label, "family", "") or "")
-        return any(str(getattr(b, "label", "")) == family for b in self.canvas.boxes)
+        return any(str(getattr(b, "label", "")) == self.label_id
+                   for b in self.canvas.boxes)
 
     def _disarm_reference_capture(self) -> None:
         self._awaiting_reference_box = False
@@ -4468,13 +4319,11 @@ class MainWindow(QMainWindow):
         summary.append(f"Model time: {(t1 - t0) * 1000:.1f} ms")
 
         # The number that matters when training one label: did the model find
-        # the family this label belongs to, and how surely.
-        label_def = self.library.get(self.label_id) if self.label_id else None
-        if label_def is not None:
-            family = str(getattr(label_def, "family", "") or "")
+        # this label, and how surely.
+        if self.label_id:
             summary.append("")
-            summary.append(f"Active label: {self.label_id} (family {family})")
-            summary.append(f"  {counts.get(family, 0)} detection(s) of that family")
+            summary.append(f"Active label: {self.label_id}")
+            summary.append(f"  {counts.get(self.label_id, 0)} detection(s) of it")
 
         summary.append("")
         summary.append("Overlay legend:")
@@ -4602,8 +4451,8 @@ class MainWindow(QMainWindow):
 
         items, _counts = self._detection_overlay_items(results)
         box_dicts = self._overlay_items_to_box_dicts(items)
-        # Predictions arrive as families. Stamp the active label id onto the
-        # ones whose family matches, so the operator confirms an identity
+        # Predictions arrive already carrying their identity. Stamp it on, so
+        # the operator confirms an identity
         # rather than typing it on every box -- and leave the rest unnamed,
         # because guessing an identity is exactly the mistake to avoid.
         box_dicts = self._assign_active_label(box_dicts)
@@ -4641,11 +4490,8 @@ class MainWindow(QMainWindow):
         items, _counts = self._detection_overlay_items(results)
         if not items:
             return 0, 0, 0.0
-        family = ""
-        label_def = self.library.get(self.label_id) if self.label_id else None
-        if label_def is not None:
-            family = str(getattr(label_def, "family", "") or "")
-        own = sum(1 for i in items if family and i.get("name") == family)
+        own = sum(1 for i in items
+                  if self.label_id and i.get("name") == self.label_id)
         avg_conf = sum(float(i.get("conf", 0.0)) for i in items) / len(items)
         return own, len(items), avg_conf
     def build_review_queue(self) -> None:
@@ -5059,7 +4905,7 @@ class MainWindow(QMainWindow):
     def _detection_overlay_items(self, results) -> tuple[list[dict], dict[str, int]]:
         """Overlay items for every detection the model returned.
 
-        No class filter: the detector's families are all interesting, and the
+        No class filter: every class the detector reports is interesting, and the
         old battery/bung split silently dropped anything outside those two --
         so a class could be trained and never seen or validated here.
 
@@ -5584,12 +5430,11 @@ class MainWindow(QMainWindow):
         label = self.library.get(self.label_id) if self.label_id else None
         if label is None or not label.regions():
             return
-        family = str(getattr(label, "family", "") or "")
         placed = 0
         if hasattr(self.canvas, "push_undo_snapshot"):
             self.canvas.push_undo_snapshot()
         for box in self.canvas.boxes:
-            if str(getattr(box, "label", "")) != family:
+            if str(getattr(box, "label", "")) != self.label_id:
                 continue
             payload = box.to_dict()
             ann_logic.apply_reference_regions(payload, label)
@@ -5702,17 +5547,17 @@ class MainWindow(QMainWindow):
         self.define_read_regions(replace=True)
     def _label_box_for_regions(self, label):
         """The on-canvas box to flatten: the selection, else the only candidate."""
-        family = str(getattr(label, "family", "") or "")
-        candidates = [b for b in self.canvas.boxes if str(getattr(b, "label", "")) == family]
+        candidates = [b for b in self.canvas.boxes
+                      if str(getattr(b, "label", "")) == self.label_id]
         index = getattr(self.canvas, "selected_idx", None)
         if index is not None and 0 <= index < len(self.canvas.boxes):
             chosen = self.canvas.boxes[index]
-            if str(getattr(chosen, "label", "")) == family:
+            if str(getattr(chosen, "label", "")) == self.label_id:
                 return chosen
             QMessageBox.information(
                 self, "Read-Regions",
-                f"The selected box is a {getattr(chosen, 'label', '?')}, not a "
-                f"{family}. Select the {self.label_id} box instead.")
+                f"The selected box is a {getattr(chosen, 'label', '?')}. "
+                f"Select the {self.label_id} box instead.")
             return None
         if len(candidates) == 1:
             return candidates[0]
@@ -5724,7 +5569,7 @@ class MainWindow(QMainWindow):
             return None
         QMessageBox.information(
             self, "Read-Regions",
-            f"There are {len(candidates)} {family} boxes on this image. Click the "
+            f"There are {len(candidates)} {self.label_id} boxes on this image. Click the "
             "one to define regions on, then try again.")
         return None
 
@@ -6379,16 +6224,18 @@ class MainWindow(QMainWindow):
             "Export complete",
             f"YOLO dataset exported to:\n{out}\n\nTraining file:\n{out / 'data.yaml'}\n\n"
             f"{summary}\n\n"
-            f"Task: {task}\nClasses: detector families\nReview filter: reviewed only\n\n"
-            f"This is one label on its own. Export All is the normal path -- one "
-            f"detector over every family.\n\nSuggested command:\n{train_hint}"
+            f"Task: {task}\nClasses: label ids\nReview filter: reviewed only\n\n"
+            f"This is one label on its own, for debugging a single dataset. Export "
+            f"All is the normal path -- one detector over every label. A model from "
+            f"this export has never seen a competing label.\n\n"
+            f"Suggested command:\n{train_hint}"
         )
         self.status.showMessage(f"Exported YOLO {task} dataset: {out}", 8000)
     def export_all_yolo(self) -> None:
         """Export every label's dataset into one training set.
 
         This is the normal export: labels are gathered one at a time but trained
-        together, and a model trained on a single family has nothing to tell it
+        together, and a model trained on a single label has nothing to tell it
         apart from.
         """
         task = self._export_task()
@@ -6410,7 +6257,7 @@ class MainWindow(QMainWindow):
             f"Training file:\n{data_yaml}\nManifest:\n{manifest}\n"
             f"Split report:\n{out / 'split_report.txt'}\n\n"
             f"{summary}\n\n"
-            f"Task: {task}\nClasses: detector families\nReview filter: reviewed only"
+            f"Task: {task}\nClasses: label ids\nReview filter: reviewed only"
         )
         self.status.showMessage(f"Exported combined YOLO {task} dataset: {out}", 8000)
 def main() -> None:

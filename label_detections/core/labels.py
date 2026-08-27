@@ -28,18 +28,24 @@ from __future__ import annotations
 from dataclasses import dataclass, field, asdict
 from typing import Any
 
-# Coarse detector classes. Deliberately few and visually distinct: this list is
-# the thing that costs a retrain to change, so it holds *kinds* of label, never
-# individual SKUs.
-DEFAULT_FAMILIES = [
-    "battery_side",   # the whole side; drives rectification, always labeled
-    "spec_plate",
-    "warning_label",
-    "cert_mark",
-    "trace_tag",
-    "promo_label",
-    "code_patch",
-]
+# The detector is trained on **label ids**. The recipe the front end authors is
+# a list of label ids and quantities, so anything coarser has to be resolved
+# back into an id before it is worth anything -- and that resolution step is
+# pure cost: a decoder, artwork matching and a tie-breaker to maintain, each
+# with its own failure modes, all to recover an answer the model could have
+# given directly.
+#
+# The price is honest and worth stating: a new label is not detectable until it
+# has images and a training run. That is a smaller price than it looks, because
+# a new label needs its images collected either way -- train_target is already
+# per label, and the dataset is already per label. What it adds is one batch
+# training run over data that was being extended anyway.
+#
+# BATTERY_SIDE is the exception, and the only one: it is not a label, it is the
+# whole face. It drives rectification and lets placement be judged against the
+# battery instead of the frame, so it is a class in its own right and no label
+# ever owns it.
+STRUCTURAL_CLASSES = ["battery_side"]
 
 SYMBOLOGIES = [
     "code128", "code39", "itf14", "ean13", "upca", "gs1_128",
@@ -120,7 +126,6 @@ class LabelDef:
     """Everything the add-label wizard asks about one label."""
     label_id: str
     name: str = ""
-    family: str = "spec_plate"          # detector class this label belongs to
     revision: str = ""
     effective_date: str = ""            # ISO date this revision became valid
     supersedes: str = ""                # label_id this replaces, for changeover
@@ -232,8 +237,9 @@ def validate_label_def(label: LabelDef) -> list[str]:
     issues: list[str] = []
     if not str(label.label_id).strip():
         issues.append("Label ID is required.")
-    if label.family not in DEFAULT_FAMILIES:
-        issues.append(f"Unknown detector family '{label.family}'.")
+    if str(label.label_id).strip() in STRUCTURAL_CLASSES:
+        issues.append(
+            f"'{label.label_id}' is a structural class, not a label. Pick another id.")
     if label.default_severity not in SEVERITIES:
         issues.append(f"Severity must be one of {', '.join(SEVERITIES)}.")
     if label.variable_data and len(label.anchor_region) < 4:
@@ -275,9 +281,9 @@ def validate_label_def(label: LabelDef) -> list[str]:
 
 
 # Fields a typed query is matched against. Everything an operator might
-# reasonably remember about a label: what it is called, what it is, what family
-# it trains under, its revision, and the part number on the purchase order.
-SEARCH_FIELDS = ("label_id", "name", "family", "revision", "part_number", "vendor")
+# reasonably remember about a label: what it is called, its revision, and the
+# part number on the purchase order.
+SEARCH_FIELDS = ("label_id", "name", "revision", "part_number", "vendor")
 
 
 def match_label(label: "LabelDef", query: str) -> bool:
@@ -333,23 +339,21 @@ class LabelLibrary:
     def all(self) -> list[LabelDef]:
         return [self._labels[k] for k in self.ids()]
 
-    def by_family(self, family: str) -> list[LabelDef]:
-        return [l for l in self.all() if l.family == family]
+    def search(self, query: str) -> list[LabelDef]:
+        """Labels matching a typed query."""
+        return search_labels(self.all(), query)
 
-    def search(self, query: str, family: str = "") -> list[LabelDef]:
-        """Labels matching a typed query, optionally narrowed to one family."""
-        found = search_labels(self.all(), query)
-        return [l for l in found if l.family == family] if family else found
+    def detector_classes(self) -> list[str]:
+        """Every class the detector is trained on: the structural ones, then
+        one per label id.
 
-    def families_in_use(self) -> list[str]:
-        """Detector classes actually needed by the library, in canonical order.
-
-        Always includes ``battery_side``: without it there is nothing to
-        rectify against and zone checks are impossible.
+        Structural classes lead so ``battery_side`` keeps index 0 as labels
+        come and go. Class indices are written into every exported label file,
+        so a list that reshuffles on an unrelated edit would silently
+        re-point every annotation in the dataset at the wrong class.
         """
-        used = {l.family for l in self.all()}
-        used.add("battery_side")
-        return [f for f in DEFAULT_FAMILIES if f in used]
+        return list(STRUCTURAL_CLASSES) + sorted(
+            l.label_id for l in self.all() if l.label_id not in STRUCTURAL_CLASSES)
 
     def to_dict(self) -> dict[str, Any]:
         return {"labels": [l.to_dict() for l in self.all()]}

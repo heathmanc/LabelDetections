@@ -205,7 +205,7 @@ def test_the_score_does_not_depend_on_how_many_images_were_compared():
 # --- through the exporter ---------------------------------------------------
 
 def _library(vary_region=True):
-    label = LabelDef(label_id="sp", family="spec_plate", train_target=5)
+    label = LabelDef(label_id="sp", train_target=5)
     if vary_region:
         label.text_fields = [TextField(name="date_code", region=DATE_REGION)]
     return LabelLibrary([label])

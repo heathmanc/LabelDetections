@@ -16,7 +16,7 @@ val: images/val
 nc: 3
 names:
   0: battery_side
-  1: spec_plate
+  1: spec_plate_31agm
   2: trace_tag
 """
 
@@ -33,7 +33,7 @@ def _write(tmp, manifest_lines=None, data_yaml=None, split_report=None):
 
 def test_class_names_parsed_in_order(tmp_path):
     _write(tmp_path, data_yaml=DATA_YAML)
-    assert er.class_names(tmp_path) == ["battery_side", "spec_plate", "trace_tag"]
+    assert er.class_names(tmp_path) == ["battery_side", "spec_plate_31agm", "trace_tag"]
 
 
 def test_class_names_missing_yaml(tmp_path):
@@ -65,7 +65,7 @@ def test_totals_come_from_the_manifest_the_export_actually_wrote(tmp_path):
     assert "spec_plate_31agm: 2" in out
     assert "trace_tag: 1" in out
     assert "Capture groups: 2" in out
-    assert "Detector families (3): battery_side, spec_plate, trace_tag" in out
+    assert "Detector classes (3): battery_side, spec_plate_31agm, trace_tag" in out
 
 
 def test_backgrounds_are_counted_not_warned_about(tmp_path):

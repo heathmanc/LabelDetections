@@ -5,15 +5,12 @@ so a sidecar describes instances of **one** label -- typically one, sometimes
 several when a battery carries a pair -- plus whatever barcode and text
 regions sit inside each.
 
-Two fields carry the two-stage design:
-
-``label`` / ``class_id``
-    the coarse **detector family** the model is trained to find.
-``label_id``
-    the **library identity**: which exact label this is.
-
-Conflating them is what forces a retrain every time a label SKU changes, so
-they stay separate fields that never learn about each other.
+``label`` / ``class_id`` is the **detector class**, and ``label_id`` is the
+library identity. The detector is trained on label ids, so for a real label the
+two agree and that is not a redundancy worth removing: ``battery_side`` is a
+class with no identity, and annotations drawn before the switch carry a coarse
+name in ``label`` with the identity in ``label_id``. Readers take ``label_id``
+first and fall back, which keeps both readable.
 
 ``regions`` nest inside a box (barcodes, text fields). They are not top-level
 boxes, so a YOLO exporter walks straight past them without needing to know
@@ -59,13 +56,13 @@ def new_annotation(image: str, label_id: str = "", width: int = 0, height: int =
     return data
 
 
-def make_box(family: str, points: list[list[float]], *, box_id: str = "",
+def make_box(class_name: str, points: list[list[float]], *, box_id: str = "",
              label_id: str = "", parent_id: str = "",
              confidence: float | None = None, **extra: Any) -> dict[str, Any]:
-    """One outer detection: a battery side or an identified label."""
+    """One outer detection: the battery face, or an identified label."""
     box: dict[str, Any] = {
         "id": box_id or ensure_id(),
-        "label": str(family),
+        "label": str(class_name),
         "kind": "obb",
         "points": [[float(p[0]), float(p[1])] for p in points[:4]],
     }
@@ -169,7 +166,7 @@ def label_inventory(data: dict | None) -> dict[str, int]:
 
 
 def family_inventory(data: dict | None) -> dict[str, int]:
-    """``{detector_family: count}``. Used by dataset health, not by inspection."""
+    """``{detector_class: count}``. Used by dataset health, not by inspection."""
     counts: dict[str, int] = {}
     for box in boxes(data):
         key = str(box.get("label", "") or "unknown")

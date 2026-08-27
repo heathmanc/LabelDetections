@@ -21,8 +21,7 @@ def rect(x, y, w, h):
 
 @pytest.fixture
 def library():
-    plate = LabelDef(label_id="spec_plate_31agm", family="spec_plate",
-                     reference_images=["ref.png"],
+    plate = LabelDef(label_id="spec_plate_31agm", reference_images=["ref.png"],
                      confusable_with=["spec_plate_27agm"])
     plate.codes = [CodeSpec(role="serial", symbology="datamatrix",
                             policy="must_match_pattern", pattern=r"^SN\d{6}$",
@@ -30,16 +29,13 @@ def library():
                             code_width_mm=30.0, x_dim_mm=0.254)]
     plate.text_fields = [TextField(name="date_code", region=[0.1, 0.75, 0.66, 0.16])]
 
-    tag = LabelDef(label_id="trace_tag", family="trace_tag",
-                   reference_images=["tag.png"])
+    tag = LabelDef(label_id="trace_tag", reference_images=["tag.png"])
     tag.codes = [CodeSpec(role="serial", symbology="code128", policy="must_decode",
                           region=[0.1, 0.2, 0.8, 0.48],
                           code_width_mm=40.0, x_dim_mm=0.33)]
 
-    warn = LabelDef(label_id="warning_en", family="warning_label",
-                    reference_images=["warn.png"])
-    other = LabelDef(label_id="spec_plate_27agm", family="spec_plate",
-                     reference_images=["other.png"])
+    warn = LabelDef(label_id="warning_en", reference_images=["warn.png"])
+    other = LabelDef(label_id="spec_plate_27agm", reference_images=["other.png"])
     return LabelLibrary([plate, tag, warn, other])
 
 

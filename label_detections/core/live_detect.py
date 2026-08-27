@@ -112,26 +112,19 @@ def should_infer(busy: bool, since_last_s: float,
     return not busy and since_last_s >= float(min_interval_s)
 
 
-# The readout names the *family*, never the label. The detector is trained on
-# families and cannot return a label id -- no SKU is in its class list. Writing
-# "2220-9199: mean 0.94" made the model look like it had identified the label
-# when all it had found was a spec_plate, which is the one misreading that
-# would let a wrong label pass live and look fine.
-def _belongs(label_id: str) -> str:
-    return f"   -- the family {label_id} belongs to" if label_id else ""
-
-
-def frame_summary(counts: dict[str, int], family: str, label_id: str,
+# The detector is trained on label ids, so what it returns *is* the identity
+# the recipe is written in. The readout says it plainly.
+def frame_summary(counts: dict[str, int], label_id: str,
                   rolling: Rolling) -> str:
     """The readout under the live view."""
     total = sum(counts.values())
     lines = [f"{total} detection(s)   {rolling.mean_ms:.0f} ms   {rolling.rate:.1f}/s"]
-    if family:
-        found = counts.get(family, 0)
-        state = f"{found} found" if found else "NOT FOUND"
-        lines.append(f"{family}: {state}{_belongs(label_id)}")
+    if label_id:
+        found = counts.get(label_id, 0)
+        lines.append(f"{label_id}: {found} found" if found
+                     else f"{label_id}: NOT FOUND")
     for name in sorted(counts):
-        if name != family:
+        if name != label_id:
             lines.append(f"  {name}: {counts[name]}")
     return "\n".join(lines)
 
@@ -247,21 +240,20 @@ def track_line(track: Track) -> str:
     return f"#{track.track_id} {track.name} {track.mean_conf:.2f}"
 
 
-def track_summary(book: TrackBook, family: str, label_id: str,
-                  rolling: Rolling) -> str:
+def track_summary(book: TrackBook, label_id: str, rolling: Rolling) -> str:
     """The readout when tracking is on."""
     rows = book.rows()
     lines = [f"{len(rows)} tracked   {rolling.mean_ms:.0f} ms   {rolling.rate:.1f}/s"]
-    mine = [t for t in rows if t.name == family] if family else []
-    if family and not mine:
-        # The one thing worth a line of its own: the family the open label
-        # belongs to is not on screen at all.
-        lines.append(f"{family} NOT TRACKED{_belongs(label_id)}")
+    mine = [t for t in rows if t.name == label_id] if label_id else []
+    if label_id and not mine:
+        # The one thing worth a line of its own: the label being trained is
+        # not on screen at all.
+        lines.append(f"{label_id} NOT TRACKED")
     for track in rows:
-        # Annotate only the longest-held match, so a battery carrying two of
-        # the same family does not repeat the note down the list.
-        note = _belongs(label_id) if (mine and track is mine[0]) else ""
-        lines.append(track_line(track) + note)
+        # Marked rather than filtered: the other labels on the battery are
+        # what the recipe counts too, so they stay visible.
+        mark = "  <-- this label" if (mine and track is mine[0]) else ""
+        lines.append(track_line(track) + mark)
     if not rows:
         lines.append("No tracked objects.")
     return "\n".join(lines)
@@ -310,17 +302,20 @@ def _item_points(item: dict) -> list[list[float]]:
     return []
 
 
-def proposed_boxes(items, family: str, label_id: str) -> list[dict]:
+def proposed_boxes(items, label_id: str = "") -> list[dict]:
     """Sidecar boxes from live detections, as proposals.
 
-    The detector only ever returns a **family**, so that is what goes in
-    ``label``. ``label_id`` is filled in only where the detected family is the
-    open label's own -- a ``battery_side`` box is not this label and must not
-    be handed its identity. Where it is filled in it is still a guess: the
-    dataset is being collected for this label, so that is the likeliest
-    answer, and the review pass is where a wrong one gets fixed.
+    The detector returns a label id, so the class it reports *is* the box's
+    identity -- no guessing which of them this one is. ``label_id`` is not
+    taken from the label the operator happens to have open: a battery carries
+    several labels and the model names each one, so overwriting that with the
+    open label would throw away the answer and put one identity on every box.
+
+    Structural classes carry no identity, which is correct: ``battery_side``
+    is the face, not a label, and the recipe never counts it.
     """
     from . import annotations as ann
+    from .labels import STRUCTURAL_CLASSES
 
     out: list[dict] = []
     for item in items or []:
@@ -333,21 +328,25 @@ def proposed_boxes(items, family: str, label_id: str) -> list[dict]:
             extra["track_id"] = int(item["track_id"])
         out.append(ann.make_box(
             name, points,
-            label_id=label_id if (family and name == family) else "",
+            label_id="" if name in STRUCTURAL_CLASSES else name,
             confidence=float(item.get("conf", 0.0)),
             **extra))
     return out
 
 
-def proposed_annotation(image: str, label_id: str, family: str, items,
+def proposed_annotation(image: str, label_id: str, items,
                         width: int = 0, height: int = 0,
                         session: str = "") -> dict:
-    """A sidecar pre-filled with what the model just found. Never reviewed."""
+    """A sidecar pre-filled with what the model just found. Never reviewed.
+
+    ``label_id`` records whose dataset the image landed in, not what the boxes
+    are -- each box carries its own identity from the model.
+    """
     from . import annotations as ann
 
     meta: dict = {"proposed_by": PROPOSED_BY}
     if session:
         meta["session"] = session
     data = ann.new_annotation(image, label_id, width, height, **meta)
-    data["boxes"] = proposed_boxes(items, family, label_id)
+    data["boxes"] = proposed_boxes(items, label_id)
     return data

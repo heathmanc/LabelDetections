@@ -28,6 +28,7 @@ from pathlib import Path
 
 from . import augment as augment_logic
 from . import dataset as dataset_logic
+from . import labels as labels_mod
 from .review import annotation_reviewed as _annotation_reviewed
 from .review import is_background_annotation as _is_background
 from .storage import CAPTURE_DIR, EXPORT_DIR, LABEL_DIR, list_datasets, safe_token
@@ -36,11 +37,19 @@ DEFAULT_SPLIT_TRAIN = 0.8
 DEFAULT_SEED = 0
 
 
-def _family(box: dict) -> str:
-    """The detector class for a box: its family, never its label id."""
-    name = str(box.get("label", "") or "").strip()
-    if name:
-        return safe_token(name).lower()
+def _class_name(box: dict) -> str:
+    """The detector class for a box: its label id.
+
+    ``label_id`` wins over ``label`` so annotations drawn before the detector
+    trained on ids keep exporting correctly -- those carry a coarse name in
+    ``label`` and the real identity in ``label_id``, and the identity is the
+    class now. A box with no id at all is structural (``battery_side``), and
+    falls back to its name.
+    """
+    for key in ("label_id", "label"):
+        name = str(box.get(key, "") or "").strip()
+        if name:
+            return safe_token(name).lower()
     cls = box.get("class_id")
     return f"class_{int(cls)}" if cls is not None else "unknown"
 
@@ -140,10 +149,10 @@ def _write_label_file(out: Path, split: str, stem: str, data: dict,
     height = int(data.get("height", 0) or 0)
     lines: list[str] = []
     for box in data.get("boxes", []) or []:
-        family = _family(box)
-        if family not in class_index:
+        name = _class_name(box)
+        if name not in class_index:
             continue
-        line = line_for(box, width, height, class_index[family])
+        line = line_for(box, width, height, class_index[name])
         if line:
             lines.append(line)
     (out / "labels" / split / f"{stem}.txt").write_text(
@@ -244,7 +253,7 @@ def write_dataset(out: Path, entries: list[dataset_logic.Entry], *, task: str = 
     ``core/augment.py``. Labels whose regions already vary get none, because
     recombining them teaches nothing and dilutes the real images.
     """
-    families: list[str] = []
+    class_names: list[str] = []
     seen: set[str] = set()
     labeled = 0
     for entry in entries:
@@ -252,10 +261,10 @@ def write_dataset(out: Path, entries: list[dataset_logic.Entry], *, task: str = 
         if boxes:
             labeled += 1
         for box in boxes:
-            family = _family(box)
-            if family not in seen:
-                seen.add(family)
-                families.append(family)
+            name = _class_name(box)
+            if name not in seen:
+                seen.add(name)
+                class_names.append(name)
 
     # Backgrounds alone cannot train anything -- there would be no classes at
     # all -- so require at least one genuinely labeled image.
@@ -265,8 +274,12 @@ def write_dataset(out: Path, entries: list[dataset_logic.Entry], *, task: str = 
             "Background-only images cannot train a model on their own."
         )
 
-    families.sort()
-    class_index = {name: i for i, name in enumerate(families)}
+    # Structural classes first so battery_side holds index 0 as labels come and
+    # go; the rest sorted, because the index is written into every label file
+    # and a list that reshuffles re-points the whole dataset.
+    structural = [c for c in labels_mod.STRUCTURAL_CLASSES if c in seen]
+    class_names = structural + sorted(n for n in class_names if n not in structural)
+    class_index = {name: i for i, name in enumerate(class_names)}
 
     train, val, report = dataset_logic.split_entries(
         entries, split_train, seed=seed)
@@ -283,12 +296,12 @@ def write_dataset(out: Path, entries: list[dataset_logic.Entry], *, task: str = 
         out, train, class_index, task, library, augment, seed)
     rows += augmented_rows
 
-    names_block = "\n".join(f"  {i}: {name}" for i, name in enumerate(families))
+    names_block = "\n".join(f"  {i}: {name}" for i, name in enumerate(class_names))
     (out / "data.yaml").write_text(
         f"path: {out.as_posix()}\n"
         f"train: images/train\n"
         f"val: images/val\n"
-        f"nc: {len(families)}\n"
+        f"nc: {len(class_names)}\n"
         f"names:\n{names_block}\n",
         encoding="utf-8",
     )
@@ -344,10 +357,14 @@ def export_all_labels_yolo(*, task: str = "obb", reviewed_only: bool = True,
                            library=None, augment: int = 0) -> Path:
     """Export every label's dataset into one training set.
 
-    This is the normal export. Labels are *trained* one at a time in the sense
-    that each gathers and is reviewed on its own schedule, but they are trained
-    *together*: one detector over all the families, so it learns to tell a spec
-    plate from a warning label rather than to find one thing everywhere.
+    This is the normal export, and the only one worth trusting. Labels gather
+    and are reviewed one at a time, but they must be trained *together*: one
+    detector across every label id, so it learns to tell 2220-9199 from
+    2220-9200 rather than to find one thing everywhere it looks.
+
+    A per-label export exists for debugging a single dataset. A model trained
+    from one has never seen a competing label and will happily report the one
+    class it knows on anything label-shaped.
     """
     entries: list[dataset_logic.Entry] = []
     for label_id in list_datasets():

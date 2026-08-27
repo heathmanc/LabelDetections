@@ -102,32 +102,39 @@ def test_the_summary_leads_with_whether_the_active_label_was_found():
     rolling = ld.Rolling()
     rolling.record(0.02, now=100)
     rolling.record(0.02, now=100.2)
-    found = ld.frame_summary({"spec_plate": 1, "cert_mark": 2},
-                             "spec_plate", "sp_g31", rolling)
-    assert "spec_plate: 1 found" in found
-    assert "cert_mark: 2" in found
+    found = ld.frame_summary({"sp_g31": 1, "warn_g31": 2}, "sp_g31", rolling)
+    assert "sp_g31: 1 found" in found
+    assert "warn_g31: 2" in found
 
-    missed = ld.frame_summary({"cert_mark": 1}, "spec_plate", "sp_g31", rolling)
+    missed = ld.frame_summary({"warn_g31": 1}, "sp_g31", rolling)
     assert "NOT FOUND" in missed
 
 
-def test_the_readout_never_claims_the_model_identified_the_label():
-    """The detector returns a family. A line reading "2220-9199: mean 0.94"
-    says it returned an identity, and a wrong label would pass live looking
-    perfectly healthy."""
+def test_the_readout_names_the_id_the_recipe_is_written_in():
+    """The front end counts label ids, so a readout that cannot name one is
+    not showing the operator the same thing the line will judge."""
     rolling = ld.Rolling()
     rolling.record(0.02, now=100)
 
-    found = ld.frame_summary({"spec_plate": 1}, "spec_plate", "sp_g31", rolling)
-    assert not found.splitlines()[1].startswith("sp_g31")
-    assert "spec_plate" in found and "the family sp_g31 belongs to" in found
+    found = ld.frame_summary({"2220-9199": 1}, "2220-9199", rolling)
+    assert "2220-9199: 1 found" in found
 
     book = ld.TrackBook()
-    book.update([(1, "spec_plate", 0.94)], now=0.0)
-    tracked = ld.track_summary(book, "spec_plate", "sp_g31", rolling)
-    assert not tracked.splitlines()[1].startswith("sp_g31")
-    assert "#1 spec_plate 0.94" in tracked
-    assert "the family sp_g31 belongs to" in tracked
+    book.update([(1, "2220-9199", 0.94)], now=0.0)
+    tracked = ld.track_summary(book, "2220-9199", rolling)
+    assert "#1 2220-9199 0.94" in tracked
+    assert "this label" in tracked
+
+
+def test_other_labels_on_the_battery_stay_visible_rather_than_filtered():
+    """The recipe counts every label on the side, not just the one being
+    trained, so hiding the rest would hide most of the answer."""
+    rolling = ld.Rolling()
+    rolling.record(0.02, now=100)
+    book = ld.TrackBook()
+    book.update([(1, "2220-9199", 0.94), (2, "2220-9200", 0.81)], now=0.0)
+    text = ld.track_summary(book, "2220-9199", rolling)
+    assert "2220-9199" in text and "2220-9200" in text
 
 
 def test_the_armed_note_never_looks_like_it_hung():
@@ -159,12 +166,12 @@ def _window():
     return _win
 
 
-def _label(win, label_id="live_sp", family="spec_plate"):
+def _label(win, label_id="live_sp", ):
     from label_detections.core import persistence
     from label_detections.core.labels import LabelDef
 
     library = persistence.load_library()
-    library.add(LabelDef(label_id=label_id, family=family), replace=True)
+    library.add(LabelDef(label_id=label_id, ), replace=True)
     persistence.save_library(library)
     win.library = persistence.load_library()
     win.set_active_label(label_id)
@@ -314,7 +321,7 @@ def test_an_armed_view_leaves_a_frame_the_model_handled():
     win._live_gate = ld.CaptureGate(cooldown_s=0.0)
     before = len(storage.list_images(label_id))
     try:
-        confident = _Results([[10, 10, 40, 40]], {0: "spec_plate"}, [0.97], [0])
+        confident = _Results([[10, 10, 40, 40]], {0: win.label_id}, [0.97], [0])
         win._on_live_result([confident], 0.02)
         assert len(storage.list_images(label_id)) == before
     finally:
@@ -331,10 +338,10 @@ def test_the_untracked_readout_reports_what_the_model_saw():
     win._live_overlay_scale = (1.0, 1.0)
     try:
         win._on_live_result(
-            [_Results([[10, 10, 40, 40]], {0: "spec_plate"}, [0.9], [0])], 0.02)
+            [_Results([[10, 10, 40, 40]], {0: win.label_id}, [0.9], [0])], 0.02)
         text = win.live_readout.toPlainText()
         assert "1 detection(s)" in text
-        assert "spec_plate: 1 found" in text
+        assert f"{win.label_id}: 1 found" in text
     finally:
         win._live_thread = None
         win._live_tracking = True
@@ -355,11 +362,11 @@ def test_the_tracked_readout_reports_a_held_average_not_a_flicker():
         # 0.88/0.94/0.91 they are both 0.91 and the assertion proves nothing.
         for conf in (0.80, 0.90, 1.00):
             win._on_live_result(
-                [_Results([[10, 10, 40, 40]], {0: "spec_plate"}, [conf], [0],
+                [_Results([[10, 10, 40, 40]], {0: win.label_id}, [conf], [0],
                           ids=[7])], 0.02)
         text = win.live_readout.toPlainText()
         assert "1 tracked" in text
-        assert "#7 spec_plate 0.90" in text, "showed the latest frame, not the mean"
+        assert f"#7 {win.label_id} 0.90" in text, "showed the latest frame, not the mean"
         assert "frames" not in text
     finally:
         win._live_thread = None
@@ -451,8 +458,8 @@ def test_the_track_summary_says_when_the_active_label_is_not_tracked():
     book.update([(1, "cert_mark", 0.9)], now=100)
     rolling = ld.Rolling()
     rolling.record(0.01, now=100)
-    text = ld.track_summary(book, "spec_plate", "sp_g31", rolling)
-    assert "spec_plate NOT TRACKED" in text
+    text = ld.track_summary(book, "sp_g31", rolling)
+    assert "sp_g31 NOT TRACKED" in text
     assert "#1 cert_mark" in text
 
 
@@ -473,51 +480,38 @@ def _item(name, conf=0.9, track_id=None, xyxy=None, points=None):
     return item
 
 
-def test_a_proposal_carries_the_family_the_detector_actually_returned():
-    boxes = ld.proposed_boxes([_item("spec_plate", xyxy=[0, 0, 4, 4])],
-                              "spec_plate", "sp_9199")
-    assert boxes[0]["label"] == "spec_plate"
-
-
-def test_only_the_open_labels_family_is_handed_its_identity():
-    """A battery_side box is not this label. Filling in label_id anyway would
-    put the wrong identity on a box a reviewer is likely to accept."""
-    items = [_item("spec_plate", xyxy=[0, 0, 4, 4]),
-             _item("battery_side", xyxy=[0, 0, 9, 9])]
-    boxes = ld.proposed_boxes(items, "spec_plate", "sp_9199")
-    assert boxes[0]["label_id"] == "sp_9199"
-    assert "label_id" not in boxes[1]
+def test_a_proposal_carries_the_id_the_detector_returned():
+    boxes = ld.proposed_boxes([_item("2220-9199", xyxy=[0, 0, 4, 4])])
+    assert boxes[0]["label"] == "2220-9199"
+    assert boxes[0]["label_id"] == "2220-9199"
 
 
 def test_an_axis_aligned_detection_becomes_four_corners():
-    boxes = ld.proposed_boxes([_item("spec_plate", xyxy=[10, 20, 30, 50])],
-                              "spec_plate", "sp")
+    boxes = ld.proposed_boxes([_item("2220-9199", xyxy=[10, 20, 30, 50])])
     assert boxes[0]["points"] == [[10.0, 20.0], [30.0, 20.0],
                                   [30.0, 50.0], [10.0, 50.0]]
 
 
 def test_an_oriented_detection_keeps_its_own_corners():
     pts = [[0, 0], [10, 2], [9, 12], [-1, 10]]
-    boxes = ld.proposed_boxes([_item("spec_plate", points=pts)], "spec_plate", "sp")
+    boxes = ld.proposed_boxes([_item("spec_plate", points=pts)])
     assert boxes[0]["points"] == [[0.0, 0.0], [10.0, 2.0], [9.0, 12.0], [-1.0, 10.0]]
 
 
 def test_confidence_and_track_id_survive_into_the_sidecar():
     boxes = ld.proposed_boxes(
-        [_item("spec_plate", conf=0.83, track_id=4, xyxy=[0, 0, 4, 4])],
-        "spec_plate", "sp")
+        [_item("spec_plate", conf=0.83, track_id=4, xyxy=[0, 0, 4, 4])])
     assert boxes[0]["confidence"] == pytest.approx(0.83)
     assert boxes[0]["track_id"] == 4
 
 
 def test_a_detection_with_no_geometry_is_dropped_rather_than_written_empty():
-    assert ld.proposed_boxes([_item("spec_plate")], "spec_plate", "sp") == []
-    assert ld.proposed_boxes([_item("", xyxy=[0, 0, 1, 1])], "spec_plate", "sp") == []
+    assert ld.proposed_boxes([_item("spec_plate")]) == []
+    assert ld.proposed_boxes([_item("", xyxy=[0, 0, 1, 1])]) == []
 
 
 def test_every_proposed_box_is_marked_as_the_machines_work():
-    boxes = ld.proposed_boxes([_item("spec_plate", xyxy=[0, 0, 4, 4])],
-                              "spec_plate", "sp")
+    boxes = ld.proposed_boxes([_item("2220-9199", xyxy=[0, 0, 4, 4])])
     assert boxes[0]["proposed_by"] == ld.PROPOSED_BY
 
 
@@ -527,7 +521,7 @@ def test_a_proposed_sidecar_is_never_review_marked():
     from label_detections.core import review
 
     data = ld.proposed_annotation(
-        "f.jpg", "sp", "spec_plate",
+        "f.jpg", "sp",
         [_item("spec_plate", xyxy=[0, 0, 4, 4])], 640, 480)
     assert review.annotation_reviewed(data) is False
     assert review.annotation_status(data, "sp") == "needs_review"
@@ -536,7 +530,7 @@ def test_a_proposed_sidecar_is_never_review_marked():
 
 def test_a_proposed_sidecar_records_the_frame_it_describes():
     data = ld.proposed_annotation(
-        "f.jpg", "sp", "spec_plate",
+        "f.jpg", "sp",
         [_item("spec_plate", xyxy=[0, 0, 4, 4])], 640, 480)
     assert data["image"] == "f.jpg"
     assert data["label_id"] == "sp"
@@ -553,7 +547,7 @@ def test_one_live_run_is_one_capture_group_so_near_duplicates_do_not_split():
     entries = [
         dataset.entry_from_annotation(
             "sp", f"f{i}.jpg",
-            ld.proposed_annotation(f"f{i}.jpg", "sp", "spec_plate",
+            ld.proposed_annotation(f"f{i}.jpg", "sp",
                                    [_item("spec_plate", xyxy=[0, 0, 4, 4])],
                                    session=session))
         for i in range(4)
@@ -572,7 +566,7 @@ def test_two_runs_are_two_groups_rather_than_one_lump():
     entries = [
         dataset.entry_from_annotation(
             "sp", f"{s}.jpg",
-            ld.proposed_annotation(f"{s}.jpg", "sp", "spec_plate",
+            ld.proposed_annotation(f"{s}.jpg", "sp",
                                    [_item("spec_plate", xyxy=[0, 0, 4, 4])],
                                    session=s))
         for s in (a, b)
@@ -600,10 +594,10 @@ def test_keeping_with_detections_writes_the_boxes_the_model_found():
     from label_detections.core import persistence, storage
 
     win = _window()
-    label_id = _label(win, "live_json", family="spec_plate")
+    label_id = _label(win, "live_json", )
     win._live_result_frame = np.zeros((60, 80, 3), np.uint8)
     win._live_result_items = [
-        {"name": "spec_plate", "conf": 0.91, "xyxy": [4.0, 6.0, 40.0, 30.0]}]
+        {"name": label_id, "conf": 0.91, "xyxy": [4.0, 6.0, 40.0, 30.0]}]
     win._live_session = "live_20260827_120000"
     win.keep_live_frame_with_detections()
 
@@ -611,7 +605,7 @@ def test_keeping_with_detections_writes_the_boxes_the_model_found():
     data = persistence.load_annotation(label_id, name)
     assert data is not None
     assert len(data["boxes"]) == 1
-    assert data["boxes"][0]["label"] == "spec_plate"
+    assert data["boxes"][0]["label"] == label_id
     assert data["boxes"][0]["label_id"] == label_id
     # The frame's own dimensions, not the preview's.
     assert (data["width"], data["height"]) == (80, 60)
@@ -623,10 +617,10 @@ def test_a_kept_proposal_still_has_to_be_reviewed_by_a_person():
     from label_detections.core import persistence, review, storage
 
     win = _window()
-    label_id = _label(win, "live_json_unrev", family="spec_plate")
+    label_id = _label(win, "live_json_unrev", )
     win._live_result_frame = np.zeros((60, 80, 3), np.uint8)
     win._live_result_items = [
-        {"name": "spec_plate", "conf": 0.91, "xyxy": [4.0, 6.0, 40.0, 30.0]}]
+        {"name": label_id, "conf": 0.91, "xyxy": [4.0, 6.0, 40.0, 30.0]}]
     win.keep_live_frame_with_detections()
 
     name = sorted(p.name for p in storage.list_images(label_id))[-1]
@@ -641,13 +635,13 @@ def test_the_saved_image_is_the_one_the_boxes_were_computed_on():
     from label_detections.core import persistence, storage
 
     win = _window()
-    label_id = _label(win, "live_pair", family="spec_plate")
+    label_id = _label(win, "live_pair", )
 
     inferred = np.zeros((60, 80, 3), np.uint8)      # what the model saw
     inferred[:] = 40
     win._live_result_frame = inferred
     win._live_result_items = [
-        {"name": "spec_plate", "conf": 0.9, "xyxy": [4.0, 6.0, 40.0, 30.0]}]
+        {"name": label_id, "conf": 0.9, "xyxy": [4.0, 6.0, 40.0, 30.0]}]
     win._live_frame = np.full((60, 80, 3), 200, np.uint8)   # newer, unmodelled
 
     win.keep_live_frame_with_detections()
@@ -665,7 +659,7 @@ def test_with_no_detections_it_keeps_the_image_instead_of_refusing():
     from label_detections.core import persistence, storage
 
     win = _window()
-    label_id = _label(win, "live_empty", family="spec_plate")
+    label_id = _label(win, "live_empty", )
     win._live_result_frame = np.zeros((60, 80, 3), np.uint8)
     win._live_result_items = []
     before = len(storage.list_images(label_id))
@@ -682,12 +676,12 @@ def test_both_buttons_are_actually_connected_to_their_handlers():
     from label_detections.core import persistence, storage
 
     win = _window()
-    label_id = _label(win, "live_clicks", family="spec_plate")
+    label_id = _label(win, "live_clicks", )
     frame = np.zeros((60, 80, 3), np.uint8)
     win._live_frame = frame
     win._live_result_frame = frame
     win._live_result_items = [
-        {"name": "spec_plate", "conf": 0.9, "xyxy": [4.0, 6.0, 40.0, 30.0]}]
+        {"name": label_id, "conf": 0.9, "xyxy": [4.0, 6.0, 40.0, 30.0]}]
 
     win.live_keep_btn.click()
     plain = sorted(p.name for p in storage.list_images(label_id))[-1]

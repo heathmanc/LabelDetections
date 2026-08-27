@@ -34,7 +34,7 @@ import re
 from typing import Any
 
 from .labels import (
-    CODE_POLICIES, CODE_ROLES, DEFAULT_FAMILIES, ROTATION_POLICIES, SEVERITIES,
+    CODE_POLICIES, CODE_ROLES, ROTATION_POLICIES, SEVERITIES,
     SHAPES, SURFACES, SYMBOLOGIES, CodeSpec, LabelDef, TextField,
 )
 from .storage import safe_token
@@ -139,10 +139,6 @@ PAGES = [
         "appearance", "Appearance",
         blurb="How the label looks, so it can be found and identified.",
         questions=[
-            Question("family", "Detector family", "choice", choices=DEFAULT_FAMILIES,
-                     default="spec_plate", required=True,
-                     help="The coarse class the model is trained on. Adding a label to an "
-                          "existing family needs no retraining."),
             Question("size_mm", "Physical size W x H (mm)", "size_mm",
                      validator=_optional_size,
                      help="Optional, for the record. Nothing computes with it -- "
@@ -256,7 +252,6 @@ def build_label(answers: dict[str, Any]) -> LabelDef:
     label = LabelDef(
         label_id=safe_token(answers.get("label_id", ""), "unnamed_label"),
         name=str(answers.get("name", "") or ""),
-        family=str(answers.get("family", "spec_plate")),
         revision=str(answers.get("revision", "") or ""),
         effective_date=str(answers.get("effective_date", "") or ""),
         supersedes=str(answers.get("supersedes", "") or ""),
@@ -316,11 +311,6 @@ def review_answers(answers: dict[str, Any]) -> list[str]:
                 f"across its {code.code_width_mm:g} mm width to decode reliably -- "
                 "check the camera resolves that over its field of view."
             )
-    if label.family == "battery_side":
-        warnings.append(
-            "'battery_side' is the whole battery face, not a label. Pick the family "
-            "this label actually belongs to."
-        )
     if not label.confusable_with:
         warnings.append(
             "No look-alikes named. If another label resembles this one, listing it here "

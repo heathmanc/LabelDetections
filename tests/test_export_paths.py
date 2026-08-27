@@ -43,13 +43,13 @@ def _window():
     return _win
 
 
-def _dataset(label_id, family="spec_plate", images=3):
+def _dataset(label_id, images=3):
     """A small, genuinely export-ready dataset for one label."""
     from label_detections.core import persistence, review, storage
     from label_detections.core.labels import LabelDef
 
     library = persistence.load_library()
-    library.add(LabelDef(label_id=label_id, family=family, train_target=5), replace=True)
+    library.add(LabelDef(label_id=label_id, train_target=5), replace=True)
     persistence.save_library(library)
 
     folder = storage.dataset_folder(label_id)
@@ -66,7 +66,7 @@ def _dataset(label_id, family="spec_plate", images=3):
             "session": f"{label_id}_s{i}",
             "boxes": [{
                 "x": 10, "y": 10, "w": 100, "h": 60, "class_id": 1,
-                "label": family, "label_id": label_id, "kind": "obb",
+                "label": label_id, "label_id": label_id, "kind": "obb",
                 "points": [[10, 10], [110, 10], [110, 70], [10, 70]],
             }],
         }
@@ -93,7 +93,7 @@ def test_export_all_runs_the_way_the_button_runs_it(monkeypatch):
     """The exact call that raised: unexpected keyword argument 'class_mode'."""
     win = _window()
     _dataset("exp_all_a")
-    _dataset("exp_all_b", family="trace_tag")
+    _dataset("exp_all_b", )
     win.library = __import__(
         "label_detections.core.persistence", fromlist=["x"]).load_library()
 
@@ -157,9 +157,10 @@ def test_the_summary_reports_real_numbers_not_zeros(monkeypatch):
     assert "Images written:" in summary
     assert "Boxes written: 0" not in summary
     assert "exp_summary" in summary
-    assert "Detector families" in summary
-    # The families, not the label identities -- that is the whole two-stage idea.
-    assert "spec_plate" in summary
+    assert "Detector classes" in summary
+    # The classes ARE the label ids, which is what makes the model's output
+    # directly countable against a recipe written in ids.
+    assert "exp_summary" in summary.split("Detector classes")[1]
 
 
 def test_exporting_with_nothing_reviewed_explains_itself(monkeypatch):
@@ -168,7 +169,7 @@ def test_exporting_with_nothing_reviewed_explains_itself(monkeypatch):
 
     win = _window()
     library = persistence.load_library()
-    library.add(LabelDef(label_id="exp_empty", family="cert_mark"), replace=True)
+    library.add(LabelDef(label_id="exp_empty", ), replace=True)
     persistence.save_library(library)
     win.library = persistence.load_library()
     win.set_active_label("exp_empty")
@@ -177,3 +178,41 @@ def test_exporting_with_nothing_reviewed_explains_itself(monkeypatch):
     win.export_yolo()
     assert "warned" in shown
     assert "reviewed" in shown["warned"].lower()
+
+
+def test_the_exported_classes_are_the_label_ids_the_recipe_uses(monkeypatch):
+    """The whole point: what the model reports is countable against a recipe
+    written in label ids, with nothing in between to resolve it."""
+    from label_detections.core.storage import EXPORT_DIR
+
+    win = _window()
+    _dataset("exp_ids_a", images=3)
+    _dataset("exp_ids_b", images=3)
+    _silence_dialogs(monkeypatch)
+    win.export_all_yolo()
+
+    yaml = (EXPORT_DIR / "all_labels_obb" / "data.yaml").read_text()
+    assert "exp_ids_a" in yaml and "exp_ids_b" in yaml
+
+
+def test_the_battery_face_holds_class_zero(monkeypatch):
+    """Class indices go into every label file. If a label could take index 0,
+    adding one alphabetically early would re-point the whole dataset."""
+    from label_detections.core import persistence, review, storage
+    from label_detections.core.storage import EXPORT_DIR
+
+    win = _window()
+    folder = _dataset("aaa_sorts_first", images=3)
+    # Give one image a battery_side box as well as the label's own.
+    name = sorted(p.name for p in storage.list_images("aaa_sorts_first"))[0]
+    data = persistence.load_annotation("aaa_sorts_first", name)
+    data["boxes"].append({
+        "label": "battery_side", "kind": "obb",
+        "points": [[0, 0], [199, 0], [199, 119], [0, 119]]})
+    review.stamp(data, review.make_review_record())
+    persistence.save_annotation("aaa_sorts_first", name, data)
+
+    _silence_dialogs(monkeypatch)
+    win.export_all_yolo()
+    yaml = (EXPORT_DIR / "all_labels_obb" / "data.yaml").read_text()
+    assert "0: battery_side" in yaml

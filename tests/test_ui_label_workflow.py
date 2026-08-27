@@ -33,7 +33,7 @@ except Exception as exc:  # pragma: no cover - depends on the environment
 pytestmark = pytest.mark.skipif(not HAVE_QT, reason="PySide6/cv2 not available")
 
 
-def _define(win, label_id, family="spec_plate"):
+def _define(win, label_id):
     """Add a label to the library and make the window aware of it.
 
     Every test uses its own label id. The whole suite shares one process, and
@@ -45,7 +45,7 @@ def _define(win, label_id, family="spec_plate"):
     from label_detections.core.labels import LabelDef
 
     library = persistence.load_library()
-    library.add(LabelDef(label_id=label_id, family=family, size_mm=[90, 60],
+    library.add(LabelDef(label_id=label_id, size_mm=[90, 60],
                          reference_images=["ref.png"], train_target=10),
                 replace=True)
     persistence.save_library(library)
@@ -77,22 +77,25 @@ def _capture(win, label_id, name="frame_001.jpg"):
     return path
 
 
-def _draw(win, family, label_id=""):
+def _draw(win, class_name, label_id=""):
+    """Draw a box of one detector class. The class is a label id now, so the
+    box carries its own identity unless a test deliberately withholds it."""
     from label_detections.ui.canvas import Box
-    box = Box(x=10, y=10, w=100, h=60, class_id=0, label=family, kind="obb",
+    box = Box(x=10, y=10, w=100, h=60, class_id=0, label=class_name, kind="obb",
               points=[[10, 10], [110, 10], [110, 70], [10, 70]])
-    if label_id:
-        box.label_id = label_id
+    box.label_id = label_id or (
+        "" if class_name in ("battery_side",) else class_name)
     win.canvas.boxes.append(box)
     return box
 
 
-def test_opening_a_label_selects_its_family_for_drawing():
-    """The next thing an operator does is draw one; the wrong family is a mislabel."""
+def test_opening_a_label_selects_it_for_drawing():
+    """The next thing an operator does is draw one, and the class is the
+    identity now -- so the wrong class is a wrong label id in the dataset."""
     win = _window()
-    _define(win, "wf_family", family="cert_mark")
+    _define(win, "wf_family")
     win.set_active_label("wf_family")
-    assert win.class_combo.currentText() == "cert_mark"
+    assert win.class_combo.currentText() == "wf_family"
 
 
 def test_the_app_opens_scoped_to_a_label():
@@ -114,7 +117,7 @@ def test_the_label_list_shows_progress_against_each_target():
 def test_switching_label_rescopes_the_whole_app():
     win = _window()
     _define(win, "wf_switch_a")
-    _define(win, "wf_switch_b", family="trace_tag")
+    _define(win, "wf_switch_b", )
 
     win.set_active_label("wf_switch_a")
     _capture(win, "wf_switch_a", "a.jpg")
@@ -133,7 +136,7 @@ def test_saving_an_image_that_carries_the_label_approves_it():
     _define(win, "wf_save_good")
     win.set_active_label("wf_save_good")
     path = _capture(win, "wf_save_good", "good.jpg")
-    _draw(win, "spec_plate")                     # family only; identity is stamped
+    _draw(win, win.label_id)                     # the class carries the identity
     win.save_labels()
 
     data = storage.load_annotations(path)
@@ -148,7 +151,7 @@ def test_saving_an_image_without_the_label_saves_but_does_not_approve():
     _define(win, "wf_save_other")
     win.set_active_label("wf_save_other")
     path = _capture(win, "wf_save_other", "other.jpg")
-    _draw(win, "warning_label")                  # a different family entirely
+    _draw(win, "some_other_label")                  # a different label entirely
     win.save_labels()
 
     data = storage.load_annotations(path)
@@ -163,12 +166,12 @@ def test_editing_an_approved_image_into_an_empty_one_clears_the_approval():
     _define(win, "wf_edited")
     win.set_active_label("wf_edited")
     path = _capture(win, "wf_edited", "edited.jpg")
-    _draw(win, "spec_plate")
+    _draw(win, win.label_id)
     win.save_labels()
     assert review.annotation_reviewed(storage.load_annotations(path))
 
     win.canvas.boxes.clear()
-    _draw(win, "warning_label")
+    _draw(win, "some_other_label")
     win.save_labels()
     assert not review.annotation_reviewed(storage.load_annotations(path))
 
@@ -178,7 +181,7 @@ def test_the_box_counter_reports_the_active_label():
     _define(win, "wf_counter")
     win.set_active_label("wf_counter")
     win.canvas.boxes.clear()
-    _draw(win, "spec_plate", "wf_counter")
+    _draw(win, "wf_counter")
     win._update_box_count()
     assert "wf_counter" in win.count_label.text()
     assert "1 drawn" in win.count_label.text()
@@ -190,17 +193,19 @@ def test_validation_runs_against_what_is_on_screen():
     win.set_active_label("wf_validate")
     _capture(win, "wf_validate", "validate.jpg")
     win.canvas.boxes.clear()
-    _draw(win, "spec_plate", "wf_validate")
+    _draw(win, "wf_validate")
     payload = win._current_annotation_for_validation()
     assert payload["label_id"] == "wf_validate"
     assert payload["boxes"][0]["label_id"] == "wf_validate"
 
 
-def test_family_shortcuts_exist_for_every_configured_family():
+def test_two_class_shortcuts_cover_everything_that_gets_drawn():
+    """One shortcut per class stopped being possible when classes became label
+    ids. Only two things are ever drawn on an image: this label, or the face."""
     win = _window()
     titles = {a.text() for a in win.actions()}
-    for family in ("battery_side", "spec_plate", "cert_mark"):
-        assert f"Class: {family}" in titles
+    assert "Class: battery face" in titles
+    assert "Class: the label being trained" in titles
 
 
 def test_no_recipe_authoring_survived_the_fork():
@@ -228,7 +233,7 @@ def test_regions_are_defined_from_a_capture_not_an_artwork_file(monkeypatch):
     win.set_active_label("wf_regions")
     _capture(win, "wf_regions", "with_label.jpg")
     win.canvas.boxes.clear()
-    _draw(win, "spec_plate")
+    _draw(win, win.label_id)
 
     # Stand in for the operator dragging two regions on the flattened crop.
     import label_detections.ui.region_editor as region_editor
@@ -279,7 +284,7 @@ def test_defined_regions_then_place_themselves_on_every_other_image():
     win.set_active_label("wf_reuse")
     _capture(win, "wf_reuse", "another.jpg")
     win.canvas.boxes.clear()
-    _draw(win, "spec_plate")             # box at (10, 10) 100x60
+    _draw(win, win.label_id)             # box at (10, 10) 100x60
     win.place_regions_on_canvas()
 
     box = win.canvas.boxes[0]
@@ -368,7 +373,7 @@ def test_drawing_the_box_after_a_reference_capture_opens_the_editor(monkeypatch)
     win.last_raw = np.zeros((200, 400, 3), dtype=np.uint8)
     win.capture_reference()
 
-    _draw(win, "spec_plate")
+    _draw(win, win.label_id)
     win._update_box_count()
     QApplication.processEvents()          # the deferred open
 
@@ -382,12 +387,12 @@ def test_a_box_of_another_family_does_not_trigger_it(monkeypatch):
 
     calls = _fake_editor(monkeypatch)
     win = _window()
-    _define(win, "wf_capwrong", family="cert_mark")
+    _define(win, "wf_capwrong", )
     win.set_active_label("wf_capwrong")
     win.last_raw = np.zeros((200, 400, 3), dtype=np.uint8)
     win.capture_reference()
 
-    _draw(win, "warning_label")
+    _draw(win, "some_other_label")
     win._update_box_count()
     QApplication.processEvents()
 
@@ -563,7 +568,7 @@ def test_the_image_the_artwork_came_from_is_marked_in_the_list(monkeypatch):
     plain = _capture(win, "wf_marker", "plain.jpg")
     source = _capture(win, "wf_marker", "source.jpg")
     win.canvas.boxes.clear()
-    _draw(win, "spec_plate")
+    _draw(win, win.label_id)
     win.define_read_regions()
     assert calls.get("opened") == 1
 
@@ -582,7 +587,7 @@ def _with_artwork(win, label_id, monkeypatch, name="first.jpg"):
     win.set_active_label(label_id)
     source = _capture(win, label_id, name)
     win.canvas.boxes.clear()
-    _draw(win, "spec_plate")
+    _draw(win, win.label_id)
     calls = _fake_editor(monkeypatch)
     win.define_read_regions()
     assert calls.get("opened") == 1
@@ -599,7 +604,7 @@ def test_a_second_define_edits_the_existing_artwork_instead_of_making_new(monkey
     artwork = persistence.load_library().get("wf_once").reference_images[0]
 
     second = _capture(win, "wf_once", "second.jpg")
-    win.canvas.boxes.clear(); _draw(win, "spec_plate")
+    win.canvas.boxes.clear(); _draw(win, win.label_id)
     win.define_read_regions()
 
     assert calls["opened"] == 2                       # it opened, ...
@@ -614,7 +619,7 @@ def test_replacing_artwork_asks_first_and_says_what_it_costs(monkeypatch):
     win = _window()
     _with_artwork(win, "wf_replace_no", monkeypatch)
     _capture(win, "wf_replace_no", "second.jpg")
-    win.canvas.boxes.clear(); _draw(win, "spec_plate")
+    win.canvas.boxes.clear(); _draw(win, win.label_id)
 
     asked = {}
     import label_detections.ui.main_window as mw_mod
@@ -636,7 +641,7 @@ def test_confirming_the_replace_moves_the_artwork_and_the_marker(monkeypatch):
     win = _window()
     first, calls = _with_artwork(win, "wf_replace_yes", monkeypatch)
     second = _capture(win, "wf_replace_yes", "second.jpg")
-    win.canvas.boxes.clear(); _draw(win, "spec_plate")
+    win.canvas.boxes.clear(); _draw(win, win.label_id)
 
     import label_detections.ui.main_window as mw_mod
     original = mw_mod.QMessageBox.question
@@ -667,7 +672,7 @@ def test_replacing_carries_the_existing_regions_onto_the_new_artwork(monkeypatch
     win.library = persistence.load_library()
 
     _capture(win, "wf_replace_carry", "second.jpg")
-    win.canvas.boxes.clear(); _draw(win, "spec_plate")
+    win.canvas.boxes.clear(); _draw(win, win.label_id)
 
     seen = {}
     import label_detections.ui.region_editor as region_editor
@@ -750,7 +755,7 @@ def test_rows_carry_their_file_name_rather_than_it_being_parsed_back(monkeypatch
     _define(win, "wf_rowname")
     win.set_active_label("wf_rowname")
     source = _capture(win, "wf_rowname", "row_name.jpg")
-    win.canvas.boxes.clear(); _draw(win, "spec_plate")
+    win.canvas.boxes.clear(); _draw(win, win.label_id)
     win.define_read_regions()          # gives this row the REFERENCE prefix too
 
     win._image_status_cache.clear()
@@ -769,7 +774,7 @@ def test_opening_a_marked_row_loads_the_real_image(monkeypatch):
     _define(win, "wf_openrow")
     win.set_active_label("wf_openrow")
     source = _capture(win, "wf_openrow", "open_me.jpg")
-    win.canvas.boxes.clear(); _draw(win, "spec_plate")
+    win.canvas.boxes.clear(); _draw(win, win.label_id)
     win.define_read_regions()
 
     win.current_image_path = None
@@ -789,13 +794,10 @@ def test_opening_a_marked_row_loads_the_real_image(monkeypatch):
 def test_typing_narrows_the_label_list_and_says_by_how_much():
     """With hundreds of labels the list is unusable without this."""
     win = _window()
-    for label_id, family in [("flt_warning_g31", "warning_label"),
-                             ("flt_spec_g31", "spec_plate"),
-                             ("flt_spec_g27", "spec_plate")]:
-        _define(win, label_id, family=family)
+    for label_id in ("flt_warning_g31", "flt_spec_g31", "flt_spec_g27"):
+        _define(win, label_id)
 
     win.label_search_edit.setText("")
-    win.label_filter_combo.setCurrentIndex(0)
     win._refresh_labels()
     everything = win.label_list.count()
     assert "label(s)" in win.label_count_label.text()
@@ -810,20 +812,18 @@ def test_typing_narrows_the_label_list_and_says_by_how_much():
     assert win.label_list.count() == everything
 
 
-def test_the_text_filter_and_the_family_filter_compose():
+def test_every_typed_term_has_to_match_so_terms_narrow_each_other():
     win = _window()
-    _define(win, "flt_combo_warn", family="warning_label")
-    _define(win, "flt_combo_spec", family="spec_plate")
+    _define(win, "flt_combo_warn")
+    _define(win, "flt_combo_spec")
     try:
         win.label_search_edit.setText("flt_combo")
         assert win.label_list.count() == 2
-        index = win.label_filter_combo.findText("spec_plate")
-        win.label_filter_combo.setCurrentIndex(index)
+        win.label_search_edit.setText("flt_combo spec")
         rows = [win.label_list.item(i).text() for i in range(win.label_list.count())]
         assert rows and all("flt_combo_spec" in r for r in rows)
     finally:
         win.label_search_edit.setText("")
-        win.label_filter_combo.setCurrentIndex(0)
 
 
 def test_a_query_matching_nothing_empties_the_list_rather_than_erroring():

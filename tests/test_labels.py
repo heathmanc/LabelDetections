@@ -113,16 +113,23 @@ def test_library_add_get_remove():
     assert lib.remove("a") and not lib.remove("a")
 
 
-def test_families_in_use_always_includes_the_battery_face():
-    lib = LabelLibrary([LabelDef(label_id="a", family="cert_mark")])
-    assert lib.families_in_use() == ["battery_side", "cert_mark"]
+def test_the_detector_classes_are_the_labels_plus_the_battery_face():
+    lib = LabelLibrary([LabelDef(label_id="b_two"), LabelDef(label_id="a_one")])
+    assert lib.detector_classes() == ["battery_side", "a_one", "b_two"]
+
+
+def test_the_face_holds_class_zero_however_the_library_grows():
+    """Class indices are written into every exported label file. If a new label
+    could take index 0, adding one would re-point the whole dataset."""
+    lib = LabelLibrary([LabelDef(label_id="aaa_first_alphabetically")])
+    assert lib.detector_classes()[0] == "battery_side"
 
 
 # --- searching a library that has grown large -------------------------------
 
 def _library_of(*specs):
     return LabelLibrary([
-        LabelDef(label_id=i, name=n, family=f, revision=r, part_number=p)
+        LabelDef(label_id=i, name=n, revision=r, part_number=p)
         for i, n, f, r, p in specs
     ])
 
@@ -151,7 +158,6 @@ def test_every_term_must_appear_but_the_order_does_not_matter():
 def test_a_term_can_match_any_field():
     assert [l.label_id for l in LIB.search("french")] == ["warning_g31_fr"]
     assert [l.label_id for l in LIB.search("LBL-4410")] == ["spec_plate_g31"]
-    assert [l.label_id for l in LIB.search("cert_mark")] == ["ul_mark"]
     assert len(LIB.search("D")) >= 1          # revision
 
 
@@ -163,6 +169,14 @@ def test_terms_that_match_nothing_return_nothing():
     assert LIB.search("g31 forklift") == []
 
 
-def test_the_family_filter_narrows_the_search_rather_than_replacing_it():
-    assert [l.label_id for l in LIB.search("g31", "spec_plate")] == ["spec_plate_g31"]
-    assert len(LIB.search("", "warning_label")) == 2
+def test_terms_narrow_each_other_so_a_second_word_is_a_filter():
+    assert [l.label_id for l in LIB.search("g31 spec")] == ["spec_plate_g31"]
+    assert len(LIB.search("g31 warning")) == 2
+
+
+def test_a_label_cannot_take_a_structural_classs_name():
+    """'battery_side' as a label id would collide with the face's own class:
+    two different things exported under one name."""
+    from label_detections.core.labels import validate_label_def
+    issues = validate_label_def(LabelDef(label_id="battery_side"))
+    assert any("structural" in i for i in issues)

@@ -12,7 +12,7 @@ def minimal():
     """
     answers = FLOW.defaults()
     answers.update(label_id="spec plate 31", name="31-AGM spec plate",
-                   family="spec_plate")
+                   )
     return answers
 
 
