@@ -476,7 +476,8 @@ def apply_identities(items: list[dict], identities) -> list[dict]:
 SLOW_INFER_MS = 60.0
 
 
-def rate_line(display_fps: float, camera_fps: float, rolling: "Rolling") -> str:
+def rate_line(display_fps: float, camera_fps: float, rolling: "Rolling",
+              gui_ms: float = 0.0) -> str:
     """Camera, display and inference rates side by side.
 
     Three different numbers that were being read as one. The camera delivers at
@@ -489,6 +490,11 @@ def rate_line(display_fps: float, camera_fps: float, rolling: "Rolling") -> str:
              f"inference {rolling.rate:.1f}/s"]
     if rolling.mean_ms:
         parts.append(f"{rolling.mean_ms:.0f} ms/frame")
+    if gui_ms:
+        # The GUI thread's own cost per frame. Inference runs on it, so this
+        # includes the model -- and the window cannot repaint or respond while
+        # it is inside here.
+        parts.append(f"gui {gui_ms:.0f} ms")
     return "  |  ".join(parts)
 
 

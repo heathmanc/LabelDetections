@@ -1313,3 +1313,43 @@ def test_the_tracker_stays_overridable():
     worker = InferenceWorker("d.pt", 640, 0.25, 0, track=True,
                              tracker="botsort.yaml")
     assert worker._tracker == "botsort.yaml"
+
+
+def test_the_readout_reports_what_the_gui_thread_itself_costs():
+    """Inference runs on the GUI thread, so the window cannot repaint or
+    respond while it is in there. That cost was invisible -- the readout showed
+    the model's time and the frame rates, neither of which says the UI is
+    blocked."""
+    r = ld.Rolling()
+    r.record(0.005, now=100)
+    assert "gui 40 ms" in ld.rate_line(17.0, 17.0, r, gui_ms=40.0)
+    assert "gui" not in ld.rate_line(17.0, 17.0, r)
+
+
+@ui
+def test_a_threaded_camera_frame_is_not_copied_twice():
+    """CameraSource.read() already copies out of _latest_frame under the lock,
+    so copying again is a second 60 MB memcpy of the same pixels on the thread
+    that draws the preview -- more time than the model now takes."""
+    win = _window()
+    handed = []
+    win._live_worker = type("W", (), {"infer": lambda _s, f: handed.append(f)})()
+    win._live_thread = object()
+    win._live_loaded = True
+    win._live_busy = False
+    win._live_last_started = 0.0
+
+    class Threaded:
+        threaded = True
+
+    real_camera = win.camera
+    win.camera = Threaded()
+    frame = np.zeros((8, 8, 3), np.uint8)
+    try:
+        win._pump_live_detect(frame)
+        assert handed and handed[0] is frame, "copied a frame that was already private"
+    finally:
+        win.camera = real_camera
+        win._live_thread = None
+        win._live_busy = False
+        win._live_loaded = False

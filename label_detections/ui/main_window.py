@@ -350,6 +350,7 @@ class MainWindow(QMainWindow):
         self._live_device_line = ""
         self._live_loaded = False
         self._live_speed: dict = {}
+        self._gui_ms = 0.0
         # Set here rather than in start_live_detect: results can arrive on
         # paths that never went through it, and an unset counter turns a quiet
         # view into a crash.
@@ -2316,11 +2317,17 @@ class MainWindow(QMainWindow):
             return
         self._live_busy = True
         self._live_last_started = now
-        # Copied unconditionally, as it was. Skipping it in threaded mode was
-        # defensible -- read() already returns a private array -- but this whole
-        # path is being put back to what demonstrably ran, and 13 ms of memcpy
-        # is not worth a second opinion about buffer ownership.
-        self._live_frame = frame.copy()
+        # In threaded mode CameraSource.read() has already handed back a
+        # private array -- it copies out of _latest_frame under the lock -- so
+        # copying again is a second 60 MB memcpy of the same pixels, on the
+        # thread that draws the preview. That is more time than the model now
+        # takes. Unthreaded backends return OpenCV's reusable buffer, which
+        # genuinely must be copied.
+        #
+        # Safe because inference is synchronous here: infer() has returned
+        # before this frame can be replaced.
+        self._live_frame = (frame if getattr(self.camera, "threaded", False)
+                            else frame.copy())
         # Called directly, on this thread, which is how this ran when it was
         # stable. Queuing it to the worker was correct in isolation -- and it
         # is precisely what stopped the display tick being blocked by
@@ -2370,7 +2377,7 @@ class MainWindow(QMainWindow):
         rates = live_logic.rate_line(
             getattr(self, "_preview_fps", 0.0),
             self.camera.read_fps() if hasattr(self.camera, "read_fps") else 0.0,
-            self._live_rolling)
+            self._live_rolling, getattr(self, "_gui_ms", 0.0))
         rates += live_logic.phase_line(self._live_speed)
         self.live_readout.setPlainText(
             rates + "\n" + self.live_readout.toPlainText()
@@ -4410,6 +4417,7 @@ class MainWindow(QMainWindow):
         return cv2.resize(frame, (max(1, int(w * scale)), max(1, int(h * scale))), interpolation=cv2.INTER_AREA)
 
     def _on_timer(self) -> None:
+        _tick_started = time.perf_counter()
         # The display timer runs faster than most cameras deliver frames, so the
         # threaded reader often still holds the same frame as the previous tick.
         # Skip the decode/adjust/scale/repaint pipeline until a new frame arrives.
@@ -4460,6 +4468,7 @@ class MainWindow(QMainWindow):
                 self._live_overlay_scale = (1.0, 1.0)
             self._pump_live_detect(frame)
 
+        self._gui_ms = (time.perf_counter() - _tick_started) * 1000.0
         self._preview_frame_counter += 1
         now_t = time.perf_counter()
         elapsed = now_t - self._preview_fps_t0
