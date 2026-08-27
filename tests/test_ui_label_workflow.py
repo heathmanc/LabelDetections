@@ -944,3 +944,156 @@ def test_the_battery_face_never_gets_an_identity():
     boxes = [{"label": "battery_side",
               "points": [[0, 0], [90, 0], [90, 90], [0, 90]]}]
     assert "label_id" not in win._assign_active_label(boxes)[0]
+
+
+# --- the reference capture sits at the top of the list ---------------------
+
+def test_the_reference_capture_leads_the_list_however_many_come_after_it(monkeypatch):
+    """The reference is the shot every read-region on the label is a fraction
+    of -- the one to go back to when a region looks wrong. It is also the first
+    shot taken, so in a newest-first list it sinks a row further out of reach
+    with every capture after it."""
+    win = _window()
+    source, _ = _with_artwork(win, "wf_ref_top", monkeypatch, name="a_first.jpg")
+    later = [_capture(win, "wf_ref_top", f"z_later_{i}.jpg") for i in range(3)]
+
+    from label_detections.core import persistence
+    win.library = persistence.load_library()
+    win._dataset_index_dirty = True
+    order = win._get_dataset_image_paths()
+
+    assert order[0] == source
+    assert set(order[1:]) == set(later)
+
+
+def test_a_label_with_no_artwork_keeps_the_plain_newest_first_order():
+    win = _window()
+    _define(win, "wf_ref_none")
+    win.set_active_label("wf_ref_none")
+    for name in ("a.jpg", "b.jpg", "c.jpg"):
+        _capture(win, "wf_ref_none", name)
+
+    win._dataset_index_dirty = True
+    order = win._get_dataset_image_paths()
+    assert [p.name for p in order] == ["c.jpg", "b.jpg", "a.jpg"]
+
+
+def test_next_image_steps_in_the_order_the_list_shows(monkeypatch):
+    """Ordering the visible list alone would leave N/P walking a different
+    sequence than the rows under the cursor."""
+    win = _window()
+    source, _ = _with_artwork(win, "wf_ref_nav", monkeypatch, name="a_first.jpg")
+    _capture(win, "wf_ref_nav", "z_later.jpg")
+
+    from PySide6.QtCore import Qt
+    from label_detections.core import persistence
+    win.library = persistence.load_library()
+    win._dataset_index_dirty = True
+    win._refresh_images(force=True)
+    rows = [win.image_list.item(i).data(Qt.ItemDataRole.UserRole)
+            for i in range(win.image_list.count())]
+    assert rows[0] == source.name
+
+    win._load_image_path(source)
+    win.next_image()
+    assert win.current_image_path.name == rows[1]
+
+
+# --- nothing but inference draws on a live frame ---------------------------
+
+def test_saved_boxes_are_not_painted_over_a_live_frame():
+    """Saved boxes are in some still's coordinates. A live frame is not that
+    still, so painting them there marks pixels they were never about -- and it
+    reads as a detection, because on a live view detections are what boxes are."""
+    win = _window()
+    _define(win, "wf_live_paint")
+    win.set_active_label("wf_live_paint")
+    _capture(win, "wf_live_paint", "still.jpg")
+    _draw(win, win.label_id)
+    assert win.canvas.annotations_painted() is True
+
+    real = win.camera
+    try:
+        win.camera = _FakeCamera(True)
+        win._refresh_live_mode()
+        assert win.canvas.annotations_painted() is False
+        # Hidden, not deleted: they are still the still's.
+        assert len(win.canvas.boxes) == 1
+    finally:
+        win.camera = real
+        win._refresh_live_mode()
+    assert win.canvas.annotations_painted() is True
+
+
+def test_hiding_saved_labels_is_still_honoured_on_a_still():
+    """The live rule is on top of the operator's own toggle, not instead of it."""
+    win = _window()
+    win.canvas.set_annotation_visibility(False)
+    try:
+        assert win.canvas.annotations_painted() is False
+    finally:
+        win.canvas.set_annotation_visibility(True)
+
+
+def test_opening_the_camera_drops_the_still_s_detections():
+    """Overlays are a result computed for one image. The still is about to be
+    replaced by a stream, and an overlay that outlives its frame reads as a
+    detection on the frame it is sitting over."""
+    win = _window()
+    win.canvas.set_model_test_overlays([{"points": [[0, 0], [9, 0], [9, 9], [0, 9]],
+                                         "name": "stale", "conf": 0.9}])
+    real = win.camera
+    try:
+        win.camera = _FakeCamera(False)
+        win.camera.open = lambda *a, **k: True
+        win.camera.is_open = lambda: True
+        win.camera.last_result = type("R", (), {"message": "ok"})()
+        win.open_camera()
+        assert win.canvas.model_test_overlays == []
+    finally:
+        win.timer.stop()
+        win.camera = real
+        win._refresh_live_mode()
+
+
+# --- the way out of artwork drawn wrong is reachable -----------------------
+
+def test_replacing_artwork_has_a_button_and_it_says_when_it_will_work(monkeypatch):
+    """Redrawing badly-drawn artwork was signposted only in a tooltip, and only
+    as an entry in a menu bar that is hidden. There was no visible way back."""
+    win = _window()
+    _define(win, "wf_replace_btn_none")
+    win.set_active_label("wf_replace_btn_none")
+    assert win.replace_artwork_btn.isEnabled() is False
+    assert "no artwork" in win.replace_artwork_btn.toolTip()
+
+    _with_artwork(win, "wf_replace_btn", monkeypatch, name="art.jpg")
+    assert win.replace_artwork_btn.isEnabled() is True
+    assert "Ctrl+Shift+A" in win.replace_artwork_btn.toolTip()
+
+
+def test_nothing_tells_the_operator_to_open_a_menu_that_is_hidden():
+    """The menu bar is hidden, so a message naming a menu path is a dead end.
+    Name the button or the key instead."""
+    source = (Path(__file__).resolve().parent.parent
+              / "label_detections" / "ui" / "main_window.py").read_text()
+    assert "Tools > " not in source
+
+
+def test_every_action_with_a_shortcut_is_registered_on_the_window():
+    """Qt does not dispatch the shortcut of an action that lives only inside a
+    hidden menu bar, so an unregistered one is a key that does nothing."""
+    from PySide6.QtWidgets import QMenu
+
+    win = _window()
+    registered = set(win.actions())
+    menus = win.menuBar().findChildren(QMenu)
+    assert menus, "no menus found -- the scan would pass vacuously"
+
+    orphans = sorted({
+        action.text()
+        for menu in menus
+        for action in menu.actions()
+        if not action.shortcut().isEmpty() and action not in registered
+    })
+    assert orphans == []

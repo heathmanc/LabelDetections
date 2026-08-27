@@ -363,6 +363,16 @@ class ImageCanvas(QWidget):
     def _blocked(self) -> bool:
         return not getattr(self, "drawing_enabled", True)
 
+    def annotations_painted(self) -> bool:
+        """Whether saved boxes are drawn over the frame right now.
+
+        Two reasons they are not: the operator hid them, or a camera is
+        streaming. The second is not a preference -- saved boxes are in some
+        still's coordinates, and a live frame is not that still, so drawing
+        them there marks pixels they were never about.
+        """
+        return bool(getattr(self, "show_annotations", True)) and not self._blocked()
+
     def keyPressEvent(self, event) -> None:
         step = 10 if event.modifiers() & Qt.ShiftModifier else 1
         if event.key() == Qt.Key_Left:
@@ -751,7 +761,9 @@ class ImageCanvas(QWidget):
                      else f"Tool {self.annotation_kind.upper()}")
             p.drawText(18, 28, f"Zoom {self.zoom:.2f}x | {state}")
 
-            if self.show_annotations:
+            # Hidden while a camera streams, not cleared: the boxes are still
+            # the still's, and come back with it.
+            if self.annotations_painted():
                 for i, b in enumerate(self.boxes):
                     selected = i == self.selected_idx
                     color = self._class_color(b, selected)

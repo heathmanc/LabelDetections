@@ -1375,3 +1375,28 @@ def test_a_threaded_camera_frame_is_not_copied_twice():
         win._live_thread = None
         win._live_busy = False
         win._live_loaded = False
+
+
+@ui
+def test_starting_a_run_clears_the_previous_run_s_boxes(monkeypatch):
+    """Model loading takes seconds, and boxes from the last run sitting there
+    through it look exactly like boxes from this one."""
+    win = _window()
+    win.test_model_edit.setText("/nonexistent/detector.pt")
+    win.canvas.set_model_test_overlays(
+        [{"points": [[0, 0], [9, 0], [9, 9], [0, 9]], "name": "stale", "conf": 0.9}])
+
+    class FakeWorker:
+        def __init__(self, *a, **k):
+            raise RuntimeError("stop before threading")
+
+    import label_detections.ui.live_detect as ld_ui
+    monkeypatch.setattr(ld_ui, "InferenceWorker", FakeWorker)
+    monkeypatch.setattr(win, "_camera_is_live", lambda: True)
+    try:
+        win.start_live_detect()
+    except RuntimeError:
+        pass
+    finally:
+        win._live_thread = None
+    assert win.canvas.model_test_overlays == []

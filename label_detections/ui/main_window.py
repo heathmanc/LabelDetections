@@ -581,6 +581,10 @@ class MainWindow(QMainWindow):
         tools_menu.addAction(prelabel_action)
 
         build_queue_action = QAction("Build review queue (model)", self)
+        # Shortcut and window registration because the menu bar is hidden: the
+        # queue's own "build it first" message named this action, and there was
+        # no key and no button that reached it.
+        build_queue_action.setShortcut("Ctrl+Shift+B")
         build_queue_action.triggered.connect(self.build_review_queue)
         tools_menu.addAction(build_queue_action)
 
@@ -648,6 +652,7 @@ class MainWindow(QMainWindow):
             unreviewed_action, mark_reviewed_action, force_review_action,
             capture_action, auto_label_action, validate_action,
             prelabel_action, next_queue_action, shortcuts_action, regions_action,
+            build_queue_action,
             define_regions_action, edit_regions_action, replace_artwork_action,
             variance_action, scale_action, live_detect_action, keep_frame_action,
             keep_json_action,
@@ -2233,6 +2238,11 @@ class MainWindow(QMainWindow):
         self._live_result_items = []
         self._live_empty = 0
         self._live_session = live_logic.proposal_session(time.time())
+        # Nothing from the last run survives into this one. Model loading takes
+        # seconds, and boxes from a previous run sitting there through it look
+        # exactly like boxes from this one.
+        if hasattr(self.canvas, "clear_model_test_overlays"):
+            self.canvas.clear_model_test_overlays()
 
         self._live_thread = QThread(self)
         self._live_tracking = self.live_track_check.isChecked()
@@ -2691,13 +2701,28 @@ class MainWindow(QMainWindow):
             "Edit Regions..." if has_artwork else "Define Regions...")
         self.define_regions_btn.setToolTip(
             "Open this label's artwork and adjust its read-regions. The artwork "
-            "is kept -- to re-flatten it from this image, use "
-            "Tools > Replace label artwork."
+            "itself is kept -- if the box you flattened it from was drawn wrong, "
+            "redraw the box and use Replace Artwork."
             if has_artwork else
             "Flatten the label box on this image into straight-on artwork and draw "
             "the areas to read inside it -- a barcode, a serial, a date code. "
             "Stored as fractions of the label, so they then apply to every image "
-            "of it. (Ctrl+Shift+R)")
+            "of it. (Ctrl+Shift+D)")
+        if not hasattr(self, "replace_artwork_btn"):
+            return
+        # Disabled rather than hidden when there is nothing to replace: a button
+        # that appears once artwork exists is a button nobody knows exists at
+        # the moment they need it.
+        self.replace_artwork_btn.setEnabled(has_artwork)
+        self.replace_artwork_btn.setToolTip(
+            "Throw away this label's artwork and re-flatten it from the box on "
+            "this image -- the fix for an outline drawn around the wrong area. "
+            "Draw the box around the whole label first. Regions are fractions "
+            "of the label, so they are carried over and shown on the new artwork "
+            "to be checked. (Ctrl+Shift+A)"
+            if has_artwork else
+            "Nothing to replace yet: this label has no artwork. Draw its box and "
+            "use Define Regions.")
 
     def _refresh_active_label_panel(self) -> None:
         if not hasattr(self, "label_id_label"):
@@ -3333,6 +3358,14 @@ class MainWindow(QMainWindow):
         self.define_regions_btn = QPushButton("Define Regions...")
         self.define_regions_btn.clicked.connect(self.define_read_regions)
         define_regions_btn = self.define_regions_btn
+        # The way out of artwork drawn wrong. It used to be named only in a
+        # tooltip, naming an entry in the Tools menu -- and the menu bar is
+        # hidden, so the one signposted recovery pointed somewhere that cannot
+        # be opened. Anyone who outlined the label badly the first time had no
+        # visible second chance.
+        self.replace_artwork_btn = QPushButton("Replace Artwork...")
+        self.replace_artwork_btn.clicked.connect(self.replace_label_artwork)
+        replace_artwork_btn = self.replace_artwork_btn
         self._refresh_regions_button()
         regions_btn = QPushButton("Place Regions")
         regions_btn.setToolTip(
@@ -3358,7 +3391,7 @@ class MainWindow(QMainWindow):
         zplus.clicked.connect(self.canvas.zoom_in)
 
         right_panel_buttons = (save, save_next, copy_prev, qa_btn,
-                               define_regions_btn, regions_btn,
+                               define_regions_btn, replace_artwork_btn, regions_btn,
                                delete, clear, clear_saved, zminus, zfit, zplus)
         for btn in right_panel_buttons:
             btn.setProperty("rightPanelButton", True)
@@ -3406,6 +3439,7 @@ class MainWindow(QMainWindow):
         v.addLayout(button_row(save, save_next))
         v.addLayout(button_row(copy_prev, qa_btn))
         v.addLayout(button_row(define_regions_btn, regions_btn))
+        v.addWidget(replace_artwork_btn)
         v.addLayout(button_row(delete, clear))
         v.addWidget(clear_saved)
 
@@ -3452,7 +3486,7 @@ class MainWindow(QMainWindow):
             "Only written for labels whose regions turn out to be near-identical "
             "across the dataset; ones that already vary get none, because "
             "recombining them teaches nothing and dilutes the real images.\n\n"
-            "Tools > Check variable regions says which is which.")
+            "Check Variable Regions (Ctrl+Shift+G) says which is which.")
         exp = QPushButton("Export Dataset")
         exp.clicked.connect(self.export_yolo)
         exp_all = QPushButton("Export All")
@@ -3477,7 +3511,7 @@ class MainWindow(QMainWindow):
             "Worth it when the deciding detail is small in the frame. Crop size "
             "is measured from your own boxes rather than fixed -- a 224 px crop "
             "is a large gain for a small label and an outright loss for one the "
-            "detector already resolves to 500 px. Tools > Check label scale "
+            "detector already resolves to 500 px. Check Label Scale (Ctrl+Shift+S) "
             "shows the working.\n\n"
             "Both halves share one split and seed, so they hold out the same "
             "batteries."
@@ -4177,8 +4211,52 @@ class MainWindow(QMainWindow):
         except Exception:
             return False, 0
 
+    def _reference_source_paths(self) -> set[str]:
+        """The captured image(s) this label's artwork was flattened from."""
+        label = self.library.get(self.label_id) if self.label_id else None
+        source = str(getattr(label, "reference_source", "") or "") if label else ""
+        if not source:
+            return set()
+        try:
+            return {str(Path(source).resolve())}
+        except Exception:
+            return {source}
+
+    def _reference_first(self, paths: list[Path]) -> list[Path]:
+        """Reference captures at the top, everything else in the order given.
+
+        The reference is the one image in the folder the others depend on:
+        every read-region on this label is a fraction of the box drawn on it,
+        so it is the shot to go back to when a region looks wrong. It is also
+        the first shot taken, which in a newest-first list means it sinks
+        further out of reach with every capture after it.
+
+        Applied on the way out rather than baked into the cached index, because
+        which image is the reference changes when artwork is defined or
+        replaced, and that does not make the folder listing stale.
+        """
+        sources = self._reference_source_paths()
+        if not sources:
+            return list(paths)
+        names = {Path(s).name for s in sources}
+
+        def is_reference(path: Path) -> bool:
+            # Names first: resolve() touches the filesystem, and this runs over
+            # the whole folder on every list refresh.
+            if path.name not in names:
+                return False
+            try:
+                return str(Path(path).resolve()) in sources
+            except Exception:
+                return str(path) in sources
+
+        top = [p for p in paths if is_reference(p)]
+        if not top:
+            return list(paths)
+        return top + [p for p in paths if not is_reference(p)]
+
     def _get_dataset_image_paths(self, *, force: bool = False) -> list[Path]:
-        """Cached images for the label being trained, newest first."""
+        """Images for the label being trained: the reference, then newest first."""
         if force or getattr(self, "_dataset_index_dirty", True):
             if self.label_id:
                 self._image_paths_cache = sorted(list_images(self.label_id), reverse=True)
@@ -4189,7 +4267,9 @@ class MainWindow(QMainWindow):
                 if key not in valid:
                     self._image_status_cache.pop(key, None)
             self._dataset_index_dirty = False
-        return list(self._image_paths_cache)
+        # Ordered here rather than in the visible list alone, so that N/P step
+        # through the images in the order the list shows them.
+        return self._reference_first(self._image_paths_cache)
     def _cached_image_status(self, path: Path, *, force: bool = False) -> dict:
         """Fast per-image status lookup for the active dataset.
 
@@ -4396,6 +4476,12 @@ class MainWindow(QMainWindow):
             return
         # Force the first tick after (re)opening to process a frame.
         self._last_frame_seq = None
+        # Overlays are a result computed for one image. The still they were
+        # computed on is about to be replaced by a stream, so they stop being
+        # true the moment the first frame lands -- and an overlay that outlives
+        # its frame reads as a detection on the frame it is sitting over.
+        if hasattr(self.canvas, "clear_model_test_overlays"):
+            self.canvas.clear_model_test_overlays()
         self.timer.start(16)
         # Streaming now: drawing is blocked until a frame is captured, because a
         # box drawn on a frame that is replaced 30 times a second belongs to no
@@ -4649,8 +4735,10 @@ class MainWindow(QMainWindow):
                 self, "Capture Reference",
                 f"'{self.label_id}' already has artwork, and its read-regions are "
                 "positioned on it.\n\n"
-                "Use Edit Regions to adjust them, or Tools > Replace label artwork "
-                "if the printed label itself has changed.")
+                "Use Edit Regions to adjust them. If the artwork itself is wrong -- "
+                "the box was drawn around part of the label, or the printed label "
+                "has changed -- open one of its images, draw the box around the "
+                "whole label, and press Replace Artwork (Ctrl+Shift+A).")
             return
         if self.last_raw is None:
             QMessageBox.information(
@@ -5119,7 +5207,7 @@ class MainWindow(QMainWindow):
             self, "Review queue",
             f"Prioritized {len(ranked)} unreviewed image(s), highest disagreement first:\n\n"
             + "\n".join(lines)
-            + "\n\nUse Tools > Next in review queue (Ctrl+Shift+N) to step through them.",
+            + "\n\nUse Ctrl+Shift+N to step through them.",
         )
         self.next_in_review_queue()
 
@@ -5217,7 +5305,7 @@ class MainWindow(QMainWindow):
         if not self._review_queue:
             QMessageBox.information(
                 self, "Review queue",
-                "Build the review queue first (Tools > Build review queue).",
+                "Build the review queue first — Ctrl+Shift+B.",
             )
             return
         # Advance past any images that have since been deleted.
@@ -6181,6 +6269,10 @@ class MainWindow(QMainWindow):
         self._refresh_active_label_panel()
         self._refresh_regions_button()
         self.place_regions_on_canvas()
+        # Which image is the reference just changed. Without this the list keeps
+        # marking the old one and sorting the new one down among the captures,
+        # until some unrelated action happens to refresh it.
+        self._refresh_images()
         self.status.showMessage(
             f"Saved {count} read-region(s) on {self.label_id}. They now apply to "
             "every image of it.", 8000)
