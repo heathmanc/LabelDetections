@@ -489,7 +489,8 @@ def test_no_regions_defined_explains_what_to_do():
 
 
 def test_the_advice_sizes_the_detector_from_the_smallest_label():
-    """The smallest label runs out of pixels first, so it sets the floor."""
+    """The smallest label runs out of pixels first, so it sets the floor --
+    whichever branch the advice takes."""
     from label_detections.core import scale_report as sr
 
     scales = {"big": sr.LabelScale("big", [2000.0] * 4, [3840.0] * 4),
@@ -497,4 +498,38 @@ def test_the_advice_sizes_the_detector_from_the_smallest_label():
     text = sr.advise(scales, None, imgsz=1280)
     assert "small" in text
     assert str(sr.min_imgsz_for_identity(scales)) in text
-    assert "Skip the whole-label classifier" in text
+
+
+def test_the_imgsz_requirement_is_never_silently_capped():
+    """A 5472 px frame with 300 px labels honestly needs imgsz 2336. Returning
+    a comfortable 2048 would have someone train a detector that still cannot
+    see the label."""
+    from label_detections.core import scale_report as sr
+
+    scales = {"small": sr.LabelScale("small", [300.0] * 4, [5472.0] * 4)}
+    assert sr.min_imgsz_for_identity(scales) == 2336
+    assert sr.min_imgsz_for_identity(scales) > sr.IMPRACTICAL_IMGSZ
+
+
+def test_a_big_frame_pushes_the_advice_to_localise_then_crop():
+    """The frame:imgsz ratio decides this, not preference. At 5472/1280 the
+    detector throws away 4.3x and a small label arrives unidentifiable."""
+    from label_detections.core import scale_report as sr
+
+    scales = {n: sr.LabelScale(n, [w] * 4, [5472.0] * 4)
+              for n, w in (("big", 2000), ("small", 300))}
+    text = sr.advise(scales, None, imgsz=1280)
+    assert "LOCALISE only" in text
+    assert "2336" in text, "must state the requirement it is declining to meet"
+
+
+def test_a_modest_frame_keeps_the_single_detector_advice():
+    """The same code must not always say two-stage: where one detector can
+    reach the identity floor, that is the simpler answer."""
+    from label_detections.core import scale_report as sr
+
+    scales = {n: sr.LabelScale(n, [w] * 4, [1920.0] * 4)
+              for n, w in (("big", 900), ("small", 400))}
+    text = sr.advise(scales, None, imgsz=1280)
+    assert "one class per label" in text
+    assert "LOCALISE only" not in text

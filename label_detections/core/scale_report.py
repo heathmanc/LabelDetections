@@ -349,30 +349,83 @@ def min_imgsz_for_identity(scales: dict[str, LabelScale],
         need = max(need, floor * max(ratios))
     if need <= 0:
         return DEFAULT_IMGSZ
-    return min(MAX_CROP * 2, int(math.ceil(need / STRIDE) * STRIDE))
+    # Uncapped on purpose. The previous version clamped to 2048 and returned a
+    # number that read like an answer -- on a 5472 px frame with 300 px labels
+    # the honest requirement is 2336, and quietly reporting 2048 would have had
+    # someone train a detector that still could not see the label. When the
+    # requirement is impractical the caller must be told the requirement, not a
+    # comfortable number, and IMPRACTICAL_IMGSZ is what makes that sayable.
+    return int(math.ceil(need / STRIDE) * STRIDE)
+
+
+# Past this, a detector is slow enough and memory-hungry enough that localising
+# cheaply and identifying from a crop is the better trade. Not a hard limit --
+# a static station with time to spare can go higher.
+IMPRACTICAL_IMGSZ = 2048
 
 
 def advise(scales: dict[str, LabelScale], library=None,
            imgsz: int = DEFAULT_IMGSZ) -> str:
-    """The recommendation, from the measurements rather than from taste."""
+    """The recommendation, from the measurements rather than from taste.
+
+    The driving variable is the ratio between frame width and detector input.
+    A 3840 px frame at imgsz 1664 throws away 2.3x; a 5472 px frame at 1280
+    throws away 4.3x, and a 300 px label arrives as 70 px -- enough to find,
+    nowhere near enough to identify. Which of localise-then-crop or one big
+    detector wins is decided by that ratio, not by preference.
+    """
     if not scales:
         return "Nothing measured yet -- draw and save some boxes first."
 
-    need_imgsz = min_imgsz_for_identity(scales)
+    need = min_imgsz_for_identity(scales)
     smallest = min(scales.values(), key=lambda s: s.median_px)
+    frame = smallest.frame_sides[0] if smallest.frame_sides else 0.0
+    at_now = smallest.detector_px(imgsz, "median")
+    crop = recommend_crop(scales, imgsz)
+    weak = under_resolved(scales, imgsz)
+
     lines = [
         "RECOMMENDATION",
         "",
-        f"1. Detector, one class per label, imgsz {need_imgsz}.",
-        f"   Sized so your smallest label ({smallest.label_id}, "
-        f"{smallest.median_px:.0f} px) still arrives at {IDENTITY_FLOOR_PX} px -- enough "
-        f"to tell labels apart by their overall artwork.",
-        f"   You are running {imgsz}; "
-        + ("that is already enough." if imgsz >= need_imgsz
-           else f"at {imgsz} your smallest label arrives at "
-                f"{smallest.detector_px(imgsz, 'median'):.0f} px, which is thin."),
+        f"Frame {frame:.0f} px, detector input {imgsz} px -- a {frame / max(imgsz, 1):.1f}x "
+        f"reduction before the model sees anything.",
+        f"Your smallest label ({smallest.label_id}) is {smallest.median_px:.0f} px in "
+        f"frame and reaches the detector at {at_now:.0f} px.",
         "",
     ]
+
+    if need > IMPRACTICAL_IMGSZ:
+        lines += [
+            f"1. Detector: keep imgsz around {imgsz}, and train it to LOCALISE only "
+            f"(one generic `label` class -- Export Two-Stage).",
+            f"   One detector doing identity as well would need imgsz {need} to give "
+            f"{smallest.label_id} the {IDENTITY_FLOOR_PX} px identity needs. That is a "
+            f"slow, memory-hungry model, and it is unnecessary: finding a "
+            f"{at_now:.0f} px label is easy, identifying one is not. Spend the "
+            f"resolution where the hard question is.",
+            "",
+            f"2. Identity: classify the label crop, taken from the FULL-RESOLUTION "
+            f"frame at {crop} px.",
+            f"   {smallest.label_id} arrives at the classifier near its native "
+            f"{smallest.median_px:.0f} px -- roughly "
+            f"{smallest.median_px / max(at_now, 1):.1f}x what the detector had. This is "
+            f"where a {frame:.0f} px frame finally pays for itself.",
+            "",
+        ]
+    else:
+        lines += [
+            f"1. Detector, one class per label, imgsz {need}.",
+            f"   Sized so {smallest.label_id} still arrives at {IDENTITY_FLOOR_PX} px. "
+            + ("You are already there." if imgsz >= need else
+               f"At {imgsz} it arrives at {at_now:.0f} px, which is thin."),
+            "   One model, one pass, and it reports the id the recipe is written in.",
+            "",
+            "2. A whole-label classifier would not help here: "
+            + (f"{', '.join(weak)} aside, " if weak else "")
+            + "the detector already resolves these labels, and a crop would hand it "
+              "less than it had.",
+            "",
+        ]
 
     fine: list[str] = []
     if library is not None:
@@ -380,44 +433,34 @@ def advise(scales: dict[str, LabelScale], library=None,
             label = library.get(label_id)
             if label is None:
                 continue
-            for code in getattr(label, "codes", []) or []:
-                if len(getattr(code, "region", []) or []) >= 4:
-                    fine.append(f"{label_id}:{code.role}")
-            for field_ in getattr(label, "text_fields", []) or []:
-                if len(getattr(field_, "region", []) or []) >= 4:
-                    fine.append(f"{label_id}:{field_.name}")
+            fine += [f"{label_id}:{c.role}" for c in getattr(label, "codes", []) or []
+                     if len(getattr(c, "region", []) or []) >= 4]
+            fine += [f"{label_id}:{t.name}" for t in getattr(label, "text_fields", []) or []
+                     if len(getattr(t, "region", []) or []) >= 4]
 
+    step = "3." if need > IMPRACTICAL_IMGSZ else "3."
     if fine:
         lines += [
-            "2. Read-regions cropped from the FULL-RESOLUTION frame, not from the "
-            "detector's input and not from a whole-label crop.",
+            f"{step} Fine print (revision, language, codes): crop the READ-REGION "
+            f"itself from the full-resolution frame -- Export Region Crops.",
             f"   {len(fine)} region(s) defined: " + ", ".join(fine[:6])
             + (" ..." if len(fine) > 6 else ""),
-            "   A region cropped at native resolution keeps every pixel it had. That "
-            "is the only way a revision letter or a barcode is ever resolved -- no "
-            "detector input and no whole-label crop reaches them, at any size you "
-            "would want to run.",
-            "",
+            "   A region cropped at native resolution keeps every pixel it had. No "
+            "detector input and no whole-label crop reaches that detail at any size "
+            "worth running -- this is the only stage that does.",
         ]
     else:
         lines += [
-            "2. No read-regions defined yet.",
-            "   If any two of your labels differ only by a revision letter, a "
-            "language line, or a code, draw a read-region over that difference "
-            "(Define Regions). Nothing at detector resolution will separate them, "
-            "and the region is what lets the front end read it at full resolution.",
-            "",
+            f"{step} No read-regions defined yet.",
+            "   If two labels differ only by a revision letter, a language line or a "
+            "code, draw a region over that difference (Define Regions) and export "
+            "Region Crops. Nothing else will separate them.",
         ]
 
     lines += [
-        "3. Skip the whole-label classifier.",
-        "   It sits between the two and is worse than both: too coarse to read fine "
-        "print on your large labels (a 224 px crop of a 2000 px plate throws away "
-        "3x what the detector already had), and unnecessary for the gross identity "
-        "the detector gives you directly.",
         "",
-        "Confusable labels: where two labels differ ONLY in fine print, the detector "
-        "will mix them up however it is trained. List them in confusable_with, and "
-        "let the region read decide between them.",
+        "Confusable labels: where two differ ONLY in fine print, no amount of "
+        "detector or whole-label resolution separates them. List them in "
+        "confusable_with and let the region read decide.",
     ]
     return "\n".join(lines)
