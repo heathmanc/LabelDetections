@@ -1009,3 +1009,76 @@ def test_the_live_tab_names_the_detector_it_will_use():
     win.test_model_edit.setText("")
     assert "NOT SET" in win.live_detector_label.text()
     assert "Test Models" in win.live_detector_label.text()
+
+
+@ui
+def test_stage_two_handles_an_obb_detector():
+    """The pipeline these settings actually produce is OBB, and stage 2 had
+    only ever been exercised on axis-aligned boxes."""
+    from label_detections.ui.live_detect import InferenceWorker
+
+    class _OBB:
+        xyxyxyxy = np.array([[[100, 200], [400, 210], [395, 330], [95, 320]]],
+                            np.float32)
+
+    class OBBResult:
+        names = {0: "label"}
+        obb = _OBB()
+        boxes = None
+
+    worker = InferenceWorker("d.pt", 640, 0.25, 0, track=True, crop_px=224)
+    quads = worker._detection_quads([OBBResult()])
+    assert len(quads) == 1, "an OBB detection produced no crop"
+    assert quads[0][0] == [100.0, 200.0]
+
+
+@ui
+def test_a_plain_array_attribute_is_not_silently_dropped():
+    """Demanding .cpu() means anything already array-like returns [] -- which
+    does not error, it identifies nothing, forever. The same bug was fixed on
+    the overlay path and then rewritten here."""
+    from label_detections.ui.live_detect import InferenceWorker
+
+    class Boxes:
+        xyxy = np.array([[10.0, 20.0, 30.0, 40.0]], np.float32)   # no .cpu()
+
+    class R:
+        names = {0: "label"}
+        obb = None
+        boxes = Boxes()
+
+    worker = InferenceWorker("d.pt", 640, 0.25, 0, track=False)
+    assert len(worker._detection_quads([R()])) == 1
+
+
+@ui
+def test_a_failing_stage_two_does_not_take_stage_one_with_it():
+    """It was called bare, so one exception propagated out of the slot, Qt
+    swallowed it, and no result was emitted at all -- a loaded model sitting on
+    its placeholder with nothing to say."""
+    from label_detections.ui.live_detect import InferenceWorker
+
+    class Boxes:
+        xyxy = np.array([[10.0, 20.0, 30.0, 40.0]], np.float32)
+        conf = np.array([0.9], np.float32)
+        cls = np.array([0.0], np.float32)
+        id = None
+
+    class R:
+        names = {0: "label"}
+        obb = None
+        boxes = Boxes()
+
+    class Exploding:
+        def predict(self, *a, **k):
+            raise RuntimeError("classifier blew up")
+
+    worker = InferenceWorker("d.pt", 640, 0.25, 0, track=False)
+    worker._model = type("M", (), {"predict": lambda s, f, **k: [R()]})()
+    worker._classifier = Exploding()
+
+    emitted = []
+    worker.result.connect(lambda *a: emitted.append(a))
+    worker.infer(np.zeros((100, 200, 3), np.uint8))
+    assert emitted, "stage 1 result was lost to a stage 2 failure"
+    assert emitted[0][2] == [], "no identities, which is the correct degradation"

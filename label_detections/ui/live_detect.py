@@ -42,6 +42,9 @@ class InferenceWorker(QObject):
         self._model = None
         self._classifier = None
         self._stopping = False
+        # Reported once, not once per frame: a failure that repeats at the
+        # camera's rate buries every other message in the log.
+        self._stage2_failed = False
 
     @Slot()
     def load(self) -> None:
@@ -178,7 +181,7 @@ class InferenceWorker(QObject):
         if self._device is not None:
             args["device"] = self._device
         started = time.perf_counter()
-        try:
+        try:  # noqa: SIM105 -- the except below reports rather than passes
             if self._track:
                 # persist=True is what carries the tracker's state between
                 # calls; without it every frame starts a fresh tracker and each
@@ -188,10 +191,25 @@ class InferenceWorker(QObject):
                 results = self._model.predict(frame, **args)
         except Exception as exc:
             # One bad frame must not take the view down; the readout says so and
-            # the next frame gets its own try.
-            self.failed.emit(str(exc))
+            # the next frame gets its own try. Typed, because a bare str() of an
+            # exception is frequently empty and reads as a failure with no cause.
+            self.failed.emit(f"Inference failed: {type(exc).__name__}: {exc}")
             return
-        identities = self._identify(frame, results)
+        # Stage 2 must never take stage 1 down with it. It was called bare, so
+        # one exception anywhere in cropping or classifying propagated out of
+        # the slot, Qt swallowed it, and no result was emitted at all -- the
+        # view sat on its placeholder with a model loaded and nothing to say.
+        # A failed classifier now costs identities, not detections.
+        identities = []
+        try:
+            identities = self._identify(frame, results)
+        except Exception as exc:
+            if not self._stage2_failed:
+                self._stage2_failed = True
+                self.failed.emit(
+                    f"Stage 2 failed, so boxes will have no identity: "
+                    f"{type(exc).__name__}: {exc}\n\n"
+                    f"Stage 1 detection continues.")
         self.result.emit(results, time.perf_counter() - started, identities)
 
     def _detection_quads(self, results):
@@ -205,14 +223,34 @@ class InferenceWorker(QObject):
         """
         import numpy as np
 
+        def as_array(obj, attr):
+            """An Ultralytics tensor attribute as numpy, or [] if absent.
+
+            The same tolerance _safe_np already had on the overlay path, and
+            for the same reason: demanding .cpu() means anything already
+            array-like returns [] instead, and an empty list here does not
+            error -- it silently identifies nothing, forever, on an OBB model.
+            This function was written after that fix and repeated the bug.
+            """
+            value = getattr(obj, attr, None)
+            if value is None:
+                return []
+            try:
+                return value.cpu().numpy()
+            except AttributeError:
+                pass
+            except Exception:
+                return []
+            try:
+                return np.asarray(value)
+            except Exception:
+                return []
+
         quads = []
         for r in results or []:
             obb = getattr(r, "obb", None)
             if obb is not None:
-                try:
-                    polys = obb.xyxyxyxy.cpu().numpy()
-                except Exception:
-                    polys = []
+                polys = as_array(obb, "xyxyxyxy")
                 if len(polys):
                     for poly in polys:
                         pts = np.array(poly, dtype=float).reshape(-1, 2)[:4]
@@ -222,12 +260,7 @@ class InferenceWorker(QObject):
             boxes = getattr(r, "boxes", None)
             if boxes is None:
                 continue
-            try:
-                xyxy = boxes.xyxy.cpu().numpy()
-            except AttributeError:
-                xyxy = np.asarray(getattr(boxes, "xyxy", []))
-            except Exception:
-                continue
+            xyxy = as_array(boxes, "xyxy")
             for box in xyxy:
                 x1, y1, x2, y2 = (float(v) for v in box[:4])
                 quads.append([[x1, y1], [x2, y1], [x2, y2], [x1, y2]])
