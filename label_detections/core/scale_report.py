@@ -417,7 +417,7 @@ MANY_LABELS = 20
 
 
 def advise(scales: dict[str, LabelScale], library=None,
-           imgsz: int = DEFAULT_IMGSZ) -> str:
+           imgsz: int = DEFAULT_IMGSZ, planned_labels: int = 0) -> str:
     """The recommendation, from the measurements rather than from taste.
 
     Presents a fork where one genuinely exists. Raising the detector's input
@@ -480,6 +480,11 @@ def advise(scales: dict[str, LabelScale], library=None,
         ]
     else:
         count = len(library.all()) if library is not None else len(scales)
+        # Where the library is HEADING decides this, not where it is today.
+        # Two labels now and two hundred later is a two-stage problem, and
+        # advising for the two has someone build the wrong thing and migrate
+        # it at the worst possible moment.
+        horizon = max(count, int(planned_labels or 0))
         lines += [
             f"Under-resolved at this input: {', '.join(weak)}. Two ways to fix "
             f"it, and they are a real choice:",
@@ -495,17 +500,19 @@ def advise(scales: dict[str, LabelScale], library=None,
             f"full-resolution frame. Two models to train and keep matched.",
             "",
         ]
-        if count >= MANY_LABELS:
+        if horizon >= MANY_LABELS:
+            heading = (f"heading for {horizon}" if horizon > count
+                       else f"at {horizon} labels")
             lines += [
-                f"B, at {count} labels -- and the reason is onboarding, not "
-                f"pixels.",
-                f"Under A, label {count + 1} means drawing boxes on its images, "
-                f"retraining a detector that now carries {count + 1} classes, "
-                f"and re-checking the other {count} did not regress. Under B "
-                f"the detector never changes: it already finds label-shaped "
-                f"things it has never seen, so a new label is crops plus a "
-                f"classifier retrain -- and the crops come from the detector "
-                f"itself instead of from anyone drawing boxes.",
+                f"B, {heading} -- and the reason is onboarding, not pixels.",
+                f"Under A, label {horizon + 1} means drawing boxes on its "
+                f"images, retraining a detector that now carries {horizon + 1} "
+                f"classes, and re-checking the other {horizon} did not "
+                f"regress. Under B the detector never changes: it already "
+                f"finds label-shaped things it has never seen, so a new label "
+                f"is crops plus a classifier retrain -- and the crops come "
+                f"from the detector itself instead of from anyone drawing "
+                f"boxes.",
                 "That cost compounds with every label added. Resolution does "
                 "not.",
                 "Classifiers also carry hundreds of classes far more happily "
@@ -518,6 +525,10 @@ def advise(scales: dict[str, LabelScale], library=None,
                 f"its complexity past about {MANY_LABELS} labels, where "
                 f"retraining the detector for each new one starts to dominate, "
                 f"or sooner if A confuses two labels.",
+                f"If the library is headed well past {MANY_LABELS}, set Planned "
+                f"library size and this will recommend B now -- building it at "
+                f"{count} labels is far cheaper than migrating to it at two "
+                f"hundred.",
             ]
 
     lines.append("")
@@ -552,7 +563,7 @@ def advise(scales: dict[str, LabelScale], library=None,
 
 def dataset_details(scales: dict[str, LabelScale], library=None,
                     imgsz: int = DEFAULT_IMGSZ, crop: int | None = None,
-                    extra: dict | None = None) -> str:
+                    extra: dict | None = None, planned_labels: int = 0) -> str:
     """Everything measurable about the collected data, as plain text.
 
     Written to be pasted somewhere and read by someone who does not have the
@@ -623,7 +634,7 @@ def dataset_details(scales: dict[str, LabelScale], library=None,
 
     out.append("WHAT THE TOOL CONCLUDES")
     out.append("")
-    out.append(advise(scales, library, imgsz))
+    out.append(advise(scales, library, imgsz, planned_labels))
     out.append("")
     out.append("WORKING")
     out.append("")
@@ -676,7 +687,12 @@ def data_health(scales: dict[str, LabelScale], library=None) -> list[str]:
 
         if sc.frame_sides:
             frac = sc.median_px / sc.frame_sides[0]
-            if frac > SUSPICIOUS_FRAME_FRACTION:
+            spread = ((sc.max_px - sc.min_px) / sc.median_px) if sc.median_px else 1.0
+            # Drawn the same way ten-plus times is deliberate, not a slip. The
+            # warning is for a one-off mis-draw; repeating it at every report
+            # for a genuinely large label is how a real warning gets ignored.
+            deliberate = sc.count >= 10 and spread < 0.15
+            if frac > SUSPICIOUS_FRAME_FRACTION and not deliberate:
                 issues.append(
                     f"{label_id}: covers {frac:.0%} of the frame. Worth opening "
                     f"one to check it is the label and not the battery face -- "

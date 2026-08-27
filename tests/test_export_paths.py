@@ -574,13 +574,24 @@ def test_a_single_capture_class_is_called_out_before_any_resolution_advice():
     assert text.index("lonely: 1 box") < text.index("Frame 5496")
 
 
-def test_a_box_covering_most_of_the_frame_is_questioned():
+def test_a_one_off_box_covering_most_of_the_frame_is_questioned():
     """A battery face drawn as a label trains the detector to fire on every
     battery, and nothing else in the report would notice."""
     from label_detections.core import scale_report as sr
 
-    scales = {"huge": sr.LabelScale("huge", [3822.0] * 30, [5496.0] * 30)}
+    scales = {"huge": sr.LabelScale("huge", [3822.0] * 3, [5496.0] * 3)}
     assert any("of the frame" in i for i in sr.data_health(scales, None))
+
+
+def test_a_large_label_drawn_consistently_many_times_is_not_nagged():
+    """Drawn the same way fifteen times is deliberate. Repeating the warning
+    at every report for a genuinely large label is how a real warning stops
+    being read."""
+    from label_detections.core import scale_report as sr
+
+    scales = {"long": sr.LabelScale("long", [3814.0] * 7 + [3857.0] * 8,
+                                    [5496.0] * 15)}
+    assert not any("of the frame" in i for i in sr.data_health(scales, None))
 
 
 def test_a_lopsided_class_balance_is_reported():
@@ -664,3 +675,21 @@ def test_the_advice_quotes_concrete_numbers_for_both_options():
     assert str(sr.min_imgsz_for_localisation(scales)) in text    # option B detector
     assert str(sr.crop_for_identity(scales)) in text             # option B classifier
     assert "detector stays at" not in text, "echoed the setting instead of advising"
+
+
+def test_the_advice_follows_where_the_library_is_heading():
+    """Two labels now and two hundred later is a two-stage problem. Advising
+    for the two builds the wrong thing and migrates it at the worst moment."""
+    from label_detections.core import scale_report as sr
+    from label_detections.core.labels import LabelDef, LabelLibrary
+
+    lib = LabelLibrary([LabelDef(label_id="a"), LabelDef(label_id="b")])
+    scales = {"a": sr.LabelScale("a", [872.0] * 81, [5496.0] * 81)}
+
+    today = sr.advise(scales, lib, imgsz=448)
+    assert "A is the simpler place to start" in today
+    assert "Planned library size" in today, "must say how to change the answer"
+
+    headed = sr.advise(scales, lib, imgsz=448, planned_labels=300)
+    assert "B, heading for 300" in headed
+    assert "A is the simpler place to start" not in headed
