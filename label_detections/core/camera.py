@@ -9,6 +9,11 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
+# How long one Basler grab may block. Short on purpose: the reader loop can
+# only notice a stop request between grabs, so this is also the worst-case
+# delay on shutting the camera down cleanly.
+BASLER_GRAB_TIMEOUT_MS = 200
+
 try:
     from pypylon import pylon
 except ImportError:
@@ -315,6 +320,9 @@ class CameraSource:
         # without taking the reader thread down with it.
         self.last_read_error = ""
         self.read_failures = 0
+        # Cameras whose reader would not stop. Held, not freed: releasing one
+        # still in use is what corrupts the heap.
+        self._abandoned: list = []
         self._gst: GstNativeCamera | None = None
         self.source: str | int | None = None
         self.last_result = CameraOpenResult(False, "Not opened")
@@ -898,7 +906,11 @@ class CameraSource:
         while self._running and self.is_open():
             try:
                 if self.last_result.backend_name == "Basler/Pylon":
-                    ok, frame = self._read_basler_frame(timeout_ms=1000)
+                    # Short, so the loop returns to its _running check often.
+                    # At 1000 ms the reader could sit inside pylon for a full
+                    # second, which no sane join timeout can wait out.
+                    ok, frame = self._read_basler_frame(
+                        timeout_ms=BASLER_GRAB_TIMEOUT_MS)
                 elif self._gst is not None:
                     ok, frame = self._gst.read()
                 else:
@@ -975,13 +987,43 @@ class CameraSource:
                 return
 
     def close(self) -> None:
+        """Stop the reader, THEN release the camera. Never the other way round.
+
+        The join was 0.5 s while a Basler grab blocked for up to 1.0 s, so the
+        join lost that race routinely -- and close() went on to StopGrabbing(),
+        Close() and drop self.cap while the reader thread was still inside
+        RetrieveResult on that same object. Destroying a pylon camera under a
+        live call corrupts the heap, which Windows reports as 0xc0000374 from
+        wherever it is next noticed: normally the next RetrieveResult, which is
+        why the stack blamed the grab rather than the close.
+
+        If the reader will not stop, the camera is deliberately leaked. A
+        leaked camera costs a handle until the process ends; freeing one that
+        is still in use ends the process.
+        """
         self._running = False
+        stopped = True
         if self._thread is not None:
             try:
-                self._thread.join(timeout=0.5)
+                # Generously longer than one grab, so a reader mid-call has
+                # time to come back and see _running.
+                self._thread.join(timeout=(BASLER_GRAB_TIMEOUT_MS / 1000.0) * 6 + 1.0)
+                stopped = not self._thread.is_alive()
             except Exception:
-                pass
+                stopped = False
         self._thread = None
+
+        if not stopped:
+            self._abandoned.append(self.cap)
+            self.cap = None
+            self.converter = None
+            self.last_read_error = (
+                "The camera reader did not stop; the device was left open "
+                "rather than closed underneath it.")
+            with self._lock:
+                self._latest_frame = None
+                self._latest_ok = False
+            return
 
         if self._gst is not None:
             try:

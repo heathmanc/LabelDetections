@@ -667,3 +667,50 @@ def test_a_basler_frame_survives_the_buffer_being_recycled():
     assert ok and frame is not None
     assert frame[0, 0, 0] == 7, "the returned frame aliased a released buffer"
     assert not np.shares_memory(frame, pool), "still a view into pylon memory"
+
+
+def test_the_camera_is_never_released_under_a_running_reader():
+    """The crash. close() joined for 0.5 s while a Basler grab blocked for up
+    to 1.0 s, so the join lost routinely -- and close() then went on to
+    StopGrabbing/Close/drop the camera while the reader was still inside
+    RetrieveResult on it. Destroying a pylon camera under a live call corrupts
+    the heap, reported later as 0xc0000374 from the next grab."""
+    import threading
+    import time
+    from label_detections.core import camera as cam
+
+    assert cam.BASLER_GRAB_TIMEOUT_MS <= 500, "a grab must not outlast a join"
+
+    closed = {"stop": False}
+
+    class Camera:
+        def IsGrabbing(self):
+            return True
+
+        def StopGrabbing(self):
+            closed["stop"] = True
+
+        def IsOpen(self):
+            return True
+
+        def Close(self):
+            closed["stop"] = True
+
+    src = cam.CameraSource()
+    src.cap = Camera()
+    src.last_result = cam.CameraOpenResult(True, "", "Basler/Pylon")
+
+    # A reader that refuses to stop, as one blocked in a native call would.
+    stuck = threading.Event()
+    src._thread = threading.Thread(target=stuck.wait, daemon=True)
+    src._thread.start()
+    src._running = True
+    try:
+        started = time.perf_counter()
+        src.close()
+        waited = time.perf_counter() - started
+        assert waited >= 1.0, "did not actually wait for the reader"
+        assert closed["stop"] is False, "released the camera under a live reader"
+        assert src._abandoned, "the camera must be held, not freed"
+    finally:
+        stuck.set()
