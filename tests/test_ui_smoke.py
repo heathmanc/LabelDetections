@@ -714,3 +714,49 @@ def test_the_camera_is_never_released_under_a_running_reader():
         assert src._abandoned, "the camera must be held, not freed"
     finally:
         stuck.set()
+
+
+def test_the_converted_image_outlives_the_copy_taken_from_it():
+    """Written as converter.Convert(grab).GetArray(), the PylonImage is a
+    temporary: it dies at the end of that expression and frees its buffer, so a
+    copy taken on the next line reads memory already returned. The corruption
+    then surfaces inside the FOLLOWING Convert, when the converter next touches
+    its own heap -- which is where the crash moved to after the grab-buffer and
+    teardown races were fixed."""
+    import types
+    import numpy as np
+    from label_detections.core import camera as cam
+
+    if cam.pylon is None:
+        cam.pylon = types.SimpleNamespace(TimeoutHandling_Return=0)
+
+    buf = np.full((4, 4, 3), 5, np.uint8)
+
+    class Image:
+        def GetArray(self):
+            return buf
+
+        def Release(self):
+            buf[:] = 200        # what freeing the converter's buffer looks like
+
+    class Grab:
+        Array = None
+
+        def IsValid(self):
+            return True
+
+        def GrabSucceeded(self):
+            return True
+
+        def Release(self):
+            pass
+
+    src = cam.CameraSource()
+    src.cap = type("C", (), {"IsGrabbing": lambda s: True,
+                             "RetrieveResult": lambda s, t, h: Grab()})()
+    src.converter = type("Cv", (), {"Convert": lambda s, g: Image()})()
+
+    ok, frame = src._read_basler_frame(timeout_ms=10)
+    assert ok and frame is not None
+    assert frame[0, 0, 0] == 5, "copied after the converted image was freed"
+    assert not np.shares_memory(frame, buf), "still aliasing converter memory"

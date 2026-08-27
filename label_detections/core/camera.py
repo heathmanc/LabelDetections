@@ -681,9 +681,33 @@ class CameraSource:
             # throttle came off and the frame rate went up an order of
             # magnitude: buffers started being recycled while the previous
             # frame was still being read.
-            view = (self.converter.Convert(grab).GetArray()
-                    if self.converter is not None else grab.Array)
-            frame = np.array(view, copy=True) if view is not None else None
+            frame = None
+            if self.converter is not None:
+                # The PylonImage from Convert() must stay referenced until the
+                # copy is finished. Written as
+                #     converter.Convert(grab).GetArray()
+                # it is a temporary: it dies at the end of that expression and
+                # frees its buffer, so copying from the result on the NEXT line
+                # reads memory that has already been returned. That is the
+                # corruption, and it surfaces inside the following Convert when
+                # the converter next touches its own heap -- which is precisely
+                # where the crash moved to once the earlier ones were fixed.
+                image = self.converter.Convert(grab)
+                try:
+                    array = image.GetArray()
+                    if array is not None:
+                        frame = np.array(array, copy=True)
+                finally:
+                    try:
+                        image.Release()
+                    except Exception:
+                        pass
+            else:
+                # grab.Array is likewise a view into pylon's buffer, valid only
+                # until the grab is released in the finally below.
+                array = grab.Array
+                if array is not None:
+                    frame = np.array(array, copy=True)
             if frame is None:
                 return False, None
             return True, frame
