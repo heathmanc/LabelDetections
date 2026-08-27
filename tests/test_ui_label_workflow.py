@@ -890,3 +890,57 @@ def test_the_orphan_filter_reads_the_library_from_disk_not_from_memory():
     # Caller passes an empty library, as a stale window would.
     datasets, _ = yolo_export.exportable_datasets(LabelLibrary([]))
     assert "fresh_on_disk" in datasets
+
+
+def test_a_generic_detection_gets_the_open_labels_id():
+    """Under a two-stage detector every box is class `label`, which is not an
+    identity -- so pre-label wrote boxes with no label_id at all. The fallback
+    to the open label is what this method is named after; it was removed when
+    the detector started reporting ids and never restored for the pipeline
+    that does not."""
+    from label_detections.core import yolo_export
+
+    win = _window()
+    _define(win, "gen_fallback")
+    win.set_active_label("gen_fallback")
+
+    boxes = [{"label": yolo_export.GENERIC_CLASS,
+              "points": [[10, 10], [50, 10], [50, 40], [10, 40]]}]
+    out = win._assign_active_label(boxes)
+    assert out[0]["label_id"] == "gen_fallback"
+
+
+def test_a_per_label_detection_keeps_its_own_id():
+    win = _window()
+    _define(win, "own_id_a")
+    _define(win, "own_id_b")
+    win.set_active_label("own_id_a")
+
+    boxes = [{"label": "own_id_b",
+              "points": [[10, 10], [50, 10], [50, 40], [10, 40]]}]
+    out = win._assign_active_label(boxes)
+    assert out[0]["label_id"] == "own_id_b", "overwrote a real identity"
+
+
+def test_a_box_drawn_as_something_else_is_not_relabelled():
+    """A box the operator drew as something else is a statement that it IS
+    something else. Overwriting it with the open label would make an image that
+    does not carry this label look like it does -- and approve it."""
+    win = _window()
+    _define(win, "not_relabelled")
+    win.set_active_label("not_relabelled")
+
+    boxes = [{"label": "some_other_thing",
+              "points": [[10, 10], [50, 10], [50, 40], [10, 40]]}]
+    out = win._assign_active_label(boxes)
+    assert "label_id" not in out[0]
+
+
+def test_the_battery_face_never_gets_an_identity():
+    win = _window()
+    _define(win, "face_untouched")
+    win.set_active_label("face_untouched")
+
+    boxes = [{"label": "battery_side",
+              "points": [[0, 0], [90, 0], [90, 90], [0, 90]]}]
+    assert "label_id" not in win._assign_active_label(boxes)[0]

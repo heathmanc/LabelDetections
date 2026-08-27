@@ -100,6 +100,7 @@ from label_detections.core import class_stats
 from label_detections.core import persistence
 from label_detections.core import imageio
 from label_detections.core import labels as labels_mod
+from label_detections.core import yolo_export
 from label_detections.core import annotations as ann_logic
 from label_detections.core import augment as augment_logic
 from label_detections.core import dataset as dataset_logic
@@ -2830,17 +2831,43 @@ class MainWindow(QMainWindow):
         self.status.showMessage(f"Removed {label_id} from the library", 5000)
 
     def _assign_active_label(self, boxes: list[dict]) -> list[dict]:
-        """Carry each prediction's identity across, and fill in its regions.
+        """Give each prediction an identity, and fill in its regions.
 
-        The detector is trained on label ids, so a prediction already names
-        which label it is -- there is nothing to guess. Every box whose class
-        is a library label gets that label's id, not just the one being
-        trained: a battery carries several labels and the recipe counts them
-        all, so throwing away the others would be discarding real answers.
+        Two detectors produce boxes here and they name things differently:
+
+        A per-label detector reports the label id itself, so the class IS the
+        identity and every box gets its own -- a battery carries several
+        labels and the recipe counts them all, so keeping only the one being
+        trained would discard real answers.
+
+        A two-stage detector reports one generic class, `label`, which is not
+        an identity at all. Those boxes fall back to the label currently open,
+        which is what the dataset they are being saved into is for. That
+        fallback is what this method is named after, and I removed it when the
+        detector started reporting ids -- so under the two-stage pipeline every
+        pre-labelled box came out with no label_id whatsoever.
+
+        Structural classes are still left alone: battery_side is the face, not
+        a label, and giving it an identity would put one on every battery.
         """
         for box in boxes:
             name = str(box.get("label", ""))
+            if name in labels_mod.STRUCTURAL_CLASSES:
+                continue
             label = self.library.get(name) if name else None
+            if label is None and name == yolo_export.GENERIC_CLASS and self.label_id:
+                # Only for the generic class. A two-stage detector reports
+                # `label` for everything, which carries no identity, so the
+                # open label is the right proposal -- that is the dataset the
+                # box is being saved into.
+                #
+                # Deliberately NOT for any unrecognised name: a box the
+                # operator drew as something else is a statement that it is
+                # something else, and overwriting it with the open label would
+                # make an image that does not carry this label look like it
+                # does, and approve it.
+                label = self.library.get(self.label_id)
+                name = self.label_id
             if label is not None:
                 box["label_id"] = name
                 # The read-regions follow from the four corners just drawn, so
