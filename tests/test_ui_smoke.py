@@ -760,3 +760,52 @@ def test_the_converted_image_outlives_the_copy_taken_from_it():
     assert ok and frame is not None
     assert frame[0, 0, 0] == 5, "copied after the converted image was freed"
     assert not np.shares_memory(frame, buf), "still aliasing converter memory"
+
+
+def test_is_open_does_not_touch_the_camera_on_the_hot_path():
+    """It is called on the 16 ms display tick AND in the reader loop. Asking
+    the device meant two threads making native pylon calls on one object
+    several times a second, forever, while one of them sat inside
+    RetrieveResult -- concurrent native access, which corrupts the heap and is
+    then noticed somewhere else entirely."""
+    from label_detections.core import camera as cam
+
+    src = cam.CameraSource()
+    src.last_result = cam.CameraOpenResult(True, "", "Basler/Pylon")
+
+    asked = {"n": 0}
+
+    class Camera:
+        def IsOpen(self):
+            asked["n"] += 1
+            return True
+
+        def IsGrabbing(self):
+            asked["n"] += 1
+            return True
+
+    src.cap = Camera()
+    src._basler_open = True
+    if cam.pylon is None:
+        import types
+        cam.pylon = types.SimpleNamespace(TimeoutHandling_Return=0)
+
+    assert src.is_open() is True
+    assert asked["n"] == 0, "is_open still calls into pylon on the hot path"
+
+    src._basler_open = False
+    assert src.is_open() is False
+
+
+def test_every_native_camera_call_is_serialised():
+    """One lock, because pypylon does not promise an InstantCamera is safe for
+    arbitrary concurrent use. Fixing individual lifetime bugs kept moving the
+    crash instead of ending it."""
+    import inspect
+    from label_detections.core import camera as cam
+
+    src = inspect.getsource(cam.CameraSource)
+    for method in ("_read_basler_frame", "_get_basler_value",
+                   "_set_basler_pixel_format", "close"):
+        body = inspect.getsource(getattr(cam.CameraSource, method))
+        assert "_cam_lock" in body, f"{method} touches the camera unguarded"

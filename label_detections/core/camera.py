@@ -323,6 +323,18 @@ class CameraSource:
         # Cameras whose reader would not stop. Held, not freed: releasing one
         # still in use is what corrupts the heap.
         self._abandoned: list = []
+        # Serialises every native call on the pylon camera object. pypylon does
+        # not promise an InstantCamera is safe for arbitrary concurrent use,
+        # and this program has a reader thread inside RetrieveResult while the
+        # GUI reads nodes and asks it questions. Concurrent native access
+        # corrupts the heap, and the corruption is always noticed somewhere
+        # else -- which is why fixing one lifetime bug at a time kept moving
+        # the crash rather than ending it.
+        self._cam_lock = threading.RLock()
+        # is_open() is on the 16 ms display tick and inside the reader loop.
+        # Answering it from a flag keeps the hot path off both the lock and the
+        # camera; the flag is maintained by open() and close().
+        self._basler_open = False
         self._gst: GstNativeCamera | None = None
         self.source: str | int | None = None
         self.last_result = CameraOpenResult(False, "Not opened")
@@ -342,6 +354,13 @@ class CameraSource:
         if self.cap is None or pylon is None:
             return False
         try:
+            with self._cam_lock:
+                return self._set_basler_value_locked(node_name, value)
+        except Exception:
+            return False
+
+    def _set_basler_value_locked(self, node_name: str, value) -> bool:
+        try:
             node = getattr(self.cap, node_name, None)
             if node is None:
                 return False
@@ -356,10 +375,11 @@ class CameraSource:
         if self.cap is None or pylon is None:
             return default
         try:
-            node = getattr(self.cap, node_name, None)
-            if node is None:
-                return default
-            return node.GetValue()
+            with self._cam_lock:
+                node = getattr(self.cap, node_name, None)
+                if node is None:
+                    return default
+                return node.GetValue()
         except Exception:
             return default
 
@@ -416,7 +436,8 @@ class CameraSource:
     def _basler_pixel_format_options(self) -> list[str]:
         """What this camera actually offers, which is model-specific."""
         try:
-            return [str(v) for v in self.cap.PixelFormat.Symbolics]
+            with self._cam_lock:
+                return [str(v) for v in self.cap.PixelFormat.Symbolics]
         except Exception:
             return []
 
@@ -432,7 +453,8 @@ class CameraSource:
         options = self._basler_pixel_format_options()
         current = ""
         try:
-            current = str(self.cap.PixelFormat.GetValue())
+            with self._cam_lock:
+                current = str(self.cap.PixelFormat.GetValue())
         except Exception:
             pass
         wanted = str(wanted or "").strip()
@@ -443,11 +465,13 @@ class CameraSource:
                     f"{current or 'camera default'}. Available: "
                     + ", ".join(options[:8]))
         try:
-            self.cap.PixelFormat.SetValue(wanted)
+            with self._cam_lock:
+                self.cap.PixelFormat.SetValue(wanted)
         except Exception as exc:
             return f"could not set {wanted} ({exc}); left as {current or 'default'}"
         try:
-            got = str(self.cap.PixelFormat.GetValue())
+            with self._cam_lock:
+                got = str(self.cap.PixelFormat.GetValue())
         except Exception:
             got = wanted
         return f"{got}" + ("" if got == wanted else f" (asked for {wanted})")
@@ -588,6 +612,7 @@ class CameraSource:
             self.converter.OutputBitAlignment = pylon.OutputBitAlignment_MsbAligned
 
             self.cap.StartGrabbing(pylon.GrabStrategy_LatestImageOnly)
+            self._basler_open = True
         except Exception as e:
             self.last_result = CameraOpenResult(False, f"Basler/Pylon open exception: {e}")
             self.close()
@@ -659,9 +684,11 @@ class CameraSource:
             return False, None
         grab = None
         try:
-            if not self.cap.IsGrabbing():
-                return False, None
-            grab = self.cap.RetrieveResult(timeout_ms, pylon.TimeoutHandling_Return)
+            with self._cam_lock:
+                if self.cap is None or not self.cap.IsGrabbing():
+                    return False, None
+                grab = self.cap.RetrieveResult(timeout_ms,
+                                               pylon.TimeoutHandling_Return)
             if grab is None:
                 return False, None
             # IsValid() first: an invalid result cannot be asked anything else.
@@ -1038,6 +1065,7 @@ class CameraSource:
         self._thread = None
 
         if not stopped:
+            self._basler_open = False
             self._abandoned.append(self.cap)
             self.cap = None
             self.converter = None
@@ -1056,13 +1084,15 @@ class CameraSource:
                 pass
         self._gst = None
 
+        self._basler_open = False
         if self.cap is not None:
             try:
                 if self.last_result.backend_name == "Basler/Pylon" and pylon is not None:
-                    if self.cap.IsGrabbing():
-                        self.cap.StopGrabbing()
-                    if self.cap.IsOpen():
-                        self.cap.Close()
+                    with self._cam_lock:
+                        if self.cap.IsGrabbing():
+                            self.cap.StopGrabbing()
+                        if self.cap.IsOpen():
+                            self.cap.Close()
                 else:
                     self.cap.release()
             except Exception:
@@ -1080,7 +1110,11 @@ class CameraSource:
             return False
         try:
             if self.last_result.backend_name == "Basler/Pylon" and pylon is not None:
-                return bool(self.cap.IsOpen() and self.cap.IsGrabbing())
+                # From the flag, not the camera. This is called on the 16 ms
+                # display tick AND in the reader loop, so asking the device
+                # meant two threads making native calls on it several times a
+                # second, forever, while one of them sat inside RetrieveResult.
+                return self._basler_open
             return bool(self.cap.isOpened())
         except Exception:
             return False
