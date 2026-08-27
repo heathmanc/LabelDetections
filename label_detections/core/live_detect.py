@@ -350,3 +350,46 @@ def proposed_annotation(image: str, label_id: str, items,
     data = ann.new_annotation(image, label_id, width, height, **meta)
     data["boxes"] = proposed_boxes(items, label_id)
     return data
+
+
+# --- stage 2 at runtime: naming what the detector found --------------------
+
+# Below this the classifier is guessing. A classifier always returns its best
+# class, so without a floor a label that was never trained on comes back as
+# whichever known label it least resembles -- confidently, and wrongly. On a
+# line that counts label ids against a recipe, a confident wrong id is worse
+# than an honest blank, because nothing downstream can tell it was a guess.
+UNKNOWN = "unknown"
+DEFAULT_IDENTITY_FLOOR = 0.55
+
+
+def identify(name: str, conf: float, floor: float = DEFAULT_IDENTITY_FLOOR) -> tuple[str, float]:
+    """The classifier's answer, or UNKNOWN when it is not sure enough."""
+    conf = float(conf or 0.0)
+    if not name or conf < float(floor):
+        return UNKNOWN, conf
+    return str(name), conf
+
+
+def apply_identities(items: list[dict], identities) -> list[dict]:
+    """Put stage 2's answers onto stage 1's boxes, by position.
+
+    Degrades to leaving the detector's own class name in place when the two
+    lists disagree in length. That direction matters: a misaligned identity
+    would put a real label id on the wrong box, which is indistinguishable
+    downstream from a correct read. Showing `label` is visibly incomplete;
+    showing the wrong id is invisibly false.
+    """
+    if not identities or len(identities) != len(items):
+        return items
+    out = []
+    for item, (name, conf) in zip(items, identities):
+        merged = dict(item)
+        merged["detector_name"] = item.get("name", "")
+        merged["name"] = name
+        merged["identity_conf"] = float(conf)
+        track = merged.get("track_id")
+        merged["label"] = (f"{name} #{track} {conf:.2f}" if track is not None
+                           else f"{name} {conf:.2f}")
+        out.append(merged)
+    return out

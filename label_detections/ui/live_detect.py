@@ -21,17 +21,26 @@ class InferenceWorker(QObject):
 
     loaded = Signal(str)          # human description of what came up
     failed = Signal(str)
-    result = Signal(object, float)   # ultralytics results, latency in seconds
+    # ultralytics results, latency in seconds, per-detection (name, conf) from
+    # stage 2 (empty when no classifier is loaded)
+    result = Signal(object, float, object)
 
     def __init__(self, model_path: str, imgsz: int, conf: float, device,
-                 track: bool = True):
+                 track: bool = True, classifier_path: str = "",
+                 crop_px: int = 224, margin: float = 0.06,
+                 identity_floor: float = 0.55):
         super().__init__()
         self._path = str(model_path)
         self._imgsz = int(imgsz)
         self._conf = float(conf)
         self._device = device
         self._track = bool(track)
+        self._classifier_path = str(classifier_path or "")
+        self._crop_px = int(crop_px)
+        self._margin = float(margin)
+        self._identity_floor = float(identity_floor)
         self._model = None
+        self._classifier = None
         self._stopping = False
 
     @Slot()
@@ -48,7 +57,18 @@ class InferenceWorker(QObject):
         except Exception as exc:
             self.failed.emit(f"Could not load the model:\n{self._path}\n\n{exc}")
             return
-        self.loaded.emit(f"Loaded {self._path}")
+        if self._classifier_path:
+            try:
+                self._classifier = YOLO(self._classifier_path)
+            except Exception as exc:
+                self.failed.emit(
+                    f"Detector loaded, but the classifier did not:\n"
+                    f"{self._classifier_path}\n\n{exc}\n\n"
+                    f"Running stage 1 only -- boxes will have no identity.")
+                self._classifier = None
+        which = ("detector + classifier" if self._classifier is not None
+                 else "detector only")
+        self.loaded.emit(f"Loaded {which}: {self._path}")
 
     @Slot(object)
     def infer(self, frame) -> None:
@@ -72,9 +92,108 @@ class InferenceWorker(QObject):
             # the next frame gets its own try.
             self.failed.emit(str(exc))
             return
-        self.result.emit(results, time.perf_counter() - started)
+        identities = self._identify(frame, results)
+        self.result.emit(results, time.perf_counter() - started, identities)
+
+    def _detection_quads(self, results):
+        """Four corners per detection, in the SAME order the overlay builds them.
+
+        Order is the coupling that makes identities line up with boxes, so it
+        mirrors _detection_overlay_items exactly: oriented results first when
+        present, otherwise axis-aligned, each in index order. A mismatch is
+        caught downstream by length and degrades to no identity rather than to
+        a wrong one.
+        """
+        import numpy as np
+
+        quads = []
+        for r in results or []:
+            obb = getattr(r, "obb", None)
+            if obb is not None:
+                try:
+                    polys = obb.xyxyxyxy.cpu().numpy()
+                except Exception:
+                    polys = []
+                if len(polys):
+                    for poly in polys:
+                        pts = np.array(poly, dtype=float).reshape(-1, 2)[:4]
+                        if len(pts) >= 4:
+                            quads.append(pts.tolist())
+                    continue
+            boxes = getattr(r, "boxes", None)
+            if boxes is None:
+                continue
+            try:
+                xyxy = boxes.xyxy.cpu().numpy()
+            except AttributeError:
+                xyxy = np.asarray(getattr(boxes, "xyxy", []))
+            except Exception:
+                continue
+            for box in xyxy:
+                x1, y1, x2, y2 = (float(v) for v in box[:4])
+                quads.append([[x1, y1], [x2, y1], [x2, y2], [x1, y2]])
+        return quads
+
+    def _identify(self, frame, results):
+        """Stage 2: crop each detection out of the FULL-RESOLUTION frame and name it.
+
+        From ``frame``, deliberately -- not from anything the detector resized.
+        The entire reason this stage exists is that the detector's input threw
+        detail away; re-using its view would reproduce the problem it solves.
+        """
+        if self._classifier is None:
+            return []
+        from label_detections.core import live_detect as logic
+        from label_detections.core.classify_export import expand_quad, letterbox
+        from label_detections.core.imageio import rectify_quad
+
+        crops = []
+        for quad in self._detection_quads(results):
+            patch = rectify_quad(frame, expand_quad(quad, self._margin))
+            if patch is None or patch.size == 0:
+                crops.append(None)
+                continue
+            crops.append(letterbox(patch, self._crop_px))
+
+        usable = [c for c in crops if c is not None]
+        if not usable:
+            return []
+        try:
+            preds = self._classifier.predict(
+                usable, imgsz=self._crop_px, verbose=False,
+                **({"device": self._device} if self._device is not None else {}))
+        except Exception as exc:
+            self.failed.emit(f"Classifier failed on a frame: {exc}")
+            return []
+
+        named = []
+        for pred in preds:
+            probs = getattr(pred, "probs", None)
+            names = getattr(pred, "names", {}) or {}
+            if probs is None:
+                named.append((logic.UNKNOWN, 0.0))
+                continue
+            try:
+                top, conf = int(probs.top1), float(probs.top1conf)
+            except Exception:
+                named.append((logic.UNKNOWN, 0.0))
+                continue
+            named.append(logic.identify(str(names.get(top, "")), conf,
+                                        self._identity_floor))
+
+        # Put them back against the original detections, including the ones
+        # whose crop failed -- position is what ties identity to box.
+        out, i = [], 0
+        for crop in crops:
+            if crop is None:
+                out.append((logic.UNKNOWN, 0.0))
+            else:
+                out.append(named[i] if i < len(named) else (logic.UNKNOWN, 0.0))
+                i += 1
+        return out
 
     @Slot()
     def stop(self) -> None:
         self._stopping = True
         self._model = None
+        self._classifier = None

@@ -693,3 +693,105 @@ def test_both_buttons_are_actually_connected_to_their_handlers():
     proposed = [n for n in names if n != plain][0]
     assert persistence.load_annotation(label_id, proposed)["boxes"]
     assert win.live_keep_btn.text() != win.live_keep_json_btn.text()
+
+
+# --- stage 2: naming what the detector found --------------------------------
+
+def test_an_unsure_classifier_says_unknown_rather_than_its_best_guess():
+    """A classifier always returns something. Without a floor, a label it was
+    never trained on comes back as whichever known label it least resembles --
+    confidently. On a line counting ids against a recipe, a confident wrong id
+    is worse than an honest blank."""
+    assert ld.identify("2220-9199", 0.91)[0] == "2220-9199"
+    assert ld.identify("2220-9199", 0.40)[0] == ld.UNKNOWN
+    assert ld.identify("", 0.99)[0] == ld.UNKNOWN
+
+
+def test_identities_land_on_the_boxes_they_belong_to():
+    items = [{"name": "label", "track_id": 3, "conf": 0.9},
+             {"name": "label", "track_id": 7, "conf": 0.8}]
+    out = ld.apply_identities(items, [("2220-9199", 0.97), ("warn-g31-en", 0.88)])
+    assert out[0]["name"] == "2220-9199" and out[1]["name"] == "warn-g31-en"
+    assert "2220-9199 #3 0.97" == out[0]["label"]
+    # The detector's own answer is kept, so a disagreement stays visible.
+    assert out[0]["detector_name"] == "label"
+
+
+def test_a_length_mismatch_drops_identities_instead_of_shifting_them():
+    """The failure has to degrade toward visibly incomplete, never toward
+    invisibly false: a shifted identity puts a real label id on the wrong box,
+    which nothing downstream can distinguish from a correct read."""
+    items = [{"name": "label", "conf": 0.9}, {"name": "label", "conf": 0.8}]
+    out = ld.apply_identities(items, [("2220-9199", 0.97)])
+    assert [i["name"] for i in out] == ["label", "label"]
+
+
+@ui
+def test_stage_two_crops_in_the_same_order_the_overlay_draws():
+    """The coupling the whole thing rests on. Identities are matched to boxes
+    by position, so the worker's crop order must mirror the overlay's item
+    order exactly -- for oriented and axis-aligned results alike."""
+    from label_detections.ui.live_detect import InferenceWorker
+
+    win = _window()
+    worker = InferenceWorker("unused.pt", 640, 0.4, None, track=False)
+    results = [_Results([[10, 10, 40, 40], [50, 50, 90, 90], [5, 60, 25, 80]],
+                        {0: "label"}, [0.9, 0.8, 0.7], [0, 0, 0])]
+    items, _ = win._detection_overlay_items(results)
+    quads = worker._detection_quads(results)
+    assert len(quads) == len(items) == 3
+    for item, quad in zip(items, quads):
+        x1, y1, x2, y2 = item["xyxy"]
+        assert quad[0] == [x1, y1] and quad[2] == [x2, y2]
+
+
+@ui
+def test_the_readout_counts_label_ids_once_stage_two_has_spoken():
+    win = _window()
+    _label(win, "s2_readout")
+    win._live_thread = object()
+    win._live_tracking = False
+    win._live_overlay_scale = (1.0, 1.0)
+    try:
+        win._on_live_result(
+            [_Results([[10, 10, 40, 40]], {0: "label"}, [0.9], [0])], 0.02,
+            [("s2_readout", 0.96)])
+        text = win.live_readout.toPlainText()
+        assert "s2_readout: 1 found" in text
+        assert "label:" not in text, "reported the detector's placeholder class"
+    finally:
+        win._live_thread = None
+
+
+@ui
+def test_without_a_classifier_the_boxes_keep_the_detectors_own_class():
+    win = _window()
+    _label(win, "s2_none")
+    win._live_thread = object()
+    win._live_tracking = False
+    win._live_overlay_scale = (1.0, 1.0)
+    try:
+        win._on_live_result(
+            [_Results([[10, 10, 40, 40]], {0: "label"}, [0.9], [0])], 0.02, [])
+        assert "label" in win.live_readout.toPlainText()
+    finally:
+        win._live_thread = None
+
+
+@ui
+def test_the_crop_size_comes_from_the_export_that_trained_the_classifier():
+    """A classifier fed a size it did not train at loses accuracy silently, and
+    the export wrote the answer next to the weights."""
+    import tempfile
+    from pathlib import Path
+
+    win = _window()
+    root = Path(tempfile.mkdtemp())
+    (root / "train" / "a").mkdir(parents=True)
+    (root / "classes.txt").write_text("a\n")
+    cv2.imwrite(str(root / "train" / "a" / "c.jpg"), np.zeros((384, 384, 3), np.uint8))
+    weights = root / "runs" / "w" / "best.pt"
+    weights.parent.mkdir(parents=True)
+    weights.write_bytes(b"not a real model")
+    assert win._live_crop_px(str(weights)) == 384
+    assert win._live_crop_px("") == 224

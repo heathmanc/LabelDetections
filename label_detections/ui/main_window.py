@@ -1841,6 +1841,23 @@ class MainWindow(QMainWindow):
         row.addWidget(self.live_stop_btn)
         cv_.addLayout(row)
 
+        cls_row = QHBoxLayout()
+        self.live_classifier_edit = QLineEdit()
+        self.live_classifier_edit.setPlaceholderText(
+            "optional: classifier .pt for stage 2 (leave blank for stage 1 only)")
+        self.live_classifier_edit.setToolTip(
+            "The second stage. Each detection is cropped out of the FULL-RESOLUTION "
+            "frame and this model names it.\n\n"
+            "Leave blank and boxes show whatever class the detector reports -- "
+            "which under a two-stage export is just 'label', with no identity.")
+        cls_browse = QPushButton("...")
+        cls_browse.setMaximumWidth(34)
+        cls_browse.clicked.connect(self._browse_live_classifier)
+        cls_row.addWidget(self.live_classifier_edit, 1)
+        cls_row.addWidget(cls_browse)
+        cv_.addWidget(QLabel("Stage 2 classifier"))
+        cv_.addLayout(cls_row)
+
         self.live_track_check = QCheckBox("Track objects across frames")
         self.live_track_check.setChecked(True)
         self.live_track_check.setToolTip(
@@ -1966,10 +1983,13 @@ class MainWindow(QMainWindow):
 
         self._live_thread = QThread(self)
         self._live_tracking = self.live_track_check.isChecked()
+        classifier_path = (self.live_classifier_edit.text().strip()
+                           if hasattr(self, "live_classifier_edit") else "")
         self._live_worker = InferenceWorker(
             model_path, int(self.test_imgsz_spin.value()),
             float(self.test_conf_spin.value()), self._model_test_device_arg(),
-            track=self._live_tracking)
+            track=self._live_tracking, classifier_path=classifier_path,
+            crop_px=self._live_crop_px(classifier_path))
         self._live_worker.moveToThread(self._live_thread)
         self._live_worker.loaded.connect(self._on_live_loaded)
         self._live_worker.failed.connect(self._on_live_failed)
@@ -2036,10 +2056,16 @@ class MainWindow(QMainWindow):
         # Queued across the thread boundary by Qt, so this returns immediately.
         self._live_worker.infer(self._live_frame)
 
-    def _on_live_result(self, results, latency: float) -> None:
+    def _on_live_result(self, results, latency: float, identities=None) -> None:
         self._live_busy = False
         self._live_rolling.record(latency)
-        items, counts = self._detection_overlay_items(results)
+        items, _counts = self._detection_overlay_items(results)
+        items = live_logic.apply_identities(items, identities)
+        # Counted after stage 2, so the readout reports label ids rather than
+        # a screenful of "label" -- which is what the recipe is written in.
+        counts: dict[str, int] = {}
+        for item in items:
+            counts[item["name"]] = counts.get(item["name"], 0) + 1
         self._live_counts = counts
         # Hold the frame *these* boxes came from. By the time an operator
         # clicks, _live_frame has usually moved on, and saving a newer image
@@ -6266,6 +6292,38 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "export_augment_spin"):
             return 0
         return int(self.export_augment_spin.value())
+
+    def _browse_live_classifier(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Stage 2 classifier", "", "PyTorch weights (*.pt);;All files (*)")
+        if path:
+            self.live_classifier_edit.setText(path)
+
+    def _live_crop_px(self, classifier_path: str) -> int:
+        """The size stage 2 was trained at, from the export that produced it.
+
+        A classifier fed a different size than it trained on loses accuracy
+        silently, and the export already wrote the answer next to the weights,
+        so guessing 224 would be choosing to be wrong.
+        """
+        from pathlib import Path as _P
+
+        if not classifier_path:
+            return 224
+        for parent in _P(classifier_path).resolve().parents:
+            marker = parent / "classes.txt"
+            if marker.exists():
+                sample = next((parent / "train").rglob("*.jpg"), None)
+                if sample is not None:
+                    try:
+                        import cv2
+                        probe = cv2.imread(str(sample))
+                        if probe is not None:
+                            return int(probe.shape[0])
+                    except Exception:
+                        break
+                break
+        return 224
 
     def show_label_scale_report(self) -> None:
         """Measure how big labels actually are, and say what follows from it.
