@@ -861,3 +861,26 @@ def test_a_silent_view_says_why_rather_than_showing_nothing():
     assert "stage 2 classifier is set" in hint
     # With stage 2 configured, that last line is noise.
     assert "stage 2 classifier is set" not in ld.quiet_hint(20, 0.45, 1024, True)
+
+
+def test_the_start_floor_does_not_cap_a_fast_card():
+    """It was 0.15 -- a 6.7/s ceiling on any hardware, which on a card running
+    the model in 8 ms threw away 94% of the throughput and looked exactly like
+    the GPU not being used."""
+    assert ld.MIN_INTERVAL_S <= 0.02, "the floor is a throughput ceiling"
+    assert 1.0 / ld.MIN_INTERVAL_S >= 50
+
+
+def test_a_throttled_rate_is_called_out_next_to_the_latency():
+    """8 ms per inference alongside 6/s is not a slow model, it is a throttled
+    one, and neither number says so alone."""
+    r = ld.Rolling()
+    for i in range(10):
+        r.record(0.008, now=100 + i * 0.15)
+    note = ld.throughput_note(r)
+    assert "could run" in note and "not the GPU" in note
+
+    fast = ld.Rolling()
+    for i in range(10):
+        fast.record(0.008, now=100 + i * 0.009)
+    assert ld.throughput_note(fast) == "", "no note when the rate matches latency"

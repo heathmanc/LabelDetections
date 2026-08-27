@@ -88,7 +88,40 @@ class InferenceWorker(QObject):
                 self._classifier = None
         which = ("detector + classifier" if self._classifier is not None
                  else f"{task or 'detector'} only, no stage 2")
-        self.loaded.emit(f"Loaded {which}: {self._path}")
+        self.loaded.emit(f"Loaded {which}: {self._path}\n{self._device_report()}")
+
+    def _device_report(self) -> str:
+        """What hardware this is actually running on.
+
+        Asked and answered rather than inferred from the frame rate. "Is it
+        using the GPU" is otherwise guessed at from throughput, which says
+        nothing useful when something else is the bottleneck -- and a torch
+        built without CUDA looks, from the outside, exactly like a slow model.
+        """
+        try:
+            import torch
+        except Exception:
+            return "Device: torch not importable."
+
+        if not torch.cuda.is_available():
+            return ("Device: CPU -- torch reports NO CUDA. Either the driver is "
+                    "missing or this is a CPU-only torch build; reinstall torch "
+                    "with the CUDA wheel for your card.")
+        try:
+            name = torch.cuda.get_device_name(0)
+        except Exception:
+            name = "unknown CUDA device"
+        where = "?"
+        try:
+            where = str(next(self._model.model.parameters()).device)
+        except Exception:
+            pass
+        asked = self._device if self._device is not None else "(unset)"
+        line = f"Device: CUDA available ({name}); model on {where}; asked for {asked}."
+        if where.startswith("cpu"):
+            line += (" The model is on the CPU despite CUDA being available -- "
+                     "set Device to 0 on the Test Models tab.")
+        return line
 
     @Slot(object)
     def infer(self, frame) -> None:

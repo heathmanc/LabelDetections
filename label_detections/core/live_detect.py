@@ -21,7 +21,14 @@ from dataclasses import dataclass, field
 # Inference is skipped while a previous frame is still in flight, so this is a
 # floor on how often it starts rather than a target rate. Well under a camera's
 # frame interval: the preview must never wait on the model.
-MIN_INTERVAL_S = 0.15
+# A floor on how often inference may START. Its only job is to leave the GUI
+# thread room to breathe, because the "busy" check already guarantees one
+# inference at a time -- which is what actually protects the preview.
+#
+# It was 0.15, which is a 6.7/s ceiling on ANY hardware. On a card that runs
+# the model in 8 ms that threw away 94% of the throughput and looked exactly
+# like the GPU not being used, which is how it was found.
+MIN_INTERVAL_S = 0.01
 
 # How badly the model has to do before an armed capture keeps the frame.
 # Scored by active_learning.disagreement_score, where a clean single detection
@@ -143,11 +150,28 @@ def quiet_hint(empty_frames: int, conf: float, imgsz: int,
     return "\n".join(lines)
 
 
+def throughput_note(rolling: "Rolling") -> str:
+    """Say when the rate is far below what the measured latency allows.
+
+    The two numbers sit side by side in the readout and only mean something
+    together: 8 ms per inference alongside 6/s is not a slow model, it is a
+    throttled one, and nothing about the pair says so on its own.
+    """
+    if not rolling.mean_ms or rolling.rate <= 0:
+        return ""
+    possible = 1000.0 / rolling.mean_ms
+    if possible > rolling.rate * 1.8:
+        return (f"   (model could run ~{possible:.0f}/s; the gap is the camera "
+                f"or the {MIN_INTERVAL_S * 1000:.0f} ms start floor, not the GPU)")
+    return ""
+
+
 def frame_summary(counts: dict[str, int], label_id: str,
                   rolling: Rolling) -> str:
     """The readout under the live view."""
     total = sum(counts.values())
-    lines = [f"{total} detection(s)   {rolling.mean_ms:.0f} ms   {rolling.rate:.1f}/s"]
+    lines = [f"{total} detection(s)   {rolling.mean_ms:.0f} ms   "
+             f"{rolling.rate:.1f}/s{throughput_note(rolling)}"]
     if label_id:
         found = counts.get(label_id, 0)
         lines.append(f"{label_id}: {found} found" if found
@@ -272,7 +296,8 @@ def track_line(track: Track) -> str:
 def track_summary(book: TrackBook, label_id: str, rolling: Rolling) -> str:
     """The readout when tracking is on."""
     rows = book.rows()
-    lines = [f"{len(rows)} tracked   {rolling.mean_ms:.0f} ms   {rolling.rate:.1f}/s"]
+    lines = [f"{len(rows)} tracked   {rolling.mean_ms:.0f} ms   "
+             f"{rolling.rate:.1f}/s{throughput_note(rolling)}"]
     mine = [t for t in rows if t.name == label_id] if label_id else []
     if label_id and not mine:
         # The one thing worth a line of its own: the label being trained is
