@@ -23,12 +23,14 @@ class InferenceWorker(QObject):
     failed = Signal(str)
     result = Signal(object, float)   # ultralytics results, latency in seconds
 
-    def __init__(self, model_path: str, imgsz: int, conf: float, device):
+    def __init__(self, model_path: str, imgsz: int, conf: float, device,
+                 track: bool = True):
         super().__init__()
         self._path = str(model_path)
         self._imgsz = int(imgsz)
         self._conf = float(conf)
         self._device = device
+        self._track = bool(track)
         self._model = None
         self._stopping = False
 
@@ -58,7 +60,13 @@ class InferenceWorker(QObject):
             args["device"] = self._device
         started = time.perf_counter()
         try:
-            results = self._model.predict(frame, **args)
+            if self._track:
+                # persist=True is what carries the tracker's state between
+                # calls; without it every frame starts a fresh tracker and each
+                # object is "new" forever, which is the same as not tracking.
+                results = self._model.track(frame, persist=True, **args)
+            else:
+                results = self._model.predict(frame, **args)
         except Exception as exc:
             # One bad frame must not take the view down; the readout says so and
             # the next frame gets its own try.

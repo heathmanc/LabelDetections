@@ -274,6 +274,34 @@ def validate_label_def(label: LabelDef) -> list[str]:
     return issues
 
 
+# Fields a typed query is matched against. Everything an operator might
+# reasonably remember about a label: what it is called, what it is, what family
+# it trains under, its revision, and the part number on the purchase order.
+SEARCH_FIELDS = ("label_id", "name", "family", "revision", "part_number", "vendor")
+
+
+def match_label(label: "LabelDef", query: str) -> bool:
+    """Does a label match a typed query?
+
+    Every whitespace-separated term must appear somewhere, in any field and in
+    any order -- so "g31 warn" finds the G31 warning label without anyone having
+    to remember whether it was named warning_g31 or g31_warning. Matching one
+    field with one substring is not enough once there are hundreds: the operator
+    remembers something about the label, not its exact id.
+    """
+    terms = str(query or "").lower().split()
+    if not terms:
+        return True
+    haystack = " ".join(
+        str(getattr(label, field, "") or "").lower() for field in SEARCH_FIELDS)
+    return all(term in haystack for term in terms)
+
+
+def search_labels(labels: list["LabelDef"], query: str) -> list["LabelDef"]:
+    """The labels matching a query, in the order given."""
+    return [label for label in labels if match_label(label, query)]
+
+
 class LabelLibrary:
     """All known labels, keyed by ``label_id``."""
 
@@ -307,6 +335,11 @@ class LabelLibrary:
 
     def by_family(self, family: str) -> list[LabelDef]:
         return [l for l in self.all() if l.family == family]
+
+    def search(self, query: str, family: str = "") -> list[LabelDef]:
+        """Labels matching a typed query, optionally narrowed to one family."""
+        found = search_labels(self.all(), query)
+        return [l for l in found if l.family == family] if family else found
 
     def families_in_use(self) -> list[str]:
         """Detector classes actually needed by the library, in canonical order.

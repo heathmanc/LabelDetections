@@ -132,3 +132,121 @@ def capture_note(captured: int, limit: int, last_reason: str) -> str:
     if not last_reason:
         return f"Armed — {captured}/{limit} kept this session."
     return f"Armed — {captured}/{limit} kept. Last: {last_reason}."
+
+
+# --- tracking --------------------------------------------------------------
+
+# A track that has not been seen for this long is dropped from the readout.
+# Long enough to survive a few missed frames on a struggling detection, short
+# enough that a battery taken away stops being listed.
+TRACK_TTL_S = 2.0
+
+
+@dataclass
+class Track:
+    """What one tracked object has done since it appeared.
+
+    Per-frame confidence flickers -- the same label reads 0.91, 0.87, 0.94 on
+    consecutive frames -- and reading a single number off a moving overlay tells
+    you almost nothing. A track that has been held for sixty frames at a mean of
+    0.91 tells you the model has it; one that keeps being lost and re-acquired
+    under a new id tells you it does not, which is the failure the single number
+    hides completely.
+    """
+    track_id: int
+    name: str
+    frames: int = 0
+    last_conf: float = 0.0
+    min_conf: float = 1.0
+    max_conf: float = 0.0
+    _sum: float = 0.0
+    last_seen: float = 0.0
+
+    def record(self, conf: float, now: float) -> None:
+        conf = float(conf)
+        self.frames += 1
+        self._sum += conf
+        self.last_conf = conf
+        self.min_conf = min(self.min_conf, conf)
+        self.max_conf = max(self.max_conf, conf)
+        self.last_seen = now
+
+    @property
+    def mean_conf(self) -> float:
+        return self._sum / self.frames if self.frames else 0.0
+
+
+class TrackBook:
+    """Per-track history across frames, pruned as objects leave."""
+
+    def __init__(self, ttl_s: float = TRACK_TTL_S):
+        self.ttl_s = float(ttl_s)
+        self._tracks: dict[int, Track] = {}
+        # Counted rather than inferred from the id: trackers reuse ids, and
+        # "how many times did it lose and re-acquire" is the number that says
+        # whether the model actually holds the object.
+        self.reacquired = 0
+
+    def update(self, detections, now: float | None = None) -> None:
+        """``detections`` are ``(track_id, name, confidence)``; ids may be None."""
+        now = time.monotonic() if now is None else now
+        for track_id, name, conf in detections:
+            if track_id is None:
+                continue
+            key = int(track_id)
+            track = self._tracks.get(key)
+            if track is None:
+                track = Track(track_id=key, name=str(name))
+                self._tracks[key] = track
+            elif track.name != str(name):
+                # The tracker kept the id but the classifier changed its mind.
+                # That is a real thing to see, so the track restarts under the
+                # new name rather than averaging two classes together.
+                self.reacquired += 1
+                track = Track(track_id=key, name=str(name))
+                self._tracks[key] = track
+            track.record(conf, now)
+        self.prune(now)
+
+    def prune(self, now: float | None = None) -> None:
+        now = time.monotonic() if now is None else now
+        for key in [k for k, t in self._tracks.items() if now - t.last_seen > self.ttl_s]:
+            del self._tracks[key]
+
+    def rows(self) -> list[Track]:
+        """Longest-held first: the stable objects are the ones worth reading."""
+        return sorted(self._tracks.values(), key=lambda t: (-t.frames, t.track_id))
+
+    def reset(self) -> None:
+        self._tracks.clear()
+        self.reacquired = 0
+
+    def text(self) -> str:
+        rows = self.rows()
+        if not rows:
+            return "No tracked objects."
+        lines = []
+        for track in rows:
+            lines.append(
+                f"#{track.track_id} {track.name}: {track.last_conf:.2f} now, "
+                f"{track.mean_conf:.2f} mean over {track.frames} frames "
+                f"({track.min_conf:.2f}-{track.max_conf:.2f})")
+        return "\n".join(lines)
+
+
+def track_summary(book: TrackBook, family: str, label_id: str,
+                  rolling: Rolling) -> str:
+    """The readout when tracking is on."""
+    rows = book.rows()
+    lines = [f"{len(rows)} tracked   {rolling.mean_ms:.0f} ms   {rolling.rate:.1f}/s"]
+    if family:
+        mine = [t for t in rows if t.name == family]
+        if mine:
+            best = mine[0]
+            lines.append(f"{label_id}: held {best.frames} frames, "
+                         f"mean {best.mean_conf:.2f}")
+        else:
+            lines.append(f"{label_id} ({family}): NOT TRACKED")
+    lines.append("")
+    lines.append(book.text())
+    return "\n".join(lines)

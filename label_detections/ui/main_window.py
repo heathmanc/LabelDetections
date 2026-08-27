@@ -346,6 +346,8 @@ class MainWindow(QMainWindow):
         self._live_overlay_scale = (1.0, 1.0)
         self._live_rolling = live_logic.Rolling()
         self._live_gate = live_logic.CaptureGate()
+        self._live_tracks = live_logic.TrackBook()
+        self._live_tracking = True
         self._live_last_started = 0.0
         # The last frame of a capture burst, opened when the preview stops.
         self._last_capture_path: Path | None = None
@@ -1793,6 +1795,16 @@ class MainWindow(QMainWindow):
         row.addWidget(self.live_stop_btn)
         cv_.addLayout(row)
 
+        self.live_track_check = QCheckBox("Track objects across frames")
+        self.live_track_check.setChecked(True)
+        self.live_track_check.setToolTip(
+            "Gives each object a stable id, so confidence can be read as a held "
+            "average instead of a per-frame flicker.\n\n"
+            "An object that keeps being lost and re-acquired under a new id is "
+            "the failure a single confidence number hides completely.\n\n"
+            "Takes effect on the next Start.")
+        cv_.addWidget(self.live_track_check)
+
         self.live_status_label = QLabel("Stopped.")
         self.live_status_label.setWordWrap(True)
         cv_.addWidget(self.live_status_label)
@@ -1865,15 +1877,19 @@ class MainWindow(QMainWindow):
 
         self._live_rolling = live_logic.Rolling()
         self._live_gate = live_logic.CaptureGate()
+        self._live_tracks = live_logic.TrackBook()
         self._live_last_started = 0.0
         self._live_busy = False
         self._live_frame = None
         self._live_counts = {}
 
         self._live_thread = QThread(self)
+        self._live_tracking = self.live_track_check.isChecked()
+        self._live_tracks = live_logic.TrackBook()
         self._live_worker = InferenceWorker(
             model_path, int(self.test_imgsz_spin.value()),
-            float(self.test_conf_spin.value()), self._model_test_device_arg())
+            float(self.test_conf_spin.value()), self._model_test_device_arg(),
+            track=self._live_tracking)
         self._live_worker.moveToThread(self._live_thread)
         self._live_worker.loaded.connect(self._on_live_loaded)
         self._live_worker.failed.connect(self._on_live_failed)
@@ -1951,8 +1967,16 @@ class MainWindow(QMainWindow):
 
         label = self.library.get(self.label_id) if self.label_id else None
         family = str(getattr(label, "family", "") or "") if label else ""
-        self.live_readout.setPlainText(live_logic.frame_summary(
-            counts, family, self.label_id or "no label", self._live_rolling))
+        name = self.label_id or "no label"
+        if getattr(self, "_live_tracking", False):
+            self._live_tracks.update(
+                [(i.get("track_id"), i.get("name"), i.get("conf", 0.0)) for i in items])
+            self.live_readout.setPlainText(
+                live_logic.track_summary(self._live_tracks, family, name,
+                                         self._live_rolling))
+        else:
+            self.live_readout.setPlainText(live_logic.frame_summary(
+                counts, family, name, self._live_rolling))
 
         if not self.live_auto_check.isChecked():
             return
@@ -2097,12 +2121,27 @@ class MainWindow(QMainWindow):
         label_btn_row.addWidget(open_btn)
         label_btn_row.addWidget(edit_btn)
 
+        self.label_search_edit = QLineEdit()
+        self.label_search_edit.setPlaceholderText("Filter labels...")
+        self.label_search_edit.setClearButtonEnabled(True)
+        self.label_search_edit.setToolTip(
+            "Every word has to appear somewhere -- id, description, family, "
+            "revision, part number or vendor -- in any order.\n\n"
+            "So \"g31 warn\" finds the G31 warning label without having to "
+            "remember whether it was named warning_g31 or g31_warning.")
+        # Filtering on each keystroke: the library is in memory and the list is
+        # a few hundred rows at worst, so there is nothing to debounce.
+        self.label_search_edit.textChanged.connect(lambda _t: self._refresh_labels())
+
         self.label_filter_combo = QComboBox()
         self.label_filter_combo.setToolTip("Show only labels in one detector family.")
         self.label_filter_combo.currentIndexChanged.connect(lambda _i: self._refresh_labels())
         filter_row = QHBoxLayout()
         filter_row.addWidget(QLabel("Show family"))
         filter_row.addWidget(self.label_filter_combo, 1)
+
+        self.label_count_label = QLabel()
+        self.label_count_label.setStyleSheet("color: #94a3b8;")
 
         # Image library location. On a visible tab rather than only in the Tools
         # menu, because the menu bar is hidden (see _build_menu).
@@ -2141,7 +2180,9 @@ class MainWindow(QMainWindow):
         layout.addWidget(add_btn)
         layout.addLayout(label_btn_row)
         layout.addWidget(remove_btn)
+        layout.addWidget(self.label_search_edit)
         layout.addLayout(filter_row)
+        layout.addWidget(self.label_count_label)
         layout.addWidget(self.label_list)
         layout.addWidget(library_box)
         self._reload_family_filter_combo()
@@ -2171,11 +2212,12 @@ class MainWindow(QMainWindow):
         wanted = ""
         if hasattr(self, "label_filter_combo") and self.label_filter_combo.currentIndex() > 0:
             wanted = self.label_filter_combo.currentText()
+        query = (self.label_search_edit.text()
+                 if hasattr(self, "label_search_edit") else "")
 
+        matched = self.library.search(query, wanted)
         self.label_list.clear()
-        for label in self.library.all():
-            if wanted and str(label.family) != wanted:
-                continue
+        for label in matched:
             statuses = list(persistence.dataset_statuses(label.label_id).values())
             ready = sum(1 for s in statuses if review_logic.export_ready(s))
             target = max(1, int(getattr(label, "train_target", 150) or 150))
@@ -2184,6 +2226,13 @@ class MainWindow(QMainWindow):
                 f"{mark} {label.label_id}  [{label.family}]  {ready}/{target}")
             item.setData(Qt.ItemDataRole.UserRole, label.label_id)
             self.label_list.addItem(item)
+
+        if hasattr(self, "label_count_label"):
+            total = len(self.library)
+            if len(matched) == total:
+                self.label_count_label.setText(f"{total} label(s)")
+            else:
+                self.label_count_label.setText(f"{len(matched)} of {total} label(s)")
 
         self._refresh_active_label_panel()
 
@@ -4948,6 +4997,7 @@ class MainWindow(QMainWindow):
                     polys = []
                 confs = self._safe_np(obb, "conf")
                 clss = self._safe_np(obb, "cls")
+                ids = self._safe_np(obb, "id")
                 if len(polys):
                     for i, poly in enumerate(polys):
                         pts = np.array(poly, dtype=float).reshape(-1, 2)[:4]
@@ -4956,15 +5006,18 @@ class MainWindow(QMainWindow):
                         cls_id = int(clss[i]) if i < len(clss) else 0
                         name = self._model_class_name(names, cls_id)
                         conf = float(confs[i]) if i < len(confs) else 0.0
+                        track_id = int(ids[i]) if i < len(ids) else None
                         items.append({
                             "type": "other_obb",
+                            "track_id": track_id,
                             "points": [[float(x), float(y)] for x, y in pts],
                             "cx": float(np.mean(pts[:, 0])),
                             "cy": float(np.mean(pts[:, 1])),
                             "conf": conf,
                             "cls_id": cls_id,
                             "name": name,
-                            "label": f"{name} {conf:.2f}",
+                            "label": (f"{name} #{track_id} {conf:.2f}"
+                                      if track_id is not None else f"{name} {conf:.2f}"),
                         })
                         counts[name] = counts.get(name, 0) + 1
                     continue
@@ -4975,20 +5028,24 @@ class MainWindow(QMainWindow):
             xyxy = self._safe_np(boxes, "xyxy")
             confs = self._safe_np(boxes, "conf")
             clss = self._safe_np(boxes, "cls")
+            ids = self._safe_np(boxes, "id")
             for i, box in enumerate(xyxy):
                 cls_id = int(clss[i]) if i < len(clss) else 0
                 name = self._model_class_name(names, cls_id)
                 x1, y1, x2, y2 = [float(v) for v in box[:4]]
                 conf = float(confs[i]) if i < len(confs) else 0.0
+                track_id = int(ids[i]) if i < len(ids) else None
                 items.append({
                     "type": "other_box",
+                    "track_id": track_id,
                     "xyxy": [x1, y1, x2, y2],
                     "cx": (x1 + x2) / 2.0,
                     "cy": (y1 + y2) / 2.0,
                     "conf": conf,
                     "cls_id": cls_id,
                     "name": name,
-                    "label": f"{name} {conf:.2f}",
+                    "label": (f"{name} #{track_id} {conf:.2f}" if track_id is not None
+                              else f"{name} {conf:.2f}"),
                 })
                 counts[name] = counts.get(name, 0) + 1
         return items, counts

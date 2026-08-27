@@ -153,9 +153,13 @@ def _label(win, label_id="live_sp", family="spec_plate"):
 
 
 class _Results:
-    """The shape of one Ultralytics result, enough for the overlay code."""
+    """The shape of one Ultralytics result, enough for the overlay code.
 
-    def __init__(self, boxes, names, confs, classes):
+    ``ids`` present is what a tracked result looks like; absent is a plain
+    predict, where ``boxes.id`` is None.
+    """
+
+    def __init__(self, boxes, names, confs, classes, ids=None):
         self.names = names
         self.obb = None
 
@@ -164,6 +168,7 @@ class _Results:
                 self.xyxy = np.array(boxes, dtype=np.float32)
                 self.conf = np.array(confs, dtype=np.float32)
                 self.cls = np.array(classes, dtype=np.float32)
+                self.id = np.array(ids, dtype=np.float32) if ids is not None else None
 
         self.boxes = _Boxes()
 
@@ -299,10 +304,11 @@ def test_an_armed_view_leaves_a_frame_the_model_handled():
 
 
 @ui
-def test_the_readout_reports_what_the_model_saw():
+def test_the_untracked_readout_reports_what_the_model_saw():
     win = _window()
     _label(win, "live_readout")
     win._live_thread = object()
+    win._live_tracking = False
     win._live_overlay_scale = (1.0, 1.0)
     try:
         win._on_live_result(
@@ -310,6 +316,31 @@ def test_the_readout_reports_what_the_model_saw():
         text = win.live_readout.toPlainText()
         assert "1 detection(s)" in text
         assert "live_readout (spec_plate): 1 found" in text
+    finally:
+        win._live_thread = None
+        win._live_tracking = True
+
+
+@ui
+def test_the_tracked_readout_reports_a_held_average_not_a_flicker():
+    """One frame's confidence says almost nothing; a held average says whether
+    the model actually has the object."""
+    win = _window()
+    _label(win, "live_tracked")
+    win._live_thread = object()
+    win._live_tracking = True
+    win._live_tracks = ld.TrackBook()
+    win._live_overlay_scale = (1.0, 1.0)
+    try:
+        for conf in (0.88, 0.94, 0.91):
+            win._on_live_result(
+                [_Results([[10, 10, 40, 40]], {0: "spec_plate"}, [conf], [0],
+                          ids=[7])], 0.02)
+        text = win.live_readout.toPlainText()
+        assert "1 tracked" in text
+        assert "live_tracked: held 3 frames" in text
+        assert "#7 spec_plate:" in text
+        assert "0.91 mean over 3 frames" in text
     finally:
         win._live_thread = None
 
@@ -345,3 +376,65 @@ def test_it_refuses_to_start_without_a_model_chosen():
         mw_mod.QMessageBox.information = original
     assert "Test Models tab" in shown.get("text", "")
     assert win._live_running() is False
+
+
+# --- tracking --------------------------------------------------------------
+
+def test_a_track_accumulates_rather_than_reporting_one_frame():
+    book = ld.TrackBook()
+    for i, conf in enumerate((0.90, 0.94, 0.86)):
+        book.update([(1, "spec_plate", conf)], now=100 + i * 0.1)
+    track = book.rows()[0]
+    assert track.frames == 3
+    assert track.last_conf == pytest.approx(0.86)
+    assert track.mean_conf == pytest.approx(0.90)
+    assert (track.min_conf, track.max_conf) == pytest.approx((0.86, 0.94))
+
+
+def test_the_longest_held_track_is_listed_first():
+    book = ld.TrackBook()
+    for i in range(5):
+        book.update([(1, "spec_plate", 0.9)], now=100 + i * 0.1)
+    book.update([(2, "cert_mark", 0.9)], now=100.5)
+    assert [t.track_id for t in book.rows()] == [1, 2]
+
+
+def test_an_object_that_leaves_stops_being_listed():
+    book = ld.TrackBook(ttl_s=1.0)
+    book.update([(1, "spec_plate", 0.9), (2, "cert_mark", 0.7)], now=100)
+    book.update([(1, "spec_plate", 0.9)], now=102)
+    assert [t.track_id for t in book.rows()] == [1]
+
+
+def test_a_track_whose_class_changes_restarts_rather_than_averaging_two():
+    """The tracker kept the id but the classifier changed its mind. Averaging
+    those together would report a confident detection of neither."""
+    book = ld.TrackBook()
+    for i in range(4):
+        book.update([(1, "spec_plate", 0.95)], now=100 + i * 0.1)
+    book.update([(1, "warning_label", 0.60)], now=100.5)
+    track = book.rows()[0]
+    assert track.name == "warning_label"
+    assert track.frames == 1
+    assert book.reacquired == 1
+
+
+def test_detections_with_no_id_are_ignored_by_the_book():
+    """A plain predict has no ids; the book must not invent them."""
+    book = ld.TrackBook()
+    book.update([(None, "spec_plate", 0.9)], now=100)
+    assert book.rows() == []
+
+
+def test_the_track_summary_says_when_the_active_label_is_not_tracked():
+    book = ld.TrackBook()
+    book.update([(1, "cert_mark", 0.9)], now=100)
+    rolling = ld.Rolling()
+    rolling.record(0.01, now=100)
+    text = ld.track_summary(book, "spec_plate", "sp_g31", rolling)
+    assert "sp_g31 (spec_plate): NOT TRACKED" in text
+    assert "#1 cert_mark" in text
+
+
+def test_an_empty_book_reads_as_empty_rather_than_blank():
+    assert ld.TrackBook().text() == "No tracked objects."

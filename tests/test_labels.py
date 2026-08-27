@@ -116,3 +116,53 @@ def test_library_add_get_remove():
 def test_families_in_use_always_includes_the_battery_face():
     lib = LabelLibrary([LabelDef(label_id="a", family="cert_mark")])
     assert lib.families_in_use() == ["battery_side", "cert_mark"]
+
+
+# --- searching a library that has grown large -------------------------------
+
+def _library_of(*specs):
+    return LabelLibrary([
+        LabelDef(label_id=i, name=n, family=f, revision=r, part_number=p)
+        for i, n, f, r, p in specs
+    ])
+
+
+LIB = _library_of(
+    ("warning_g31_en", "G31 warning, English", "warning_label", "C", "LBL-8871"),
+    ("warning_g31_fr", "G31 warning, French", "warning_label", "C", "LBL-8872"),
+    ("spec_plate_g31", "G31 spec plate", "spec_plate", "D", "LBL-4410"),
+    ("spec_plate_g27", "G27 spec plate", "spec_plate", "A", "LBL-4409"),
+    ("ul_mark", "UL certification mark", "cert_mark", "", "LBL-0031"),
+)
+
+
+def test_an_empty_query_matches_everything():
+    assert len(LIB.search("")) == 5
+    assert len(LIB.search("   ")) == 5
+
+
+def test_every_term_must_appear_but_the_order_does_not_matter():
+    """The operator remembers something about the label, not its exact id."""
+    both = ["warning_g31_en", "warning_g31_fr"]
+    assert [l.label_id for l in LIB.search("g31 warn")] == both
+    assert [l.label_id for l in LIB.search("warn g31")] == both
+
+
+def test_a_term_can_match_any_field():
+    assert [l.label_id for l in LIB.search("french")] == ["warning_g31_fr"]
+    assert [l.label_id for l in LIB.search("LBL-4410")] == ["spec_plate_g31"]
+    assert [l.label_id for l in LIB.search("cert_mark")] == ["ul_mark"]
+    assert len(LIB.search("D")) >= 1          # revision
+
+
+def test_matching_is_case_insensitive():
+    assert [l.label_id for l in LIB.search("G31 SPEC")] == ["spec_plate_g31"]
+
+
+def test_terms_that_match_nothing_return_nothing():
+    assert LIB.search("g31 forklift") == []
+
+
+def test_the_family_filter_narrows_the_search_rather_than_replacing_it():
+    assert [l.label_id for l in LIB.search("g31", "spec_plate")] == ["spec_plate_g31"]
+    assert len(LIB.search("", "warning_label")) == 2

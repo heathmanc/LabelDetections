@@ -782,3 +782,56 @@ def test_opening_a_marked_row_loads_the_real_image(monkeypatch):
 
     assert win.current_image_path == source
     assert win.canvas.image_w > 0        # it actually decoded
+
+
+# --- filtering a large label list -------------------------------------------
+
+def test_typing_narrows_the_label_list_and_says_by_how_much():
+    """With hundreds of labels the list is unusable without this."""
+    win = _window()
+    for label_id, family in [("flt_warning_g31", "warning_label"),
+                             ("flt_spec_g31", "spec_plate"),
+                             ("flt_spec_g27", "spec_plate")]:
+        _define(win, label_id, family=family)
+
+    win.label_search_edit.setText("")
+    win.label_filter_combo.setCurrentIndex(0)
+    win._refresh_labels()
+    everything = win.label_list.count()
+    assert "label(s)" in win.label_count_label.text()
+
+    win.label_search_edit.setText("flt_ g31")
+    rows = [win.label_list.item(i).text() for i in range(win.label_list.count())]
+    assert len(rows) == 2 and win.label_list.count() < everything
+    assert all("g31" in r for r in rows)
+    assert f"2 of {everything}" in win.label_count_label.text()
+
+    win.label_search_edit.setText("")
+    assert win.label_list.count() == everything
+
+
+def test_the_text_filter_and_the_family_filter_compose():
+    win = _window()
+    _define(win, "flt_combo_warn", family="warning_label")
+    _define(win, "flt_combo_spec", family="spec_plate")
+    try:
+        win.label_search_edit.setText("flt_combo")
+        assert win.label_list.count() == 2
+        index = win.label_filter_combo.findText("spec_plate")
+        win.label_filter_combo.setCurrentIndex(index)
+        rows = [win.label_list.item(i).text() for i in range(win.label_list.count())]
+        assert rows and all("flt_combo_spec" in r for r in rows)
+    finally:
+        win.label_search_edit.setText("")
+        win.label_filter_combo.setCurrentIndex(0)
+
+
+def test_a_query_matching_nothing_empties_the_list_rather_than_erroring():
+    win = _window()
+    _define(win, "flt_empty")
+    try:
+        win.label_search_edit.setText("no such label anywhere")
+        assert win.label_list.count() == 0
+        assert "0 of" in win.label_count_label.text()
+    finally:
+        win.label_search_edit.setText("")
