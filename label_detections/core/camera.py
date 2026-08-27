@@ -310,6 +310,10 @@ class CameraSource:
     def __init__(self) -> None:
         self.cap = None
         self.converter = None
+        # Surfaced instead of raised: a read that fails must be reportable
+        # without taking the reader thread down with it.
+        self.last_read_error = ""
+        self.read_failures = 0
         self._gst: GstNativeCamera | None = None
         self.source: str | int | None = None
         self.last_result = CameraOpenResult(False, "Not opened")
@@ -633,19 +637,39 @@ class CameraSource:
         return True
 
     def _read_basler_frame(self, timeout_ms: int = 5000):
+        """One frame, or (False, None). Never raises.
+
+        TimeoutHandling_Return does not return None on a timeout -- it returns
+        an INVALID grab result, and calling GrabSucceeded() on one of those
+        throws. Only `grab is None` was checked, so every timeout raised, and
+        the reader thread had no guard: one slow frame killed the camera for
+        the rest of the session, leaving a traceback on the console and a
+        window showing nothing.
+        """
         if self.cap is None or pylon is None:
             return False, None
-        if not self.cap.IsGrabbing():
-            return False, None
-        grab = self.cap.RetrieveResult(timeout_ms, pylon.TimeoutHandling_Return)
+        grab = None
         try:
-            if grab is None or not grab.GrabSucceeded():
+            if not self.cap.IsGrabbing():
                 return False, None
-            frame = self.converter.Convert(grab).GetArray() if self.converter is not None else grab.Array
+            grab = self.cap.RetrieveResult(timeout_ms, pylon.TimeoutHandling_Return)
+            if grab is None:
+                return False, None
+            # IsValid() first: an invalid result cannot be asked anything else.
+            if not grab.IsValid() or not grab.GrabSucceeded():
+                return False, None
+            frame = (self.converter.Convert(grab).GetArray()
+                     if self.converter is not None else grab.Array)
             return True, frame
+        except Exception as exc:
+            self.last_read_error = f"{type(exc).__name__}: {exc}"
+            return False, None
         finally:
             if grab is not None:
-                grab.Release()
+                try:
+                    grab.Release()
+                except Exception:
+                    pass
 
     def open(
         self,
@@ -846,13 +870,30 @@ class CameraSource:
         return True
 
     def _reader_loop(self) -> None:
+        """Pull frames until stopped. One bad read must never end the thread.
+
+        It could, and did: an exception here killed the reader outright, and a
+        dead reader is indistinguishable from a camera that has stopped
+        producing -- except for a traceback on a console nobody is watching.
+        Failures are counted and reported instead, and the loop keeps going.
+        """
         while self._running and self.is_open():
-            if self.last_result.backend_name == "Basler/Pylon":
-                ok, frame = self._read_basler_frame(timeout_ms=1000)
-            elif self._gst is not None:
-                ok, frame = self._gst.read()
-            else:
-                ok, frame = self.cap.read()
+            try:
+                if self.last_result.backend_name == "Basler/Pylon":
+                    ok, frame = self._read_basler_frame(timeout_ms=1000)
+                elif self._gst is not None:
+                    ok, frame = self._gst.read()
+                else:
+                    ok, frame = self.cap.read()
+            except Exception as exc:
+                self.last_read_error = f"{type(exc).__name__}: {exc}"
+                self.read_failures += 1
+                with self._lock:
+                    self._latest_ok = False
+                time.sleep(0.02)
+                continue
+            if not ok:
+                self.read_failures += 1
             if ok and frame is not None:
                 with self._lock:
                     self._latest_frame = frame

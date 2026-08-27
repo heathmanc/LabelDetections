@@ -543,3 +543,55 @@ def test_the_pixel_format_is_only_offered_where_it_exists():
     win.backend_combo.setCurrentText("Basler/Pylon")
     win._on_camera_backend_changed("Basler/Pylon")
     assert win.pixel_format_combo.isEnabled()
+
+
+def test_a_basler_timeout_does_not_raise_out_of_the_read():
+    """TimeoutHandling_Return gives back an INVALID grab result, not None, and
+    asking an invalid result anything throws. Only `is None` was checked, so
+    every timeout raised -- and the reader thread had no guard, so one slow
+    frame killed the camera for the session."""
+    from label_detections.core import camera as cam
+
+    class TimedOut:
+        """What pypylon hands back when a grab times out."""
+        def IsValid(self):
+            return False
+
+        def GrabSucceeded(self):
+            raise RuntimeError("attribute not accessible on an invalid result")
+
+        def Release(self):
+            pass
+
+    src = cam.CameraSource()
+    src.cap = type("C", (), {"IsGrabbing": lambda s: True,
+                             "RetrieveResult": lambda s, t, h: TimedOut()})()
+    src.converter = None
+    if cam.pylon is None:
+        import types
+        cam.pylon = types.SimpleNamespace(TimeoutHandling_Return=0)
+    ok, frame = src._read_basler_frame(timeout_ms=10)
+    assert ok is False and frame is None
+
+
+def test_a_read_that_throws_is_recorded_rather_than_raised():
+    from label_detections.core import camera as cam
+
+    class Exploding:
+        def IsValid(self):
+            return True
+
+        def GrabSucceeded(self):
+            raise RuntimeError("pylon exploded")
+
+        def Release(self):
+            pass
+
+    src = cam.CameraSource()
+    src.cap = type("C", (), {"IsGrabbing": lambda s: True,
+                             "RetrieveResult": lambda s, t, h: Exploding()})()
+    src.converter = None
+    ok, _ = src._read_basler_frame(timeout_ms=10)
+    assert ok is False
+    assert "pylon exploded" in src.last_read_error
+    assert "RuntimeError" in src.last_read_error, "the type names the cause"

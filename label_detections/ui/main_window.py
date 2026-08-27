@@ -4396,8 +4396,12 @@ class MainWindow(QMainWindow):
         if not ok or frame is None:
             self.blank_frame_count = getattr(self, "blank_frame_count", 0) + 1
             if self.blank_frame_count in (1, 30, 120):
+                why = getattr(self.camera, "last_read_error", "")
                 self.status.showMessage(
-                    f"Camera is open but no frame was read ({self.blank_frame_count} misses). Try Stop/Open, V4L2 backend, source 1, or default resolution.",
+                    f"Camera is open but no frame was read "
+                    f"({self.blank_frame_count} misses)."
+                    + (f" Last error: {why}." if why else "")
+                    + " Try Stop/Open, V4L2 backend, source 1, or default resolution.",
                     8000,
                 )
             return
