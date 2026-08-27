@@ -905,9 +905,17 @@ class MainWindow(QMainWindow):
         self.test_conf_spin.setValue(float(_ts.get("conf", 0.45)))
         self.test_device_edit = QLineEdit(str(_ts.get("device", "0")))
         self.test_device_edit.setPlaceholderText("0, cpu, cuda:0")
+        self.test_device_edit.setToolTip(
+            "Used by Run Test AND by Live Detect -- for BOTH stages. The stage 2 "
+            "classifier runs on this same device on purpose: splitting the two "
+            "halves of one pipeline across devices would pay a host round-trip "
+            "for every crop.\n\n"
+            "0 means GPU 0. 'cpu' forces the CPU. Live Detect reports which "
+            "device the models actually ended up on when it loads them, which "
+            "is the only way to be sure.")
         settings.addRow("Image size", self.test_imgsz_spin)
         settings.addRow("Confidence", self.test_conf_spin)
-        settings.addRow("Device", self.test_device_edit)
+        settings.addRow("Device (both stages)", self.test_device_edit)
         self.test_hide_saved_labels_check = QCheckBox("Hide saved labels while testing")
         self.test_hide_saved_labels_check.setChecked(bool(_ts.get("hide_saved_labels", True)))
         self.test_hide_saved_labels_check.setToolTip("Hides existing/manual labels on the canvas during model testing without deleting them.")

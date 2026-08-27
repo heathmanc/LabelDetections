@@ -921,3 +921,30 @@ def test_a_fast_model_is_not_lectured():
     for i in range(5):
         r.record(0.006, now=100 + i * 0.01)
     assert ld.slow_hint(r, "Device: CUDA available") == ""
+
+
+def test_a_bare_zero_becomes_cuda_zero_not_cpu_zero():
+    """The inversion that put the model on the CPU while the field said 0:
+    torch.Module.to(0) means CPU device 0, not GPU 0."""
+    from label_detections.ui.live_detect import InferenceWorker
+
+    def resolve(dev):
+        w = InferenceWorker.__new__(InferenceWorker)
+        w._device = dev
+        return InferenceWorker._torch_device(w)
+
+    assert resolve(0) == "cuda:0"
+    assert resolve("0") == "cuda:0"
+    assert resolve("cpu") == "cpu"
+    assert resolve("cuda:1") == "cuda:1"
+    assert resolve(None) == "" and resolve("") == ""
+
+
+@ui
+def test_one_device_field_covers_both_stages():
+    """There is no separate classifier device on purpose -- two halves of one
+    pipeline on two devices would pay a host round-trip per crop."""
+    win = _window()
+    tip = win.test_device_edit.toolTip()
+    assert "BOTH stages" in tip
+    assert "classifier" in tip

@@ -70,9 +70,33 @@ class InferenceWorker(QObject):
                 f"Put it in the 'Stage 2 classifier' field on this tab, and put "
                 f"the detector run's best.pt in the Test Models field.")
             return
+        # Move the model onto the device NOW rather than leaving it to the
+        # first predict call. Ultralytics takes device= per call, so a model
+        # loaded here sits on the CPU until inference happens -- which made the
+        # device report true at a useless moment ("model on cpu; asked for 0")
+        # and, worse, left it genuinely on the CPU whenever the per-call move
+        # did not take. Doing it here means the report describes what will
+        # actually run, and a failure surfaces at load with a name on it
+        # instead of as a mysteriously slow model.
+        self._device_error = ""
+        target = self._torch_device()
+        if target:
+            try:
+                self._model.to(target)
+            except Exception as exc:
+                self._device_error = f"Could not move the detector to {target}: {exc}"
+
         if self._classifier_path:
             try:
                 self._classifier = YOLO(self._classifier_path)
+                # Same device as the detector, deliberately: two stages of one
+                # pipeline on two devices would pay a host round-trip per crop.
+                if target:
+                    try:
+                        self._classifier.to(target)
+                    except Exception as exc:
+                        self._device_error += (
+                            f" Could not move the classifier to {target}: {exc}")
                 cls_task = str(getattr(self._classifier, "task", "") or "")
                 if cls_task and cls_task != "classify":
                     self._classifier = None
@@ -89,6 +113,23 @@ class InferenceWorker(QObject):
         which = ("detector + classifier" if self._classifier is not None
                  else f"{task or 'detector'} only, no stage 2")
         self.loaded.emit(f"Loaded {which}: {self._path}\n{self._device_report()}")
+
+    def _torch_device(self) -> str:
+        """The device string torch wants, from what the UI collected.
+
+        The UI hands over 0 / "cpu" / "cuda:0". torch.Module.to needs a string
+        or a torch.device, and a bare 0 means "CPU 0" to it, not "GPU 0" -- the
+        exact inversion that puts a model on the CPU while the field says 0.
+        """
+        dev = self._device
+        if dev is None or dev == "":
+            return ""
+        if isinstance(dev, int):
+            return f"cuda:{dev}"
+        text = str(dev).strip()
+        if text.isdigit():
+            return f"cuda:{text}"
+        return text
 
     def _device_report(self) -> str:
         """What hardware this is actually running on.
@@ -116,11 +157,16 @@ class InferenceWorker(QObject):
             where = str(next(self._model.model.parameters()).device)
         except Exception:
             pass
-        asked = self._device if self._device is not None else "(unset)"
-        line = f"Device: CUDA available ({name}); model on {where}; asked for {asked}."
-        if where.startswith("cpu"):
-            line += (" The model is on the CPU despite CUDA being available -- "
-                     "set Device to 0 on the Test Models tab.")
+        asked = self._torch_device() or "(unset)"
+        both = " (detector and classifier)" if self._classifier is not None else ""
+        line = (f"Device: CUDA available ({name}); model on {where}; "
+                f"asked for {asked}{both}.")
+        if getattr(self, "_device_error", ""):
+            line += "\n" + self._device_error
+        elif where.startswith("cpu"):
+            line += (" On the CPU anyway, which is why inference is slow. If "
+                     "Device is already 0, this torch build cannot run this "
+                     "card -- a 5090 is Blackwell and needs a CUDA 12.8+ wheel.")
         return line
 
     @Slot(object)
