@@ -1007,6 +1007,12 @@ class MainWindow(QMainWindow):
         # The edit takes the slack; a long checkpoint path must not push the
         # browse button off the edge of the pane.
         self.train_model_edit.setMinimumWidth(120)
+        # The left pane has a maximum width, so a full-word browse button on the
+        # same row as a path field pushes itself off the edge. Compact and
+        # fixed: the field takes every pixel of slack instead.
+        for _b in (model_browse,):
+            _b.setText("...")
+            _b.setFixedWidth(34)
         r = QHBoxLayout(); r.addWidget(self.train_model_edit, 1); r.addWidget(model_browse)
         files.addWidget(QLabel("Base model")); files.addLayout(r)
 
@@ -1028,7 +1034,7 @@ class MainWindow(QMainWindow):
         files.addLayout(r)
         layout.addWidget(files_box)
 
-        params_box = QGroupBox("Training parameters")
+        params_box = QGroupBox("Stage 1 - detector (finds the labels)")
         grid = QGridLayout(params_box)
         grid.setHorizontalSpacing(8)
         grid.setVerticalSpacing(4)
@@ -1080,7 +1086,8 @@ class MainWindow(QMainWindow):
         grid.addWidget(_lbl("yolo exe"), 3, 2); grid.addWidget(self.train_yolo_exe_edit, 3, 3)
         # Row 4: Output folder (edit spans cols 1-2, browse button in col 3)
         self.train_project_edit = QLineEdit(str(params["project"]))
-        project_browse = QPushButton("Folder...")
+        project_browse = QPushButton("...")
+        project_browse.setFixedWidth(34)
         project_browse.clicked.connect(self.browse_train_project)
         grid.addWidget(_lbl("Output folder"), 4, 0)
         grid.addWidget(self.train_project_edit, 4, 1, 1, 2)
@@ -1112,15 +1119,79 @@ class MainWindow(QMainWindow):
         grid.setColumnStretch(1, 1); grid.setColumnStretch(3, 1)
         layout.addWidget(params_box)
 
+        # --- stage 2 ------------------------------------------------------
+        cls_box = QGroupBox("Stage 2 - classifier (names the crop)")
+        cls_grid = QGridLayout(cls_box)
+        cls_grid.setHorizontalSpacing(8)
+        cls_grid.setVerticalSpacing(4)
+        cls_note = QLabel(
+            "Trains on the crop folders from Export Two-Stage. Image size here "
+            "must match the crop size that export chose -- a classifier fed a "
+            "size it did not train at loses accuracy with nothing to show for it."
+        )
+        cls_note.setWordWrap(True)
+        cls_note.setStyleSheet("color: #9aa4b2;")
+        cls_grid.addWidget(cls_note, 0, 0, 1, 4)
+
+        self.cls_model_edit = QLineEdit(str(saved.get("cls_model", "yolo11s-cls.pt")))
+        self.cls_data_edit = QLineEdit(str(saved.get("cls_data", "")))
+        self.cls_data_edit.setPlaceholderText("data/exports/two_stage_classify")
+        cls_data_browse = QPushButton("...")
+        cls_data_browse.setFixedWidth(34)
+        cls_data_browse.clicked.connect(self.browse_classifier_data)
+        self.cls_imgsz_spin = QSpinBox(); self.cls_imgsz_spin.setRange(32, 2048)
+        self.cls_imgsz_spin.setSingleStep(32)
+        self.cls_imgsz_spin.setValue(int(saved.get("cls_imgsz", 224)))
+        self.cls_epochs_spin = QSpinBox(); self.cls_epochs_spin.setRange(1, 100000)
+        self.cls_epochs_spin.setValue(int(saved.get("cls_epochs", 60)))
+        self.cls_batch_spin = QSpinBox(); self.cls_batch_spin.setRange(-1, 1024)
+        self.cls_batch_spin.setValue(int(saved.get("cls_batch", 32)))
+        self.cls_name_edit = QLineEdit(str(saved.get("cls_name", "classifier")))
+
+        cls_grid.addWidget(_lbl("Base model"), 1, 0)
+        cls_grid.addWidget(self.cls_model_edit, 1, 1, 1, 3)
+        cls_grid.addWidget(_lbl("Crops folder"), 2, 0)
+        cls_grid.addWidget(self.cls_data_edit, 2, 1, 1, 2)
+        cls_grid.addWidget(cls_data_browse, 2, 3)
+        cls_grid.addWidget(_lbl("Image size"), 3, 0); cls_grid.addWidget(self.cls_imgsz_spin, 3, 1)
+        cls_grid.addWidget(_lbl("Epochs"), 3, 2); cls_grid.addWidget(self.cls_epochs_spin, 3, 3)
+        cls_grid.addWidget(_lbl("Batch"), 4, 0); cls_grid.addWidget(self.cls_batch_spin, 4, 1)
+        cls_grid.addWidget(_lbl("Run name"), 4, 2); cls_grid.addWidget(self.cls_name_edit, 4, 3)
+        for _w in (self.cls_model_edit, self.cls_data_edit, self.cls_imgsz_spin,
+                   self.cls_epochs_spin, self.cls_batch_spin, self.cls_name_edit):
+            _w.setMinimumWidth(72)
+            _w.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        cls_grid.setColumnStretch(1, 1); cls_grid.setColumnStretch(3, 1)
+        layout.addWidget(cls_box)
+
+        fill_btn = QPushButton("Fill Both From Label Scale")
+        fill_btn.setToolTip(
+            "Measure the collected boxes and set both image sizes and both data "
+            "paths from what they say -- detector imgsz, and the classifier's "
+            "crop size read from the export that produced it.\n\n"
+            "Beats typing them: these two numbers are the ones that quietly "
+            "make a pipeline underperform when they are guessed.")
+        fill_btn.clicked.connect(self.fill_training_from_scale)
+        layout.addWidget(fill_btn)
+
         btn_row = QHBoxLayout()
-        self.train_start_btn = QPushButton("Start Training")
+        self.train_start_btn = QPushButton("Train Detector")
         self.train_start_btn.clicked.connect(self.start_training)
+        self.train_cls_btn = QPushButton("Train Classifier")
+        self.train_cls_btn.clicked.connect(self.start_classifier_training)
+        self.train_both_btn = QPushButton("Train Both")
+        self.train_both_btn.setToolTip(
+            "Detector, then classifier, one after the other. Sequential rather "
+            "than parallel: two runs sharing a GPU are slower than either alone "
+            "and usually end in an out-of-memory a few epochs in.")
+        self.train_both_btn.clicked.connect(self.start_both_training)
         self.train_stop_btn = QPushButton("Stop")
         self.train_stop_btn.setEnabled(False)
         self.train_stop_btn.clicked.connect(self.stop_training)
-        # Start takes the extra room; Stop only needs its own label width.
-        self.train_start_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        btn_row.addWidget(self.train_start_btn, 1); btn_row.addWidget(self.train_stop_btn)
+        for b in (self.train_start_btn, self.train_cls_btn, self.train_both_btn):
+            b.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            btn_row.addWidget(b, 1)
+        btn_row.addWidget(self.train_stop_btn)
         layout.addLayout(btn_row)
 
         self.train_log = QTextEdit()
@@ -1138,92 +1209,21 @@ class MainWindow(QMainWindow):
 
         # Polls the run's results.csv while training so the chart updates per epoch.
         self._results_csv_path: Path | None = None
+        # Set here, not lazily on first launch: every entry point reads it to
+        # decide whether a run is already going, so an unset attribute makes
+        # the first click raise instead of starting a run.
+        self._train_process = None
+        self._train_queue: list[tuple[dict, str]] = []
+        self._train_stage = "detector"
         self._metrics_timer = QTimer(self)
         self._metrics_timer.setInterval(3000)
         self._metrics_timer.timeout.connect(self._poll_training_metrics)
 
-        # --- Evaluate / promote -------------------------------------------
-        eval_box = QGroupBox("Evaluate and promote")
-        eval_layout = QVBoxLayout(eval_box)
-        eval_help = QLabel(
-            "Score a trained model against a labeled split (uses the Data YAML and "
-            "Task above), then promote it so Test/Auto-label/Count use it."
-        )
-        eval_help.setWordWrap(True)
-        eval_layout.addWidget(eval_help)
-
-        self.eval_model_edit = QLineEdit()
-        self.eval_model_edit.setPlaceholderText("trained best.pt to evaluate")
-        eval_model_browse = QPushButton("Model...")
-        eval_model_browse.clicked.connect(self.browse_eval_model)
-        eval_use_trained = QPushButton("Use trained")
-        eval_use_trained.setToolTip("Fill in <output folder>/<run name>/weights/best.pt from the training settings above.")
-        eval_use_trained.clicked.connect(self.use_trained_weights_for_eval)
-        # The line edit takes the slack so the two buttons keep their full width.
-        r = QHBoxLayout()
-        r.addWidget(self.eval_model_edit, 1)
-        r.addWidget(eval_model_browse)
-        r.addWidget(eval_use_trained)
-        eval_layout.addWidget(QLabel("Model to evaluate")); eval_layout.addLayout(r)
-
-        # Split selector and the action buttons get their own rows: packing a
-        # label, a combo and two buttons onto one line clipped the wider labels
-        # in the narrow left pane.
-        split_row = QHBoxLayout()
-        split_row.addWidget(QLabel("Split"))
-        self.eval_split_combo = QComboBox()
-        self.eval_split_combo.addItems(list(evaluation_logic.VALID_SPLITS))
-        split_row.addWidget(self.eval_split_combo, 1)
-        eval_layout.addLayout(split_row)
-
-        eval_btn_row = QHBoxLayout()
-        self.eval_start_btn = QPushButton("Evaluate")
-        self.eval_start_btn.clicked.connect(self.start_evaluation)
-        self.promote_btn = QPushButton("Promote model")
-        self.promote_btn.setEnabled(False)
-        self.promote_btn.setToolTip("Copy this model into data/models and set it as the active model for Test / Auto-label / Count / review queue.")
-        self.promote_btn.clicked.connect(self.promote_model)
-        for b in (self.eval_start_btn, self.promote_btn):
-            b.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-            eval_btn_row.addWidget(b)
-        eval_layout.addLayout(eval_btn_row)
-
-        self.eval_metrics_text = QTextEdit()
-        self.eval_metrics_text.setReadOnly(True)
-        self.eval_metrics_text.setMinimumHeight(140)
-        self.eval_metrics_text.setPlaceholderText("mAP / precision / recall appear here after evaluation.")
-        eval_layout.addWidget(self.eval_metrics_text)
-        layout.addWidget(eval_box)
         layout.addStretch(1)
-
-        self._train_process = None
-        self._eval_process = None
-        self._eval_buffer = ""
-        self._eval_last_model = ""
         return outer
 
-    def _gather_eval_params(self) -> dict:
-        return {
-            "task": self.train_task_combo.currentText(),
-            "model": self.eval_model_edit.text().strip(),
-            "data": self.train_data_edit.text().strip(),
-            "imgsz": int(self.train_imgsz_spin.value()),
-            "device": self.train_device_edit.text().strip(),
-            "split": self.eval_split_combo.currentText(),
-        }
 
-    def browse_eval_model(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "Select model to evaluate", "", "Model (*.pt *.engine);;All files (*)")
-        if path:
-            self.eval_model_edit.setText(path)
 
-    def use_trained_weights_for_eval(self) -> None:
-        project = self.train_project_edit.text().strip() or "data/training"
-        name = self.train_name_edit.text().strip() or "bungvision"
-        best = Path(project) / name / "weights" / "best.pt"
-        self.eval_model_edit.setText(str(best))
-        if not best.exists():
-            self.status.showMessage("Trained best.pt not found yet; train first or browse to a checkpoint.", 6000)
 
     def _python_for_subprocess(self) -> str:
         """Interpreter to use for `python -m ...` child processes.
@@ -1238,87 +1238,10 @@ class MainWindow(QMainWindow):
             return "python"
         return sys.executable
 
-    def start_evaluation(self) -> None:
-        if self._eval_process is not None:
-            QMessageBox.information(self, "Evaluate", "An evaluation is already in progress.")
-            return
-        params = self._gather_eval_params()
-        errors = evaluation_logic.validate_eval_params(params)
-        if errors:
-            QMessageBox.warning(self, "Evaluate", "Cannot evaluate:\n\n" + "\n".join(f"• {e}" for e in errors))
-            return
-        if getattr(sys, "frozen", False):
-            # Same reasoning as training: run the metrics runner inside our own
-            # process image instead of a `python -m` that does not exist here.
-            cmd = [sys.executable, training_logic.EVAL_WORKER_FLAG] + \
-                evaluation_logic.build_eval_args(params)
-        else:
-            cmd = evaluation_logic.build_eval_command(self._python_for_subprocess(), params)
 
-        proc = QProcess(self)
-        proc.setProcessChannelMode(QProcess.MergedChannels)
-        proc.setWorkingDirectory(str(DATA_DIR.parent))
-        proc.readyReadStandardOutput.connect(self._on_eval_stdout)
-        proc.finished.connect(self._on_eval_finished)
-        proc.errorOccurred.connect(self._on_eval_error)
-        self._eval_process = proc
-        self._eval_buffer = ""
-        self._eval_last_model = params["model"]
 
-        self.eval_metrics_text.setPlainText("Running evaluation...\n$ " + " ".join(cmd) + "\n")
-        self.eval_start_btn.setEnabled(False)
-        self.promote_btn.setEnabled(False)
-        self.status.showMessage("Evaluating model...", 5000)
-        proc.start(cmd[0], cmd[1:])
 
-    def _on_eval_stdout(self) -> None:
-        if self._eval_process is None:
-            return
-        data = bytes(self._eval_process.readAllStandardOutput()).decode("utf-8", errors="replace")
-        if data:
-            self._eval_buffer += data
 
-    def _on_eval_error(self, _error) -> None:
-        self.eval_metrics_text.append("\n[error] Could not run evaluation. Check that Ultralytics is installed.")
-
-    def _on_eval_finished(self, exit_code: int, _status) -> None:
-        metrics = evaluation_logic.parse_metrics_output(self._eval_buffer)
-        self._eval_process = None
-        self.eval_start_btn.setEnabled(True)
-        if exit_code == 0 and metrics:
-            self.eval_metrics_text.setPlainText(evaluation_logic.format_metrics(metrics))
-            self.promote_btn.setEnabled(bool(self._eval_last_model))
-            self.status.showMessage("Evaluation complete.", 6000)
-        else:
-            tail = "\n".join(self._eval_buffer.strip().splitlines()[-15:])
-            self.eval_metrics_text.setPlainText(
-                f"Evaluation exited with code {exit_code} and no metrics were parsed.\n\n{tail}"
-            )
-            self.status.showMessage("Evaluation failed; see the metrics panel.", 8000)
-
-    def promote_model(self) -> None:
-        model = self._eval_last_model or self.eval_model_edit.text().strip()
-        if not model or not Path(model).exists():
-            QMessageBox.information(self, "Promote", "Evaluate a model first; its file must exist to promote.")
-            return
-        import shutil
-        models_dir = DATA_DIR / "models"
-        models_dir.mkdir(parents=True, exist_ok=True)
-        name = (self.train_name_edit.text().strip() or "model")
-        dest = models_dir / f"{name}{Path(model).suffix or '.pt'}"
-        try:
-            shutil.copy2(model, dest)
-        except Exception as e:
-            QMessageBox.warning(self, "Promote", f"Could not copy model:\n{e}")
-            return
-        # Make the promoted model the active one for test/auto-label/count/queue.
-        if hasattr(self, "test_model_edit"):
-            self.test_model_edit.setText(str(dest))
-        QMessageBox.information(
-            self, "Promote",
-            f"Promoted model to:\n{dest}\n\nIt is now the active model for Test, Auto-label, Count, and the review queue.",
-        )
-        self.status.showMessage(f"Promoted model: {dest.name}", 8000)
 
     def _gather_train_params(self) -> dict:
         return {
@@ -1335,6 +1258,115 @@ class MainWindow(QMainWindow):
             "name": self.train_name_edit.text().strip(),
             "resume": bool(self.train_resume_check.isChecked()),
         }
+
+    def browse_classifier_data(self) -> None:
+        path = QFileDialog.getExistingDirectory(
+            self, "Classifier crops folder (contains train/ and val/)")
+        if path:
+            self.cls_data_edit.setText(path)
+
+    def _gather_classifier_params(self) -> dict:
+        """Stage 2's parameters. Device, workers and project are shared with
+        stage 1 -- they describe the machine, not the model."""
+        return {
+            "task": "classify",
+            "model": self.cls_model_edit.text().strip(),
+            "data": self.cls_data_edit.text().strip(),
+            "imgsz": int(self.cls_imgsz_spin.value()),
+            "batch": int(self.cls_batch_spin.value()),
+            "epochs": int(self.cls_epochs_spin.value()),
+            "patience": int(self.train_patience_spin.value()),
+            "workers": int(self.train_workers_spin.value()),
+            "device": self.train_device_edit.text().strip(),
+            "project": self.train_project_edit.text().strip(),
+            "name": self.cls_name_edit.text().strip() or "classifier",
+            "resume": False,
+        }
+
+    def fill_training_from_scale(self) -> None:
+        """Put the measured numbers into both stages.
+
+        The two image sizes are exactly the settings that quietly cost accuracy
+        when guessed: a detector too small to resolve the smallest label, and a
+        classifier fed a size it did not train at.
+        """
+        from label_detections.core import scale_report, yolo_export
+        from label_detections.core.storage import EXPORT_DIR
+
+        entries = []
+        for label_id in yolo_export.list_datasets():
+            entries.extend(yolo_export.collect_entries(label_id, reviewed_only=False))
+        scales = scale_report.measure(entries)
+        if not scales:
+            QMessageBox.information(
+                self, "Fill From Label Scale",
+                "No boxes measured yet -- draw and save some labels first.")
+            return
+
+        notes = []
+        two_stage = EXPORT_DIR / "two_stage_detect_obb"
+        classify_dir = EXPORT_DIR / "two_stage_classify"
+
+        need = scale_report.min_imgsz_for_identity(scales)
+        if need > scale_report.IMPRACTICAL_IMGSZ:
+            # Localise-then-crop: the detector only has to FIND labels, so it
+            # keeps a modest input and the resolution is spent on the crop.
+            det_imgsz = int(self.train_imgsz_spin.value())
+            notes.append(
+                f"Detector left at {det_imgsz}: it only has to find labels here. "
+                f"Identifying them at detector resolution would need {need}.")
+        else:
+            det_imgsz = need
+            self.train_imgsz_spin.setValue(det_imgsz)
+            notes.append(f"Detector image size set to {det_imgsz}, sized so the "
+                         f"smallest label still clears "
+                         f"{scale_report.IDENTITY_FLOOR_PX} px.")
+
+        if (two_stage / "data.yaml").exists():
+            self.train_data_edit.setText(str(two_stage / "data.yaml"))
+            notes.append(f"Detector data: {two_stage / 'data.yaml'}")
+        else:
+            notes.append("No two-stage detector export found -- run Export "
+                         "Two-Stage, then fill again.")
+
+        if classify_dir.exists():
+            self.cls_data_edit.setText(str(classify_dir))
+            crop = self._live_crop_px(str(classify_dir / "x.pt"))
+            self.cls_imgsz_spin.setValue(int(crop))
+            notes.append(f"Classifier data: {classify_dir}")
+            notes.append(f"Classifier image size set to {crop}, read from the "
+                         f"crops that export actually wrote.")
+        else:
+            notes.append("No classifier crops found -- run Export Two-Stage first.")
+
+        QMessageBox.information(self, "Filled from label scale", "\n\n".join(notes))
+        self.status.showMessage("Training fields filled from the measured boxes", 6000)
+
+    def start_classifier_training(self) -> None:
+        self._start_training_run(self._gather_classifier_params(), "classifier")
+
+    def start_both_training(self) -> None:
+        """Detector then classifier, sequentially.
+
+        Queued rather than launched together: two runs sharing one GPU are
+        slower than either alone and usually end in an out-of-memory a few
+        epochs in.
+        """
+        if self._train_process is not None:
+            QMessageBox.information(self, "Train", "A training run is already in progress.")
+            return
+        cls_params = self._gather_classifier_params()
+        errors = training_logic.validate_train_params(cls_params)
+        if errors:
+            # Checked before starting stage 1, so an unusable stage 2 is not
+            # discovered an hour later when the detector finishes.
+            QMessageBox.warning(
+                self, "Train Both",
+                "The classifier stage is not ready, so the pair would stop "
+                "half-done:\n\n" + "\n".join(f"• {e}" for e in errors))
+            return
+        self._train_queue = [(cls_params, "classifier")]
+        self.start_training()
 
     def browse_train_model(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "Select base model", "", "Model (*.pt *.yaml);;All files (*)")
@@ -1370,14 +1402,26 @@ class MainWindow(QMainWindow):
         self.status.showMessage(f"Using dataset: {latest}", 6000)
 
     def start_training(self) -> None:
+        self._start_training_run(self._gather_train_params(), "detector")
+
+    def _start_training_run(self, params: dict, stage: str = "detector") -> None:
+        """Launch one training run. Both stages come through here.
+
+        One launch path rather than two, so the parts that were hard to get
+        right -- resolving which results.csv belongs to this run, streaming the
+        log, stopping cleanly -- work the same for the classifier as for the
+        detector instead of being reimplemented and subtly different.
+        """
         if self._train_process is not None:
             QMessageBox.information(self, "Train", "A training run is already in progress.")
             return
-        params = self._gather_train_params()
         errors = training_logic.validate_train_params(params)
         if errors:
-            QMessageBox.warning(self, "Train", "Cannot start training:\n\n" + "\n".join(f"• {e}" for e in errors))
+            QMessageBox.warning(self, "Train", f"Cannot start {stage} training:\n\n"
+                                + "\n".join(f"• {e}" for e in errors))
+            self._train_queue = []
             return
+        self._train_stage = stage
 
         yolo_exe = self.train_yolo_exe_edit.text().strip() or "yolo"
         if getattr(sys, "frozen", False):
@@ -1390,7 +1434,18 @@ class MainWindow(QMainWindow):
             cmd = training_logic.build_train_command(yolo_exe, params)
 
         # Persist for next session.
-        settings = dict(params)
+        settings = dict(load_training_settings() or {})
+        if stage == "classifier":
+            # Under its own keys: one flat dict shared by both stages meant
+            # training the classifier overwrote the detector's saved model,
+            # data path and image size.
+            settings.update({
+                "cls_model": params["model"], "cls_data": params["data"],
+                "cls_imgsz": params["imgsz"], "cls_epochs": params["epochs"],
+                "cls_batch": params["batch"], "cls_name": params["name"],
+            })
+        else:
+            settings.update(params)
         settings["yolo_exe"] = yolo_exe
         try:
             save_training_settings(settings)
@@ -1405,11 +1460,14 @@ class MainWindow(QMainWindow):
         proc.errorOccurred.connect(self._on_train_error)
         self._train_process = proc
 
-        self.train_log.clear()
+        if not getattr(self, "_train_queue", None) or stage == "detector":
+            self.train_log.clear()
+        self.train_log.append(f"--- {stage} ---")
         self.train_log.append("$ " + " ".join(cmd) + "\n")
-        self.train_start_btn.setEnabled(False)
+        for b in (self.train_start_btn, self.train_cls_btn, self.train_both_btn):
+            b.setEnabled(False)
         self.train_stop_btn.setEnabled(True)
-        self.status.showMessage("Training started...", 5000)
+        self.status.showMessage(f"Training {stage}...", 5000)
 
         # Clear the chart immediately so the previous run's curves don't persist.
         if hasattr(self, "train_metrics_chart"):
@@ -1537,14 +1595,34 @@ class MainWindow(QMainWindow):
         else:
             self.status.showMessage(f"Training exited with code {exit_code}.", 8000)
 
-        self.train_start_btn.setEnabled(True)
+        for b in (self.train_start_btn, self.train_cls_btn, self.train_both_btn):
+            b.setEnabled(True)
         self.train_stop_btn.setEnabled(False)
         self._train_process = None
+
+        # Train Both: advance to the classifier, but only if the detector
+        # actually succeeded. Chaining a classifier onto a failed or cancelled
+        # detector run just burns an hour producing the second half of a
+        # pipeline whose first half does not exist.
+        queued = getattr(self, "_train_queue", None)
+        if queued and exit_code == 0 and not stopped:
+            params, stage = queued.pop(0)
+            self.train_log.append(f"\n[queue] Detector finished. Starting {stage}.")
+            self._start_training_run(params, stage)
+            return
+        if queued:
+            self._train_queue = []
+            self.train_log.append(
+                "\n[queue] Detector did not finish cleanly, so the classifier "
+                "was not started.")
+
         self._show_training_summary(exit_code, stopped, elapsed, csv_path, run_dir, weights)
 
     def _show_training_summary(self, exit_code, stopped, elapsed, csv_path, run_dir, weights) -> None:
         """Popup summarizing the finished run: validation metrics, time, paths."""
-        params = self._gather_train_params()
+        params = (self._gather_classifier_params()
+                  if getattr(self, "_train_stage", "detector") == "classifier"
+                  else self._gather_train_params())
         dur = training_logic.format_duration(elapsed)
 
         summary = {}
@@ -1635,8 +1713,12 @@ class MainWindow(QMainWindow):
         """Make a finished run's best.pt the active model for Test/Auto-label/etc."""
         if hasattr(self, "test_model_edit"):
             self.test_model_edit.setText(str(weights))
-        if hasattr(self, "eval_model_edit"):
-            self.eval_model_edit.setText(str(weights))
+        # A classifier run's weights belong in the Live Detect stage-2 field,
+        # not the detector field: pointing the detector at a classifier fails
+        # at load with an error that says nothing about which box was wrong.
+        if "classify" in str(weights).lower() or "-cls" in str(weights).lower():
+            if hasattr(self, "live_classifier_edit"):
+                self.live_classifier_edit.setText(str(weights))
         if hasattr(self, "_test_tab_widget") and hasattr(self, "tabs"):
             self.tabs.setCurrentWidget(self._test_tab_widget)
         self.status.showMessage(
@@ -3131,6 +3213,20 @@ class MainWindow(QMainWindow):
         checks_row.addWidget(scale_btn)
         checks_row.addWidget(variance_btn)
         ev.addLayout(checks_row)
+        details_btn = QPushButton("Export Dataset Details")
+        details_btn.clicked.connect(self.export_dataset_details)
+        details_btn.setToolTip(
+            "Write every measurable fact about the collected data to a text "
+            "file: label sizes, frame sizes, region sizes, code requirements, "
+            "and what the tool concludes from them.\n\n"
+            "Plain text, no images, so it can be pasted anywhere it needs "
+            "analysing.")
+        details_btn.setProperty("rightPanelButton", True)
+        details_btn.setMinimumHeight(24)
+        details_btn.setMaximumHeight(26)
+        details_btn.setMinimumWidth(0)
+        details_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        ev.addWidget(details_btn)
 
         ev.addWidget(QLabel("Export task"))
         ev.addWidget(self.export_task_combo)
@@ -3140,23 +3236,6 @@ class MainWindow(QMainWindow):
         ev.addLayout(augment_row)
         ev.addLayout(export_btn_row)
         ev.addWidget(exp_two)
-        exp_regions = QPushButton("Export Region Crops")
-        exp_regions.clicked.connect(self.export_region_crops)
-        exp_regions.setToolTip(
-            "Crop each read-region out of the FULL-RESOLUTION frame, foldered by "
-            "label id.\n\n"
-            "This is what separates two labels that differ only by a revision "
-            "letter or a language line. Nothing at detector resolution reaches "
-            "that detail, and a whole-label crop reaches it less -- the region "
-            "cropped from the original keeps every pixel it had.\n\n"
-            "Ground truth comes free: the label id already says which revision "
-            "it is.")
-        exp_regions.setProperty("rightPanelButton", True)
-        exp_regions.setMinimumHeight(24)
-        exp_regions.setMaximumHeight(26)
-        exp_regions.setMinimumWidth(0)
-        exp_regions.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        ev.addWidget(exp_regions)
         export_note = QLabel("Exports annotation class names as-is. Reviewed and force-reviewed images only.")
         export_note.setWordWrap(True)
         export_note.setStyleSheet("color: #94a3b8;")
@@ -6344,6 +6423,59 @@ class MainWindow(QMainWindow):
                 break
         return 224
 
+    def export_dataset_details(self) -> None:
+        """Write everything measurable about the collected data to one file.
+
+        Raw distributions first, conclusions last, so whoever reads it can
+        disagree with the conclusions using the same numbers that produced
+        them.
+        """
+        from label_detections.core import scale_report, yolo_export
+        from label_detections.core.storage import EXPORT_DIR
+
+        entries = []
+        for label_id in yolo_export.list_datasets():
+            entries.extend(yolo_export.collect_entries(label_id, reviewed_only=False))
+        scales = scale_report.measure(entries)
+        if not scales:
+            QMessageBox.information(
+                self, "Dataset details",
+                "Nothing measured yet -- draw and save some boxes first.")
+            return
+
+        imgsz = int(self.test_imgsz_spin.value()) if hasattr(self, "test_imgsz_spin") else 640
+        ready = 0
+        for label_id in yolo_export.list_datasets():
+            statuses = persistence.dataset_statuses(label_id).values()
+            ready += sum(1 for st in statuses if review_logic.export_ready(st))
+        text = scale_report.dataset_details(
+            scales, self.library, imgsz=imgsz,
+            extra={
+                "app": APP_TITLE,
+                "labels in library": len(self.library.all()),
+                "datasets on disk": len(yolo_export.list_datasets()),
+                "export-ready images": ready,
+                "detector classes": ", ".join(self.library.detector_classes()),
+            })
+
+        EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+        out = EXPORT_DIR / "dataset_details.txt"
+        out.write_text(text, encoding="utf-8")
+
+        box = QMessageBox(self)
+        box.setWindowTitle("Dataset details")
+        box.setText(f"Written to:\n{out}\n\nPaste the file contents anywhere it "
+                    f"needs analysing -- it is plain text and contains no images.")
+        box.setDetailedText(text)
+        copy_btn = box.addButton("Copy to clipboard", QMessageBox.ActionRole)
+        box.addButton(QMessageBox.Close)
+        box.exec()
+        if box.clickedButton() is copy_btn:
+            QApplication.clipboard().setText(text)
+            self.status.showMessage("Dataset details copied to the clipboard", 6000)
+        else:
+            self.status.showMessage(f"Dataset details written to {out}", 8000)
+
     def show_label_scale_report(self) -> None:
         """Measure how big labels actually are, and say what follows from it.
 
@@ -6373,40 +6505,6 @@ class MainWindow(QMainWindow):
         box.setIcon(QMessageBox.Information)
         box.exec()
 
-    def export_region_crops(self) -> None:
-        """Crops of the read-regions themselves, at full resolution.
-
-        The stage that separates labels differing only in fine print. Nothing
-        at detector resolution reaches a revision letter, and a whole-label
-        crop reaches it less; the region cropped from the original frame keeps
-        every pixel it ever had.
-        """
-        from label_detections.core import classify_export
-
-        try:
-            out = classify_export.export_region_crops(
-                reviewed_only=self._export_reviewed_only(), library=self.library)
-        except FileNotFoundError as exc:
-            QMessageBox.information(self, "Export Region Crops", str(exc))
-            return
-        except Exception as exc:
-            QMessageBox.critical(self, "Export Region Crops", f"Export failed:\n{exc}")
-            return
-
-        rows = (out / "manifest.csv").read_text(encoding="utf-8").splitlines()[1:]
-        native = [float(r.split(",")[4]) for r in rows if len(r.split(",")) > 4]
-        classes = (out / "classes.txt").read_text(encoding="utf-8").split()
-        span = (f"{min(native):.0f}-{max(native):.0f} px native" if native else "-")
-        QMessageBox.information(
-            self, "Export complete",
-            f"Read-region crops:\n{out}\n\n"
-            f"{len(rows)} crop(s) over {len(classes)} label(s), {span}.\n\n"
-            f"Cropped from the full-resolution frames, so these keep detail no "
-            f"detector input and no whole-label crop can reach. Train a small "
-            f"classifier on them to separate labels that differ only in fine "
-            f"print.\n\nSuggested command:\n"
-            f"  yolo classify train data={out} model=yolo11n-cls.pt imgsz=224")
-        self.status.showMessage(f"Exported {len(rows)} region crop(s) to {out}", 8000)
 
     def export_two_stage(self) -> None:
         """Write a detector dataset and a classifier crop dataset together.

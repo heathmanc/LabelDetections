@@ -438,29 +438,108 @@ def advise(scales: dict[str, LabelScale], library=None,
             fine += [f"{label_id}:{t.name}" for t in getattr(label, "text_fields", []) or []
                      if len(getattr(t, "region", []) or []) >= 4]
 
-    step = "3." if need > IMPRACTICAL_IMGSZ else "3."
     if fine:
         lines += [
-            f"{step} Fine print (revision, language, codes): crop the READ-REGION "
-            f"itself from the full-resolution frame -- Export Region Crops.",
+            "3. Check the crop is large enough for your finest deciding region.",
             f"   {len(fine)} region(s) defined: " + ", ".join(fine[:6])
             + (" ..." if len(fine) > 6 else ""),
-            "   A region cropped at native resolution keeps every pixel it had. No "
-            "detector input and no whole-label crop reaches that detail at any size "
-            "worth running -- this is the only stage that does.",
+            "   With two models the classifier is the last word, so whatever "
+            "separates two labels has to survive into its crop. The per-region "
+            "numbers below say whether it does. Where it does not, the honest "
+            "options are a bigger crop, a tighter field of view, or accepting "
+            "that those two labels are not separable by this pipeline.",
         ]
     else:
         lines += [
-            f"{step} No read-regions defined yet.",
-            "   If two labels differ only by a revision letter, a language line or a "
-            "code, draw a region over that difference (Define Regions) and export "
-            "Region Crops. Nothing else will separate them.",
+            "3. No read-regions defined yet.",
+            "   Draw one over whatever distinguishes any two similar labels "
+            "(Define Regions). It costs nothing at runtime and it is the only "
+            "way this report can tell you whether the crop resolves the "
+            "difference -- otherwise the first sign is a confusion matrix.",
         ]
 
     lines += [
         "",
-        "Confusable labels: where two differ ONLY in fine print, no amount of "
-        "detector or whole-label resolution separates them. List them in "
-        "confusable_with and let the region read decide.",
+        "Confusable labels: list genuinely mistakable pairs in confusable_with. "
+        "Their images become each other's hard negatives, which is what teaches "
+        "the classifier the difference rather than hoping it notices.",
     ]
     return "\n".join(lines)
+
+
+# --- a dump of the dataset, for someone else to look at --------------------
+
+def dataset_details(scales: dict[str, LabelScale], library=None,
+                    imgsz: int = DEFAULT_IMGSZ, crop: int | None = None,
+                    extra: dict | None = None) -> str:
+    """Everything measurable about the collected data, as plain text.
+
+    Written to be pasted somewhere and read by someone who does not have the
+    machine: raw distributions rather than conclusions, so the reader can
+    disagree with the conclusions. Every number in the recommendation is
+    derivable from what is here.
+    """
+    crop = int(crop or recommend_crop(scales, imgsz))
+    out: list[str] = ["LABEL DETECTIONS - DATASET DETAILS", ""]
+    for key, value in (extra or {}).items():
+        out.append(f"{key}: {value}")
+    if extra:
+        out.append("")
+
+    frames: dict[str, int] = {}
+    for scale in scales.values():
+        for side in scale.frame_sides:
+            frames[f"{side:.0f}"] = frames.get(f"{side:.0f}", 0) + 1
+    out += ["Frame long side (px): "
+            + ", ".join(f"{k} x{v}" for k, v in sorted(frames.items(), key=lambda i: -i[1])),
+            f"Detector input assumed: {imgsz}",
+            f"Classifier crop assumed: {crop}",
+            ""]
+
+    out.append("PER LABEL")
+    out.append(f"{'label':<24} {'boxes':>6} {'min':>7} {'med':>7} {'max':>7} "
+               f"{'frac of frame':>14} {'-> detector':>12}")
+    for label_id in sorted(scales):
+        sc = scales[label_id]
+        frac = (sc.median_px / sc.frame_sides[0]) if sc.frame_sides else 0.0
+        out.append(f"{label_id:<24} {sc.count:>6} {sc.min_px:>7.0f} "
+                   f"{sc.median_px:>7.0f} {sc.max_px:>7.0f} {frac:>13.1%} "
+                   f"{sc.detector_px(imgsz, 'median'):>12.0f}")
+    out.append("")
+
+    if library is not None:
+        out.append("PER LABEL DEFINITION")
+        for label_id in sorted(scales):
+            label = library.get(label_id)
+            if label is None:
+                out.append(f"{label_id}: NOT IN LIBRARY (orphaned dataset)")
+                continue
+            bits = [f"rev={label.revision or '-'}",
+                    f"part={label.part_number or '-'}",
+                    f"vendor={label.vendor or '-'}",
+                    f"variable_data={label.variable_data}",
+                    f"target={label.train_target}"]
+            if label.confusable_with:
+                bits.append("confusable_with=" + ",".join(label.confusable_with))
+            out.append(f"{label_id}: " + "  ".join(bits))
+            for role, name, rect in label.regions():
+                width_px = float(rect[2]) * scales[label_id].median_px
+                out.append(f"    {role}:{name} {float(rect[2]):.0%} wide "
+                           f"-> {width_px:.0f} px native, "
+                           f"{float(rect[2]) * crop:.0f} px in a {crop} crop")
+            for code in label.codes:
+                needed = code.min_pixels_needed()
+                if needed:
+                    out.append(f"    code:{code.role} {code.symbology} needs "
+                               f"{needed:.0f} px to decode")
+        out.append("")
+
+    out.append("WHAT THE TOOL CONCLUDES")
+    out.append("")
+    out.append(advise(scales, library, imgsz))
+    out.append("")
+    out.append("WORKING")
+    out.append("")
+    out.append(report(scales, imgsz, crop))
+    out.append(region_report(scales, library, imgsz, crop))
+    return "\n".join(out)

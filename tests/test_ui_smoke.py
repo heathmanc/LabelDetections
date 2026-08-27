@@ -121,7 +121,7 @@ def test_menu_actions_have_callable_slots():
 def test_key_buttons_exist_and_are_wired():
     win = _window()
     labels = {b.text() for b in win.findChildren(QPushButton)}
-    for expected in ("Start Training", "Run Model", "Auto-label",
+    for expected in ("Train Detector", "Run Model", "Auto-label",
                      "Change Folder...", "Dataset Health"):
         assert expected in labels, f"{expected!r} button missing"
 
@@ -449,3 +449,58 @@ def test_the_shortcut_sheet_is_generated_not_typed():
     assert "Check label scale (single vs two-stage)" in names
     assert "Keep this live frame + detections" in names
     assert not any("bung" in n.lower() or "retainer" in n.lower() for n in names)
+
+
+def test_the_train_tab_covers_both_stages():
+    """Two models, so two training blocks. One set of fields meant retyping
+    everything between runs, and the classifier's settings overwriting the
+    detector's on save."""
+    from PySide6.QtWidgets import QPushButton
+
+    win = _window()
+    buttons = {b.text() for b in win.findChildren(QPushButton)}
+    for label in ("Train Detector", "Train Classifier", "Train Both",
+                  "Fill Both From Label Scale", "Export Dataset Details"):
+        assert label in buttons, f"missing: {label}"
+
+    det = win._gather_train_params()
+    cls = win._gather_classifier_params()
+    assert cls["task"] == "classify"
+    # The machine is shared; the model is not.
+    assert cls["device"] == det["device"] and cls["project"] == det["project"]
+    assert cls["model"] != det["model"] and cls["name"] != det["name"]
+
+
+def test_evaluate_and_promote_is_gone():
+    win = _window()
+    assert not hasattr(win, "promote_btn")
+    assert not hasattr(win, "eval_model_edit")
+    assert not hasattr(win, "start_evaluation")
+
+
+def test_there_is_no_third_model_anywhere_in_the_ui():
+    """Two models or nothing -- so a button offering a third is not a feature,
+    it is a way to end up with a pipeline that was never the plan."""
+    from PySide6.QtWidgets import QPushButton
+
+    win = _window()
+    buttons = {b.text() for b in win.findChildren(QPushButton)}
+    assert "Export Region Crops" not in buttons
+    assert not hasattr(win, "export_region_crops")
+
+
+def test_train_both_refuses_before_starting_if_stage_two_cannot_run():
+    """Discovering the classifier is unconfigured after the detector has run
+    for an hour wastes the hour."""
+    win = _window()
+    win.cls_data_edit.setText("")
+    seen = {}
+    import label_detections.ui.main_window as mw
+    orig = mw.QMessageBox.warning
+    mw.QMessageBox.warning = lambda *a, **k: seen.setdefault("warned", a[-1])
+    try:
+        win.start_both_training()
+    finally:
+        mw.QMessageBox.warning = orig
+    assert "warned" in seen and "classifier" in seen["warned"].lower()
+    assert not win._train_queue
