@@ -842,6 +842,7 @@ class MainWindow(QMainWindow):
         self._train_tab_widget = self._train_tab()
         tabs.addTab(self._train_tab_widget, "Train")
         self._live_tab_widget = self._live_detect_tab()
+        self._refresh_live_detector_label()
         tabs.addTab(self._live_tab_widget, "Live Detect")
         tabs.addTab(self._help_tab(), "Instructions")
         self.tabs = tabs
@@ -923,12 +924,18 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(settings_box)
 
-        # Persist as the operator edits, so nothing has to be re-entered next
-        # launch. editingFinished rather than textChanged keeps this to one
-        # write per edit instead of one per keystroke.
+        # textChanged, not editingFinished. editingFinished fires only when a
+        # human types into a field and then leaves it -- so a path arriving from
+        # Browse, or from "Use as active model" after a training run, was never
+        # written. The field looked right for the session and came back empty
+        # next launch, which is why Live Detect had to be pointed at a model by
+        # hand every time. A few extra writes of a small JSON is the cheaper
+        # mistake.
         for _edit in (self.test_model_edit, self.test_image_edit,
                       self.test_device_edit):
-            _edit.editingFinished.connect(self._save_test_settings)
+            _edit.textChanged.connect(lambda _t: self._save_test_settings())
+        self.test_model_edit.textChanged.connect(
+            lambda _t: self._refresh_live_detector_label())
         self.test_imgsz_spin.valueChanged.connect(lambda _v: self._save_test_settings())
         self.test_conf_spin.valueChanged.connect(lambda _v: self._save_test_settings())
         self.test_hide_saved_labels_check.stateChanged.connect(lambda _s: self._save_test_settings())
@@ -2004,8 +2011,21 @@ class MainWindow(QMainWindow):
         row.addWidget(self.live_stop_btn)
         cv_.addLayout(row)
 
+        self.live_detector_label = QLabel()
+        self.live_detector_label.setWordWrap(True)
+        self.live_detector_label.setStyleSheet("color: #9aa4b2;")
+        self.live_detector_label.setToolTip(
+            "Set on the Test Models tab, so both places always run the same "
+            "detector. Shown here because a required setting living on another "
+            "tab, with nothing on this one naming it, reads as Start being "
+            "broken rather than as a field being empty.")
+        cv_.addWidget(self.live_detector_label)
+
         cls_row = QHBoxLayout()
-        self.live_classifier_edit = QLineEdit()
+        self.live_classifier_edit = QLineEdit(
+            str((load_test_settings() or {}).get("classifier", "")))
+        self.live_classifier_edit.textChanged.connect(
+            lambda _t: self._save_test_settings())
         self.live_classifier_edit.setPlaceholderText(
             "optional: classifier .pt for stage 2 (leave blank for stage 1 only)")
         self.live_classifier_edit.setToolTip(
@@ -4382,6 +4402,18 @@ class MainWindow(QMainWindow):
             self.status.showMessage(f"Live view: display {self._preview_fps:.1f} FPS, camera read {cam_fps:.1f} FPS", 1200)
 
 
+    def _refresh_live_detector_label(self) -> None:
+        if not hasattr(self, "live_detector_label"):
+            return
+        path = (self.test_model_edit.text().strip()
+                if hasattr(self, "test_model_edit") else "")
+        if not path:
+            self.live_detector_label.setText(
+                "Stage 1 detector: NOT SET -- pick one on the Test Models tab.")
+        else:
+            self.live_detector_label.setText(f"Stage 1 detector: {Path(path).name}")
+            self.live_detector_label.setToolTip(path)
+
     def _refresh_live_mode(self) -> None:
         """One source of truth: is a camera streaming right now?
 
@@ -4545,6 +4577,8 @@ class MainWindow(QMainWindow):
                 "imgsz": int(self.test_imgsz_spin.value()),
                 "conf": float(self.test_conf_spin.value()),
                 "device": self.test_device_edit.text().strip(),
+                "classifier": (self.live_classifier_edit.text().strip()
+                               if hasattr(self, "live_classifier_edit") else ""),
                 "hide_saved_labels": bool(self.test_hide_saved_labels_check.isChecked()),
             })
         except Exception:

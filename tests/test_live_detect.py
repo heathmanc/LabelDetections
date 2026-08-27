@@ -948,3 +948,64 @@ def test_one_device_field_covers_both_stages():
     tip = win.test_device_edit.toolTip()
     assert "BOTH stages" in tip
     assert "classifier" in tip
+
+
+@ui
+def test_both_model_paths_survive_a_relaunch():
+    """They did not. editingFinished fires only when a human types into a
+    field and leaves it, so a path from Browse or from "Use as active model"
+    was never written -- the field looked right for the session and came back
+    empty, which is why Live Detect had to be pointed at a model by hand every
+    launch."""
+    from label_detections.core.storage import load_test_settings
+
+    win = _window()
+    win.test_model_edit.setText("/runs/detector/weights/best.pt")
+    win.live_classifier_edit.setText("/runs/classifier/weights/best.pt")
+
+    saved = load_test_settings() or {}
+    assert saved.get("model") == "/runs/detector/weights/best.pt"
+    assert saved.get("classifier") == "/runs/classifier/weights/best.pt"
+
+
+@ui
+def test_start_uses_the_field_without_a_test_run_first(monkeypatch):
+    """Starting had to be preceded by a run on the Test Models tab. That was
+    the unsaved path, not a load order -- with a path present, Start builds the
+    worker straight away."""
+    win = _window()
+    win.test_model_edit.setText("/nonexistent/detector.pt")
+    win.live_classifier_edit.setText("")
+
+    built = {}
+
+    class FakeWorker:
+        loaded = failed = result = None
+
+        def __init__(self, path, *a, **k):
+            built["path"] = path
+            raise RuntimeError("stop before threading")
+
+    import label_detections.ui.live_detect as ld_ui
+    monkeypatch.setattr(ld_ui, "InferenceWorker", FakeWorker)
+    monkeypatch.setattr(win, "_camera_is_live", lambda: True)
+    try:
+        win.start_live_detect()
+    except RuntimeError:
+        pass
+    finally:
+        win._live_thread = None
+    assert built.get("path") == "/nonexistent/detector.pt"
+
+
+@ui
+def test_the_live_tab_names_the_detector_it_will_use():
+    """A required setting on another tab, with nothing on this one naming it,
+    reads as Start being broken rather than as a field being empty."""
+    win = _window()
+    win.test_model_edit.setText("/runs/detector/weights/best.pt")
+    assert "best.pt" in win.live_detector_label.text()
+
+    win.test_model_edit.setText("")
+    assert "NOT SET" in win.live_detector_label.text()
+    assert "Test Models" in win.live_detector_label.text()
