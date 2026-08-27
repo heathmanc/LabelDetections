@@ -383,3 +383,27 @@ if __name__ == "__main__":
                 print(f"FAIL {name}")
                 traceback.print_exc()
     raise SystemExit(1 if failures else 0)
+
+
+def test_the_built_in_guide_describes_the_tool_that_exists():
+    """The guide told operators the model was trained on coarse families and to
+    never add a class per SKU, long after both had stopped being true. A stale
+    guide is worse than none: it is read as authority."""
+    win = _window()
+    text = ""
+    from PySide6.QtWidgets import QTextEdit
+
+    for child in win.findChildren(QTextEdit):
+        body = child.toPlainText()
+        if "Workflow for one label" in body:
+            text = body
+            break
+    assert text, "workflow guide not found"
+
+    for gone in ("coarse FAMILIES", "Never add a class per SKU",
+                 "spec_plate, warning_label", "resolved afterwards"):
+        assert gone not in text, f"guide still describes the old design: {gone!r}"
+
+    assert "Label ids" in text
+    assert "Export Two-Stage" in text and "Export All" in text
+    assert "battery_side" in text
