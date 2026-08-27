@@ -218,6 +218,39 @@ came from one session.
 
 ---
 
+## 5.5 Live Detect
+
+Runs the Test Models model on the live camera and overlays what it finds.
+
+**It is model validation, not inspection.** No verdict, no latching, no reject
+output — whether a battery passes is the front end's decision, and a second
+half-built HMI living in the labeling tool would be the worst of both. What it
+answers is the question a saved-image test cannot: does the model work through
+*this* lens, at *this* standoff, under *this* light.
+
+The part that earns it a place in a labeling tool is the loop back:
+
+- **Keep This Frame** (`Ctrl+K`) drops what's on screen straight into the active
+  label's dataset, un-reviewed, ready to label.
+- **Keep frames the model struggles with** arms it. Walk batteries past the
+  camera and it collects the hard ones by itself, scored by the same
+  disagreement function that ranks the review queue.
+
+Armed capture is rate-limited (3 s) and capped per session (50). One battery the
+model can't handle would otherwise produce hundreds of near-identical frames,
+which is worse than none — they all say the same thing and each costs a review.
+
+Two implementation details that matter:
+
+- **The model runs on its own thread.** The preview renders at the camera's rate
+  and overlays refresh whenever inference finishes; frames are handed over only
+  when the model is idle, so the view never stutters at the model's pace.
+- **Inference runs on the full-resolution frame**, not the downscaled preview —
+  that's the resolution production will hand it. Overlays come back in
+  full-frame coordinates and are scaled to the preview before being drawn.
+
+---
+
 ## 6. Layout
 
 ```text
@@ -228,6 +261,7 @@ label_detections/
 │   ├── review.py          markers + the per-image gate      [rewritten]
 │   ├── dataset.py         group-aware split, coverage       [new]
 │   ├── augment.py         variable-region check + grafting  [new]
+│   ├── live_detect.py     live-view pacing and capture gate [new]
 │   ├── yolo_export.py     per-label export                  [rewritten]
 │   ├── dataset_health.py  readiness tallies                 [rewritten]
 │   ├── active_learning.py queue scoring                     [rewritten]
@@ -244,6 +278,7 @@ label_detections/
     ├── main_window.py     the app                           [migrated]
     ├── canvas.py          OBB canvas, now identity-aware    [ported + extended]
     ├── region_editor.py   draw read-regions on artwork      [new]
+    ├── live_detect.py     inference off the GUI thread      [new]
     ├── flow_dialog.py     generic renderer for any Flow     [new]
     └── wizards.py         the add-a-label entry point       [new]
 ```
@@ -252,7 +287,7 @@ label_detections/
 the decision that rejects an image be tested exhaustively instead of observed
 on a conveyor.
 
-**318 tests.** The core suite needs nothing but pytest; the UI tests build the
+**341 tests.** The core suite needs nothing but pytest; the UI tests build the
 real `MainWindow` under the offscreen platform plugin, which is what caught the
 lost `@staticmethod` decorators and the canvas dropping `label_id` during this
 migration.

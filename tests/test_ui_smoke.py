@@ -70,9 +70,9 @@ def test_main_window_constructs():
 
 def test_all_tabs_are_present():
     win = _window()
-    assert win.tabs.count() == 6
+    assert win.tabs.count() == 7
     titles = [win.tabs.tabText(i) for i in range(win.tabs.count())]
-    for expected in ("Label", "Live Capture", "Test Models", "Train"):
+    for expected in ("Label", "Live Capture", "Test Models", "Train", "Live Detect"):
         assert expected in titles, f"{expected} missing from {titles}"
 
 

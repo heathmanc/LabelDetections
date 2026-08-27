@@ -105,6 +105,7 @@ from label_detections.core import labels as labels_mod
 from label_detections.core import annotations as ann_logic
 from label_detections.core import augment as augment_logic
 from label_detections.core import dataset as dataset_logic
+from label_detections.core import live_detect as live_logic
 from label_detections.version import APP_TITLE
 from label_detections.ui import wizards
 from label_detections.ui.canvas import ImageCanvas
@@ -336,6 +337,16 @@ class MainWindow(QMainWindow):
         # Set by Capture Reference: the next label box drawn opens the region
         # editor on it, so the whole flow is capture, draw, draw regions.
         self._awaiting_reference_box = False
+        # Live detection: model on its own thread, overlays scaled from the
+        # full-resolution frame it ran on down to the preview being displayed.
+        self._live_thread = None
+        self._live_worker = None
+        self._live_busy = False
+        self._live_frame = None
+        self._live_overlay_scale = (1.0, 1.0)
+        self._live_rolling = live_logic.Rolling()
+        self._live_gate = live_logic.CaptureGate()
+        self._live_last_started = 0.0
         # The last frame of a capture burst, opened when the preview stops.
         self._last_capture_path: Path | None = None
         self._session_captures = 0
@@ -568,6 +579,16 @@ class MainWindow(QMainWindow):
 
         tools_menu.addSeparator()
 
+        live_detect_action = QAction("Start/stop live detect", self)
+        live_detect_action.setShortcut("Ctrl+D")
+        live_detect_action.triggered.connect(self._guarded(self.toggle_live_detect))
+        tools_menu.addAction(live_detect_action)
+
+        keep_frame_action = QAction("Keep this live frame", self)
+        keep_frame_action.setShortcut("Ctrl+K")
+        keep_frame_action.triggered.connect(self._guarded(self.keep_live_frame))
+        tools_menu.addAction(keep_frame_action)
+
         variance_action = QAction("Check variable regions", self)
         variance_action.setToolTip(
             "Measure how much each label's date codes and serials actually differ "
@@ -601,7 +622,7 @@ class MainWindow(QMainWindow):
             capture_action, auto_label_action, validate_action,
             prelabel_action, next_queue_action, shortcuts_action, regions_action,
             define_regions_action, edit_regions_action, replace_artwork_action,
-            variance_action,
+            variance_action, live_detect_action, keep_frame_action,
         ):
             self.addAction(action)
 
@@ -798,6 +819,8 @@ class MainWindow(QMainWindow):
         tabs.addTab(self._test_tab_widget, "Test Models")
         self._train_tab_widget = self._train_tab()
         tabs.addTab(self._train_tab_widget, "Train")
+        self._live_tab_widget = self._live_detect_tab()
+        tabs.addTab(self._live_tab_widget, "Live Detect")
         tabs.addTab(self._help_tab(), "Instructions")
         self.tabs = tabs
         return tabs
@@ -1730,6 +1753,295 @@ class MainWindow(QMainWindow):
         )
         layout.addWidget(body)
         return outer
+    def _live_detect_tab(self) -> QWidget:
+        """Watch the model work through the real camera, and keep what it fails on.
+
+        Deliberately not an inspection view: no verdict, no latching, no reject
+        output. Whether a battery passes is the front end's decision, and a
+        second half-built HMI in the labeling tool would be the worst of both.
+        What this is for is the question a saved-image test cannot answer --
+        does the model work through *this* lens, at *this* standoff, under
+        *this* light -- and the loop back into labeling when it does not.
+        """
+        outer, w, layout = self._scrollable_tab()
+
+        info = QLabel(
+            "Runs the Test Models tab's model on the live camera. This is model "
+            "validation, not inspection: nothing here passes or fails a battery."
+        )
+        info.setWordWrap(True)
+        info.setStyleSheet("color: #9aa4b2;")
+        layout.addWidget(info)
+
+        control_box = QGroupBox("Live detection")
+        cv_ = QVBoxLayout(control_box)
+        cv_.setContentsMargins(8, 8, 8, 8)
+        cv_.setSpacing(4)
+
+        self.live_start_btn = QPushButton("Start Live Detect")
+        self.live_start_btn.setToolTip(
+            "Opens the camera if it is not already running, loads the model off "
+            "the GUI thread, and overlays detections on the live view.")
+        self.live_start_btn.clicked.connect(self.start_live_detect)
+        self.live_stop_btn = QPushButton("Stop")
+        self.live_stop_btn.setEnabled(False)
+        self.live_stop_btn.clicked.connect(self.stop_live_detect)
+        for _b in (self.live_start_btn, self.live_stop_btn):
+            _b.setProperty("compactCaptureButton", True)
+        row = QHBoxLayout()
+        row.addWidget(self.live_start_btn)
+        row.addWidget(self.live_stop_btn)
+        cv_.addLayout(row)
+
+        self.live_status_label = QLabel("Stopped.")
+        self.live_status_label.setWordWrap(True)
+        cv_.addWidget(self.live_status_label)
+
+        self.live_readout = QTextEdit()
+        self.live_readout.setReadOnly(True)
+        self.live_readout.setMinimumHeight(120)
+        self.live_readout.setPlaceholderText(
+            "Detections, latency and rate appear here once it is running.")
+        cv_.addWidget(self.live_readout)
+        layout.addWidget(control_box)
+
+        keep_box = QGroupBox("Keep what it fails on")
+        kv = QVBoxLayout(keep_box)
+        kv.setContentsMargins(8, 8, 8, 8)
+        kv.setSpacing(4)
+        note = QLabel(
+            "A frame the model handles badly is the most valuable training image "
+            "available. Keeping it puts it straight into this label's dataset, "
+            "un-reviewed, ready to label."
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet("color: #9aa4b2;")
+        kv.addWidget(note)
+
+        self.live_keep_btn = QPushButton("Keep This Frame")
+        self.live_keep_btn.setToolTip("Save the frame currently on screen into "
+                                      "this label's dataset. (Ctrl+K)")
+        self.live_keep_btn.clicked.connect(self.keep_live_frame)
+        self.live_keep_btn.setProperty("compactCaptureButton", True)
+        kv.addWidget(self.live_keep_btn)
+
+        self.live_auto_check = QCheckBox("Keep frames the model struggles with")
+        self.live_auto_check.setToolTip(
+            "Walk batteries past the camera and it collects the hard ones by "
+            "itself. Rate-limited and capped per session: one battery it cannot "
+            "handle would otherwise produce hundreds of near-identical frames, "
+            "which is worse than none -- they all say the same thing and each "
+            "costs a review.")
+        self.live_auto_check.toggled.connect(self._on_live_auto_toggled)
+        kv.addWidget(self.live_auto_check)
+
+        self.live_capture_label = QLabel("")
+        self.live_capture_label.setWordWrap(True)
+        self.live_capture_label.setStyleSheet("color: #93c5fd;")
+        kv.addWidget(self.live_capture_label)
+        layout.addWidget(keep_box)
+
+        return outer
+    # --- live detection ---------------------------------------------------
+
+    def start_live_detect(self) -> None:
+        """Load the model on its own thread and start overlaying the live view."""
+        if getattr(self, "_live_thread", None) is not None:
+            return
+        model_path = self.test_model_edit.text().strip()
+        if not model_path:
+            QMessageBox.information(
+                self, "Live Detect",
+                "Pick a model on the Test Models tab first -- live detection uses "
+                "the same one, so there is only ever one model in play.")
+            return
+        if not self._camera_is_live():
+            self.open_camera()
+            if not self._camera_is_live():
+                return
+
+        from PySide6.QtCore import QThread
+        from .live_detect import InferenceWorker
+
+        self._live_rolling = live_logic.Rolling()
+        self._live_gate = live_logic.CaptureGate()
+        self._live_last_started = 0.0
+        self._live_busy = False
+        self._live_frame = None
+        self._live_counts = {}
+
+        self._live_thread = QThread(self)
+        self._live_worker = InferenceWorker(
+            model_path, int(self.test_imgsz_spin.value()),
+            float(self.test_conf_spin.value()), self._model_test_device_arg())
+        self._live_worker.moveToThread(self._live_thread)
+        self._live_worker.loaded.connect(self._on_live_loaded)
+        self._live_worker.failed.connect(self._on_live_failed)
+        self._live_worker.result.connect(self._on_live_result)
+        self._live_thread.started.connect(self._live_worker.load)
+        self._live_thread.start()
+
+        self.live_start_btn.setEnabled(False)
+        self.live_stop_btn.setEnabled(True)
+        self.live_status_label.setText("Loading the model...")
+        self.status.showMessage("Live detect: loading model", 4000)
+
+    def stop_live_detect(self) -> None:
+        thread = getattr(self, "_live_thread", None)
+        worker = getattr(self, "_live_worker", None)
+        if worker is not None:
+            worker.stop()
+        if thread is not None:
+            thread.quit()
+            # Bounded: a stuck inference must not hang the window on close.
+            thread.wait(3000)
+        self._live_thread = None
+        self._live_worker = None
+        self._live_busy = False
+        if hasattr(self.canvas, "clear_model_test_overlays"):
+            self.canvas.clear_model_test_overlays()
+        if hasattr(self, "live_start_btn"):
+            self.live_start_btn.setEnabled(True)
+            self.live_stop_btn.setEnabled(False)
+            self.live_status_label.setText("Stopped.")
+        self.status.showMessage("Live detect stopped", 4000)
+
+    def toggle_live_detect(self) -> None:
+        if self._live_running():
+            self.stop_live_detect()
+        else:
+            self.start_live_detect()
+    def _live_running(self) -> bool:
+        return getattr(self, "_live_thread", None) is not None
+
+    def _on_live_loaded(self, message: str) -> None:
+        self.live_status_label.setText(f"{message}\nWatching the live view.")
+
+    def _on_live_failed(self, message: str) -> None:
+        self._live_busy = False
+        self.live_status_label.setText(f"Inference problem: {message}")
+
+    def _pump_live_detect(self, frame) -> None:
+        """Hand the model a frame, if it is idle and enough time has passed.
+
+        Called from the camera tick. Skipping while busy is what keeps the view
+        live: the preview runs at the camera's rate and overlays refresh
+        whenever the model finishes, instead of the preview stuttering along at
+        the model's pace.
+        """
+        if not self._live_running() or frame is None:
+            return
+        now = time.monotonic()
+        if not live_logic.should_infer(self._live_busy, now - self._live_last_started):
+            return
+        self._live_busy = True
+        self._live_last_started = now
+        self._live_frame = frame.copy()
+        # Queued across the thread boundary by Qt, so this returns immediately.
+        self._live_worker.infer(self._live_frame)
+
+    def _on_live_result(self, results, latency: float) -> None:
+        self._live_busy = False
+        self._live_rolling.record(latency)
+        items, counts = self._detection_overlay_items(results)
+        self._live_counts = counts
+        if hasattr(self.canvas, "set_model_test_overlays"):
+            self.canvas.set_model_test_overlays(
+                self._scaled_overlay_items(items, self._live_overlay_scale))
+
+        label = self.library.get(self.label_id) if self.label_id else None
+        family = str(getattr(label, "family", "") or "") if label else ""
+        self.live_readout.setPlainText(live_logic.frame_summary(
+            counts, family, self.label_id or "no label", self._live_rolling))
+
+        if not self.live_auto_check.isChecked():
+            return
+        found, total, avg_conf = self._detection_disagreement(results)
+        score = active_learning.disagreement_score(found, 1, total, avg_conf)
+        keep, reason = self._live_gate.consider(score)
+        if keep:
+            self._keep_frame(self._live_frame, reason)
+        self.live_capture_label.setText(live_logic.capture_note(
+            self._live_gate.captured, self._live_gate.limit, reason))
+
+    @staticmethod
+    def _scaled_overlay_items(items: list[dict], scale) -> list[dict]:
+        """Move overlays from full-frame coordinates into the preview's.
+
+        Skipped entirely at 1:1, which is the common case once preview scaling
+        is off -- copying every point to multiply it by one is pure waste on a
+        path that runs several times a second.
+        """
+        sx, sy = float(scale[0]), float(scale[1])
+        if abs(sx - 1.0) < 1e-6 and abs(sy - 1.0) < 1e-6:
+            return items
+        out: list[dict] = []
+        for item in items:
+            scaled = dict(item)
+            if item.get("points"):
+                scaled["points"] = [[x * sx, y * sy] for x, y in item["points"]]
+            if item.get("xyxy"):
+                x1, y1, x2, y2 = item["xyxy"]
+                scaled["xyxy"] = [x1 * sx, y1 * sy, x2 * sx, y2 * sy]
+            if "cx" in item:
+                scaled["cx"] = item["cx"] * sx
+            if "cy" in item:
+                scaled["cy"] = item["cy"] * sy
+            out.append(scaled)
+        return out
+
+    def _on_live_auto_toggled(self, armed: bool) -> None:
+        if armed:
+            self._live_gate = live_logic.CaptureGate()
+            self.live_capture_label.setText(live_logic.capture_note(
+                0, live_logic.CAPTURE_SESSION_LIMIT, ""))
+        else:
+            self.live_capture_label.setText("")
+
+    def keep_live_frame(self) -> None:
+        """Save what is on screen into this label's dataset, by hand."""
+        frame = getattr(self, "_live_frame", None)
+        if frame is None:
+            frame = self.last_raw
+        if frame is None:
+            QMessageBox.information(
+                self, "Keep Frame",
+                "No frame yet. Open the live preview and try again.")
+            return
+        self._keep_frame(frame, "kept by hand")
+
+    def closeEvent(self, event) -> None:
+        """Bring the inference thread down before the window goes.
+
+        A QThread outliving its window is how a Qt app exits with a crash
+        instead of a return code, and the operator sees a dialog rather than a
+        clean shutdown.
+        """
+        try:
+            if self._live_running():
+                self.stop_live_detect()
+            if self._camera_is_live():
+                self.close_camera()
+        except Exception:
+            pass
+        super().closeEvent(event)
+    def _keep_frame(self, frame, reason: str) -> None:
+        if not self.label_id:
+            QMessageBox.information(
+                self, "Keep Frame",
+                "Open a label first -- the frame goes into that label's dataset.")
+            return
+        raw_path, _adjusted = save_capture(self.label_id, frame, None, save_raw=True)
+        if raw_path is None:
+            return
+        if hasattr(self, "_live_gate"):
+            self._live_gate.mark()
+        self._last_capture_path = raw_path
+        self._dataset_index_dirty = True
+        self._refresh_images(force=True)
+        self._update_dataset_summary()
+        self.status.showMessage(
+            f"Kept {raw_path.name} into {self.label_id} — {reason}", 6000)
     def _label_tab(self) -> QWidget:
         """The label library and the dataset for the label being trained.
 
@@ -3572,6 +3884,10 @@ class MainWindow(QMainWindow):
         self.status.showMessage(self.camera.last_result.message, 8000)
 
     def close_camera(self) -> None:
+        # Nothing to infer on once the stream stops, and a worker left running
+        # would hold a model and a thread for no reason.
+        if self._live_running():
+            self.stop_live_detect()
         self.timer.stop()
         self.camera.close()
         self._refresh_live_mode()
@@ -3663,6 +3979,20 @@ class MainWindow(QMainWindow):
         preview_frame = self._scale_preview_frame(frame)
         self.last_adjusted = self._adjust_live_frame(preview_frame)
         self.canvas.set_frame(self.last_adjusted)
+
+        # Inference runs on the full-resolution frame, not the preview: the
+        # point of this view is to see what the model does at the resolution
+        # production will hand it. The overlays come back in full-frame
+        # coordinates and are scaled to the preview before being drawn.
+        if self._live_running():
+            try:
+                self._live_overlay_scale = (
+                    preview_frame.shape[1] / float(frame.shape[1]),
+                    preview_frame.shape[0] / float(frame.shape[0]),
+                )
+            except Exception:
+                self._live_overlay_scale = (1.0, 1.0)
+            self._pump_live_detect(frame)
 
         self._preview_frame_counter += 1
         now_t = time.perf_counter()
@@ -4663,13 +4993,28 @@ class MainWindow(QMainWindow):
                 counts[name] = counts.get(name, 0) + 1
         return items, counts
     @staticmethod
+    @staticmethod
     def _safe_np(obj, attr):
-        """Ultralytics tensor attribute as numpy, or [] if absent/on another device."""
+        """An Ultralytics tensor attribute as numpy, or [] if it is not there.
+
+        Torch tensors need .cpu() first; anything already array-like is taken as
+        it comes. Requiring .cpu() unconditionally meant a plain array returned
+        [] and the detections vanished with no error anywhere -- the worst shape
+        for a bug on a display path.
+        """
+        value = getattr(obj, attr, None)
+        if value is None:
+            return []
         try:
-            return getattr(obj, attr).cpu().numpy()
+            return value.cpu().numpy()
+        except AttributeError:
+            pass
         except Exception:
             return []
-
+        try:
+            return np.asarray(value)
+        except Exception:
+            return []
     def open_image(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "Open image", str(dataset_folder(self.label_id)), "Images (*.jpg *.jpeg *.png *.bmp)")
         if path:
