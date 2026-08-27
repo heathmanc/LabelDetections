@@ -456,6 +456,53 @@ class ImageCanvas(QWidget):
         br = self._image_to_screen_rect(b)
         return QPolygonF([QPointF(br.left(), br.top()), QPointF(br.right(), br.top()), QPointF(br.right(), br.bottom()), QPointF(br.left(), br.bottom())])
 
+    @staticmethod
+    def _top_edge_midpoint(poly: QPolygonF) -> QPointF:
+        """Where a quad's name plate goes: over its top edge, clear of it.
+
+        The tag used to hang off the corner of the box's axis-aligned bounding
+        rect, which for anything rotated is a corner of empty space -- the more
+        the label is turned, the further its name drifted from it. A quad's top
+        edge is on the object at every angle.
+
+        Two coordinates from two different places, on purpose. The x is the
+        middle of the top edge -- the edge whose midpoint sits highest, which
+        for a rectangle at any angle is the edge between the two highest
+        corners, and which stays well defined for a quad dragged into a shape
+        that is not a rectangle. The y is the highest corner, because on a
+        turned box that corner rises above the edge's midpoint and a tag
+        placed off the midpoint alone cuts through it.
+        """
+        points = [poly.at(i) for i in range(min(4, poly.count()))]
+        if not points:
+            return QPointF()
+        if len(points) < 2:
+            return points[0]
+        best = None
+        for i in range(len(points)):
+            a, b = points[i], points[(i + 1) % len(points)]
+            mid = QPointF((a.x() + b.x()) / 2.0, (a.y() + b.y()) / 2.0)
+            if best is None or mid.y() < best.y():
+                best = mid
+        return QPointF(best.x(), min(pt.y() for pt in points))
+
+    def _draw_tag(self, p: QPainter, anchor: QPointF, text: str,
+                  color: QColor) -> None:
+        """A name plate centred on ``anchor``, sitting just clear of the box.
+
+        Above the edge normally; flipped below when the box is near the top of
+        the view, because a tag clamped to y=0 is the far-away tag again.
+        """
+        width = max(70, min(220, len(text) * 8 + 14))
+        left = int(anchor.x() - width / 2.0)
+        top = int(anchor.y()) - 22
+        if top < 0:
+            top = int(anchor.y()) + 3
+        left = max(0, min(left, self.width() - width))
+        p.fillRect(QRect(left, top, width, 20), QColor(0, 0, 0, 175))
+        p.setPen(QPen(color, 1))
+        p.drawText(left + 6, top + 15, text)
+
     def _handle_at_screen_pos(self, pos: QPoint) -> tuple[int, int] | None:
         handle_radius = 10
         for i, b in enumerate(self.boxes):
@@ -677,6 +724,7 @@ class ImageCanvas(QWidget):
                     color = QColor(34, 197, 94)
 
                 br = QRect()
+                anchor = None
                 p.setBrush(Qt.NoBrush)
                 p.setPen(QPen(color, 3 if is_battery else 2))
                 if typ.endswith("_obb"):
@@ -684,6 +732,8 @@ class ImageCanvas(QWidget):
                     if len(pts) >= 4:
                         poly = QPolygonF([self._image_to_screen_point(float(x), float(y)) for x, y in pts[:4]])
                         p.drawPolygon(poly)
+                        # On the box itself, whatever angle it is at.
+                        anchor = self._top_edge_midpoint(poly)
                         xs = [float(x) for x, _y in pts[:4]]
                         ys = [float(y) for _x, y in pts[:4]]
                         b = Box(min(xs), min(ys), max(1, max(xs) - min(xs)), max(1, max(ys) - min(ys)), 0, "model", "box")
@@ -705,15 +755,10 @@ class ImageCanvas(QWidget):
 
                 default_label = "battery" if is_battery else ("class" if is_other else "bung")
                 label = str(item.get("label", default_label))
-                if is_battery:
-                    sp = self._image_to_screen_point(cx, cy)
-                    p.fillRect(QRect(int(sp.x() - 125), int(sp.y() - 30), 250, 22), QColor(0, 0, 0, 175))
-                    p.setPen(QPen(color, 1))
-                    p.drawText(int(sp.x() - 120), int(sp.y() - 14), label)
-                elif not br.isNull():
-                    p.fillRect(QRect(br.x(), max(0, br.y() - 20), max(80, min(180, len(label) * 8 + 12)), 20), QColor(0, 0, 0, 160))
-                    p.setPen(QPen(color, 1))
-                    p.drawText(br.x() + 5, max(14, br.y() - 5), label)
+                if anchor is None and not br.isNull():
+                    anchor = QPointF(br.center().x(), br.top())
+                if anchor is not None:
+                    self._draw_tag(p, anchor, label, color)
             elif typ == "pattern_point":
                 status = str(item.get("status", "expected")).lower()
                 if status == "found":
@@ -769,9 +814,11 @@ class ImageCanvas(QWidget):
                     color = self._class_color(b, selected)
                     p.setPen(QPen(color, 3 if selected else 2))
                     p.setBrush(Qt.NoBrush)
+                    tag_anchor = None
                     if b.kind == "obb":
                         poly = self._screen_polygon(b)
                         p.drawPolygon(poly)
+                        tag_anchor = self._top_edge_midpoint(poly)
                         br = self._image_to_screen_rect(b)
                         if not low_detail:
                             # Draw corner handles for every OBB; make selected ones larger/brighter.
@@ -794,10 +841,9 @@ class ImageCanvas(QWidget):
                         # both need someone to look at it.
                         self._draw_regions(p, b, color)
                         tag = f"{b.label_id or b.label} [{b.kind.upper()}]"
-                        tag_w = max(90, min(170, len(tag) * 8 + 14))
-                        p.fillRect(QRect(br.x(), max(br.y() - 22, 0), tag_w, 22), QColor(0, 0, 0, 170))
-                        p.setPen(QPen(color, 1))
-                        p.drawText(br.x() + 5, max(br.y() - 6, 14), tag)
+                        if tag_anchor is None:
+                            tag_anchor = QPointF(br.center().x(), br.top())
+                        self._draw_tag(p, tag_anchor, tag, color)
 
             if not low_detail:
                 self._draw_model_test_overlays(p)

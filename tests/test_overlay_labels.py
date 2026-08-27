@@ -98,3 +98,38 @@ if __name__ == "__main__":
                 print(f"FAIL {name}")
                 traceback.print_exc()
     raise SystemExit(1 if failures else 0)
+
+
+# --- where the name plate sits ---------------------------------------------
+
+def test_the_tag_anchors_to_the_box_not_to_the_space_beside_it():
+    """It used to hang off the corner of the axis-aligned bounding rect. For a
+    rotated label that corner is empty space, and the more the label is turned
+    the further its name drifts from it."""
+    from PySide6.QtCore import QPointF
+    from PySide6.QtGui import QPolygonF
+    from label_detections.ui.canvas import ImageCanvas
+
+    # A square turned 45 degrees: the bounding-rect corner is (0, 0), which is
+    # 35 px of nothing away from the nearest point of the box.
+    diamond = QPolygonF([QPointF(50, 0), QPointF(100, 50),
+                         QPointF(50, 100), QPointF(0, 50)])
+    anchor = ImageCanvas._top_edge_midpoint(diamond)
+
+    # Horizontally over the top edge -- one of the two upper edge midpoints,
+    # not the bounding rect's empty corner.
+    assert anchor.x() in (25.0, 75.0)
+    # Vertically clear of the highest corner, so the plate does not cut
+    # through the point of a turned box.
+    assert anchor.y() == 0.0
+
+
+def test_an_upright_box_tags_the_middle_of_its_top_edge():
+    from PySide6.QtCore import QPointF
+    from PySide6.QtGui import QPolygonF
+    from label_detections.ui.canvas import ImageCanvas
+
+    upright = QPolygonF([QPointF(10, 20), QPointF(110, 20),
+                         QPointF(110, 80), QPointF(10, 80)])
+    anchor = ImageCanvas._top_edge_midpoint(upright)
+    assert (anchor.x(), anchor.y()) == (60.0, 20.0)
