@@ -126,7 +126,7 @@ def test_the_readout_never_claims_the_model_identified_the_label():
     book.update([(1, "spec_plate", 0.94)], now=0.0)
     tracked = ld.track_summary(book, "spec_plate", "sp_g31", rolling)
     assert not tracked.splitlines()[1].startswith("sp_g31")
-    assert "spec_plate: held" in tracked
+    assert "#1 spec_plate 0.94" in tracked
     assert "the family sp_g31 belongs to" in tracked
 
 
@@ -351,15 +351,16 @@ def test_the_tracked_readout_reports_a_held_average_not_a_flicker():
     win._live_tracks = ld.TrackBook()
     win._live_overlay_scale = (1.0, 1.0)
     try:
-        for conf in (0.88, 0.94, 0.91):
+        # Chosen so the mean (0.90) and the last frame (1.00) differ: with
+        # 0.88/0.94/0.91 they are both 0.91 and the assertion proves nothing.
+        for conf in (0.80, 0.90, 1.00):
             win._on_live_result(
                 [_Results([[10, 10, 40, 40]], {0: "spec_plate"}, [conf], [0],
                           ids=[7])], 0.02)
         text = win.live_readout.toPlainText()
         assert "1 tracked" in text
-        assert "spec_plate: held 3 frames" in text
-        assert "#7 spec_plate:" in text
-        assert "0.91 mean over 3 frames" in text
+        assert "#7 spec_plate 0.90" in text, "showed the latest frame, not the mean"
+        assert "frames" not in text
     finally:
         win._live_thread = None
 
@@ -451,7 +452,7 @@ def test_the_track_summary_says_when_the_active_label_is_not_tracked():
     rolling = ld.Rolling()
     rolling.record(0.01, now=100)
     text = ld.track_summary(book, "spec_plate", "sp_g31", rolling)
-    assert "spec_plate: NOT TRACKED" in text
+    assert "spec_plate NOT TRACKED" in text
     assert "#1 cert_mark" in text
 
 

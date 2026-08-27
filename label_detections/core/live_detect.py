@@ -234,13 +234,17 @@ class TrackBook:
         rows = self.rows()
         if not rows:
             return "No tracked objects."
-        lines = []
-        for track in rows:
-            lines.append(
-                f"#{track.track_id} {track.name}: {track.last_conf:.2f} now, "
-                f"{track.mean_conf:.2f} mean over {track.frames} frames "
-                f"({track.min_conf:.2f}-{track.max_conf:.2f})")
-        return "\n".join(lines)
+        return "\n".join(track_line(t) for t in rows)
+
+
+# One line per tracked object: which one it is, and how sure the model is.
+# The frame counts and the min/max spread the readout used to carry were the
+# evidence *for* the mean rather than the answer, and they pushed the two
+# numbers an operator is actually reading off the end of the line. They are
+# still recorded -- rows() orders by them, and a mean is only worth reading
+# because it is held over frames -- just not printed.
+def track_line(track: Track) -> str:
+    return f"#{track.track_id} {track.name} {track.mean_conf:.2f}"
 
 
 def track_summary(book: TrackBook, family: str, label_id: str,
@@ -248,16 +252,18 @@ def track_summary(book: TrackBook, family: str, label_id: str,
     """The readout when tracking is on."""
     rows = book.rows()
     lines = [f"{len(rows)} tracked   {rolling.mean_ms:.0f} ms   {rolling.rate:.1f}/s"]
-    if family:
-        mine = [t for t in rows if t.name == family]
-        if mine:
-            best = mine[0]
-            lines.append(f"{family}: held {best.frames} frames, "
-                         f"mean {best.mean_conf:.2f}{_belongs(label_id)}")
-        else:
-            lines.append(f"{family}: NOT TRACKED{_belongs(label_id)}")
-    lines.append("")
-    lines.append(book.text())
+    mine = [t for t in rows if t.name == family] if family else []
+    if family and not mine:
+        # The one thing worth a line of its own: the family the open label
+        # belongs to is not on screen at all.
+        lines.append(f"{family} NOT TRACKED{_belongs(label_id)}")
+    for track in rows:
+        # Annotate only the longest-held match, so a battery carrying two of
+        # the same family does not repeat the note down the list.
+        note = _belongs(label_id) if (mine and track is mine[0]) else ""
+        lines.append(track_line(track) + note)
+    if not rows:
+        lines.append("No tracked objects.")
     return "\n".join(lines)
 
 
