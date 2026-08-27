@@ -593,3 +593,28 @@ def test_a_healthy_dataset_is_not_nagged():
     scales = {"a": sr.LabelScale("a", [800.0] * 60, [5496.0] * 60),
               "b": sr.LabelScale("b", [900.0] * 55, [5496.0] * 55)}
     assert sr.data_health(scales, None) == []
+
+
+def test_a_large_library_is_advised_toward_the_generic_detector():
+    """At hundreds of labels the deciding cost is onboarding, not pixels: one
+    class per label means a full detector retrain for every new SKU."""
+    from label_detections.core import scale_report as sr
+    from label_detections.core.labels import LabelDef, LabelLibrary
+
+    lib = LabelLibrary([LabelDef(label_id=f"lbl{i}") for i in range(300)])
+    scales = {"a": sr.LabelScale("a", [872.0] * 81, [5496.0] * 81)}
+    text = sr.advise(scales, lib, imgsz=1024)
+    assert "B, at 300 labels" in text
+    assert "onboarding, not pixels" in text
+
+
+def test_a_small_library_is_still_advised_toward_the_simpler_option():
+    """The same code must not always say B -- at two labels the second model
+    is complexity bought for nothing."""
+    from label_detections.core import scale_report as sr
+    from label_detections.core.labels import LabelDef, LabelLibrary
+
+    lib = LabelLibrary([LabelDef(label_id="a"), LabelDef(label_id="b")])
+    scales = {"a": sr.LabelScale("a", [872.0] * 81, [5496.0] * 81)}
+    text = sr.advise(scales, lib, imgsz=1024)
+    assert "A is the simpler place to start" in text

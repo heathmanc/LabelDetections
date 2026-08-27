@@ -368,6 +368,16 @@ def min_imgsz_for_identity(scales: dict[str, LabelScale],
 # a static station with time to spare can go higher.
 IMPRACTICAL_IMGSZ = 2048
 
+# Above this many labels, how a new one is ONBOARDED dominates every
+# resolution argument. Under one class per label, adding label N+1 means
+# drawing boxes on its images and retraining a detector that now has N+1
+# classes -- then re-checking the other N did not regress. Under a generic
+# detector the detector never changes: it already finds label-shaped things it
+# has never seen, so a new label is crops and a classifier retrain, and the
+# crops can come from the detector itself rather than from anyone drawing
+# boxes. That difference compounds with library size; resolution does not.
+MANY_LABELS = 20
+
 
 def advise(scales: dict[str, LabelScale], library=None,
            imgsz: int = DEFAULT_IMGSZ) -> str:
@@ -425,6 +435,7 @@ def advise(scales: dict[str, LabelScale], library=None,
             f"{at_now:.0f} px label is easy; identifying one is not.",
         ]
     else:
+        count = len(library.all()) if library is not None else len(scales)
         lines += [
             f"Under-resolved at this input: {', '.join(weak)}. Two ways to fix "
             f"it, and they are a real choice:",
@@ -436,14 +447,33 @@ def advise(scales: dict[str, LabelScale], library=None,
             "",
             f"B) Two-stage: detector stays at {imgsz} and only localises, "
             f"identity comes from a {crop} px crop of the full-resolution "
-            f"frame. Cheaper per frame, and a new label needs no detector "
-            f"retrain -- at the price of two models to train, version and keep "
-            f"matched.",
+            f"frame. Two models to train and keep matched.",
             "",
-            f"With {len(scales)} label(s) in the library, A is the simpler "
-            f"place to start; B earns its complexity as the library grows or "
-            f"if A still confuses two labels.",
         ]
+        if count >= MANY_LABELS:
+            lines += [
+                f"B, at {count} labels -- and the reason is onboarding, not "
+                f"pixels.",
+                f"Under A, label {count + 1} means drawing boxes on its images, "
+                f"retraining a detector that now carries {count + 1} classes, "
+                f"and re-checking the other {count} did not regress. Under B "
+                f"the detector never changes: it already finds label-shaped "
+                f"things it has never seen, so a new label is crops plus a "
+                f"classifier retrain -- and the crops come from the detector "
+                f"itself instead of from anyone drawing boxes.",
+                "That cost compounds with every label added. Resolution does "
+                "not.",
+                "Classifiers also carry hundreds of classes far more happily "
+                "than a detection head, which is splitting its capacity "
+                "between where and which at every anchor.",
+            ]
+        else:
+            lines += [
+                f"At {count} label(s), A is the simpler place to start. B earns "
+                f"its complexity past about {MANY_LABELS} labels, where "
+                f"retraining the detector for each new one starts to dominate, "
+                f"or sooner if A confuses two labels.",
+            ]
 
     lines.append("")
     fine: list[str] = []

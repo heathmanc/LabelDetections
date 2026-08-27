@@ -2286,7 +2286,8 @@ class MainWindow(QMainWindow):
             data = live_logic.proposed_annotation(
                 raw_path.name, self.label_id, items,
                 width=width, height=height,
-                session=getattr(self, "_live_session", ""))
+                session=getattr(self, "_live_session", ""),
+                known_ids=[l.label_id for l in self.library.all()])
             persistence.save_annotation(self.label_id, raw_path.name, data)
         if hasattr(self, "_live_gate"):
             self._live_gate.mark()

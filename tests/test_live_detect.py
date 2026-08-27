@@ -481,7 +481,8 @@ def _item(name, conf=0.9, track_id=None, xyxy=None, points=None):
 
 
 def test_a_proposal_carries_the_id_the_detector_returned():
-    boxes = ld.proposed_boxes([_item("2220-9199", xyxy=[0, 0, 4, 4])])
+    boxes = ld.proposed_boxes([_item("2220-9199", xyxy=[0, 0, 4, 4])],
+                              known_ids=["2220-9199"])
     assert boxes[0]["label"] == "2220-9199"
     assert boxes[0]["label_id"] == "2220-9199"
 
@@ -795,3 +796,32 @@ def test_the_crop_size_comes_from_the_export_that_trained_the_classifier():
     weights.write_bytes(b"not a real model")
     assert win._live_crop_px(str(weights)) == 384
     assert win._live_crop_px("") == 224
+
+
+def test_a_generic_detector_does_not_invent_an_identity():
+    """Under a localise-only detector the class is "label", which is not an
+    identity. Stamping it would put label_id="label" on every box -- a value
+    no recipe contains and no library row matches."""
+    item = {"name": "label", "conf": 0.9, "xyxy": [0, 0, 4, 4]}
+    box = ld.proposed_boxes([item], known_ids=["2220-9199"])[0]
+    assert "label_id" not in box
+    assert box["label"] == "label", "the detector's own answer still records"
+
+
+def test_a_known_class_still_stamps_its_identity():
+    item = {"name": "2220-9199", "conf": 0.9, "xyxy": [0, 0, 4, 4]}
+    box = ld.proposed_boxes([item], known_ids=["2220-9199"])[0]
+    assert box["label_id"] == "2220-9199"
+
+
+def test_an_unknown_from_the_classifier_stamps_nothing():
+    """Below its floor stage 2 returns UNKNOWN, which must not become an id."""
+    item = {"name": ld.UNKNOWN, "conf": 0.4, "xyxy": [0, 0, 4, 4]}
+    assert "label_id" not in ld.proposed_boxes([item], known_ids=["a"])[0]
+
+
+def test_with_no_library_given_nothing_is_stamped():
+    """A missing identity is visible; an invented one is not. Default to the
+    visible failure."""
+    item = {"name": "2220-9199", "conf": 0.9, "xyxy": [0, 0, 4, 4]}
+    assert "label_id" not in ld.proposed_boxes([item])[0]

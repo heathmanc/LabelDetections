@@ -302,21 +302,28 @@ def _item_points(item: dict) -> list[list[float]]:
     return []
 
 
-def proposed_boxes(items, label_id: str = "") -> list[dict]:
+def proposed_boxes(items, label_id: str = "", known_ids=None) -> list[dict]:
     """Sidecar boxes from live detections, as proposals.
 
-    The detector returns a label id, so the class it reports *is* the box's
-    identity -- no guessing which of them this one is. ``label_id`` is not
-    taken from the label the operator happens to have open: a battery carries
-    several labels and the model names each one, so overwriting that with the
-    open label would throw away the answer and put one identity on every box.
+    ``label_id`` is written only when the reported class is genuinely a label
+    in the library. That distinction is what makes this work under both
+    detectors:
 
-    Structural classes carry no identity, which is correct: ``battery_side``
-    is the face, not a label, and the recipe never counts it.
+    - A per-label detector reports "2220-9199", which IS the identity.
+    - A generic detector reports "label", which is not an identity at all --
+      and stamping it would put label_id="label" on every box, a value no
+      recipe contains and no library row matches. Left blank, the box says
+      what is true: something label-shaped is here, nobody has said what.
+    - After stage 2 has run, the class is the classifier's answer, so a known
+      one stamps and an "unknown" correctly does not.
+
+    Without ``known_ids`` nothing is stamped, which is the safe direction: a
+    missing identity is visible, an invented one is not.
     """
     from . import annotations as ann
     from .labels import STRUCTURAL_CLASSES
 
+    known = set(known_ids or ())
     out: list[dict] = []
     for item in items or []:
         name = str(item.get("name", "") or "")
@@ -326,9 +333,9 @@ def proposed_boxes(items, label_id: str = "") -> list[dict]:
         extra: dict = {"proposed_by": PROPOSED_BY}
         if item.get("track_id") is not None:
             extra["track_id"] = int(item["track_id"])
+        identity = name if (name in known and name not in STRUCTURAL_CLASSES) else ""
         out.append(ann.make_box(
-            name, points,
-            label_id="" if name in STRUCTURAL_CLASSES else name,
+            name, points, label_id=identity,
             confidence=float(item.get("conf", 0.0)),
             **extra))
     return out
@@ -336,7 +343,7 @@ def proposed_boxes(items, label_id: str = "") -> list[dict]:
 
 def proposed_annotation(image: str, label_id: str, items,
                         width: int = 0, height: int = 0,
-                        session: str = "") -> dict:
+                        session: str = "", known_ids=None) -> dict:
     """A sidecar pre-filled with what the model just found. Never reviewed.
 
     ``label_id`` records whose dataset the image landed in, not what the boxes
@@ -348,7 +355,7 @@ def proposed_annotation(image: str, label_id: str, items,
     if session:
         meta["session"] = session
     data = ann.new_annotation(image, label_id, width, height, **meta)
-    data["boxes"] = proposed_boxes(items, label_id)
+    data["boxes"] = proposed_boxes(items, label_id, known_ids)
     return data
 
 
