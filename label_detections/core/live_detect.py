@@ -30,6 +30,12 @@ from dataclasses import dataclass, field
 # like the GPU not being used, which is how it was found.
 MIN_INTERVAL_S = 0.01
 
+# How long to wait for a result before assuming it is never coming. The busy
+# flag is cleared by the result, so a result that never arrives -- a worker
+# exception Qt swallowed, a signal dropped on shutdown -- freezes the view
+# permanently with no error and no way back but a restart.
+BUSY_TIMEOUT_S = 5.0
+
 # How badly the model has to do before an armed capture keeps the frame.
 # Scored by active_learning.disagreement_score, where a clean single detection
 # is 0 and a complete miss is 10.

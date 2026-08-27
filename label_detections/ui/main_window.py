@@ -21,7 +21,7 @@ if not getattr(sys, "frozen", False):
 import numpy as np
 
 import cv2
-from PySide6.QtCore import QTimer, Qt, QProcess, QRectF, QPointF, QEvent
+from PySide6.QtCore import QTimer, Qt, QProcess, QRectF, QPointF, QEvent, Signal
 from PySide6.QtGui import QAction, QKeySequence, QIntValidator, QTextCursor, QColor, QPainter, QPen, QIcon
 from PySide6.QtWidgets import (
     QApplication,
@@ -293,6 +293,12 @@ class TrainingMetricsChart(QWidget):
 
 
 class MainWindow(QMainWindow):
+    # Emitted to hand a frame to the inference worker. A signal, because
+    # moveToThread only makes SIGNAL-slot connections queued -- calling
+    # worker.infer() directly ran the model on the GUI thread, which is what
+    # made a slow model into a slow preview.
+    infer_requested = Signal(object)
+
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle(APP_TITLE)
@@ -347,6 +353,7 @@ class MainWindow(QMainWindow):
         self._live_tracking = True
         self._live_last_started = 0.0
         self._live_device_line = ""
+        self._live_loaded = False
         # Set here rather than in start_live_detect: results can arrive on
         # paths that never went through it, and an unset counter turns a quiet
         # view into a crash.
@@ -2158,6 +2165,7 @@ class MainWindow(QMainWindow):
         self._live_tracks = live_logic.TrackBook()
         self._live_last_started = 0.0
         self._live_busy = False
+        self._live_loaded = False
         self._live_frame = None
         self._live_counts = {}
         self._live_empty = 0
@@ -2179,6 +2187,7 @@ class MainWindow(QMainWindow):
         self._live_worker.loaded.connect(self._on_live_loaded)
         self._live_worker.failed.connect(self._on_live_failed)
         self._live_worker.result.connect(self._on_live_result)
+        self.infer_requested.connect(self._live_worker.infer)
         self._live_thread.started.connect(self._live_worker.load)
         self._live_thread.start()
 
@@ -2216,6 +2225,8 @@ class MainWindow(QMainWindow):
         return getattr(self, "_live_thread", None) is not None
 
     def _on_live_loaded(self, message: str) -> None:
+        self._live_loaded = True
+        self._live_busy = False
         self._live_device_line = message
         self.live_status_label.setText(f"{message}\nWatching the live view.")
 
@@ -2231,9 +2242,14 @@ class MainWindow(QMainWindow):
         whenever the model finishes, instead of the preview stuttering along at
         the model's pace.
         """
-        if not self._live_running() or frame is None:
+        if not self._live_running() or frame is None or not self._live_loaded:
             return
         now = time.monotonic()
+        if self._live_busy and (now - self._live_last_started) > live_logic.BUSY_TIMEOUT_S:
+            self._live_busy = False
+            self.live_status_label.setText(
+                "A frame's result never came back; carrying on. If this repeats, "
+                "the model is failing on every frame -- check the message above.")
         if not live_logic.should_infer(self._live_busy, now - self._live_last_started):
             return
         self._live_busy = True
@@ -2246,7 +2262,7 @@ class MainWindow(QMainWindow):
         self._live_frame = (frame if getattr(self.camera, "threaded", False)
                             else frame.copy())
         # Queued across the thread boundary by Qt, so this returns immediately.
-        self._live_worker.infer(self._live_frame)
+        self.infer_requested.emit(self._live_frame)
 
     def _on_live_result(self, results, latency: float, identities=None) -> None:
         self._live_busy = False

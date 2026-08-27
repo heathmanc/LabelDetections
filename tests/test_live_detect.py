@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -228,9 +229,13 @@ def test_nothing_is_handed_to_the_model_while_it_is_busy():
     win = _window()
     handed = []
     win._live_thread = object()          # pretend it is running
-    win._live_worker = type("W", (), {"infer": lambda _s, f: handed.append(f)})()
+    win._live_loaded = True              # ...and that the model finished loading
+    win.infer_requested.connect(handed.append)
     win._live_busy = True
-    win._live_last_started = 0.0
+    # Recent enough that the lost-result watchdog stays out of it, old enough
+    # that the minimum-interval floor is satisfied -- so this tests the busy
+    # flag and nothing else.
+    win._live_last_started = time.monotonic() - 1.0
     try:
         win._pump_live_detect(np.zeros((10, 10, 3), np.uint8))
         assert handed == []
@@ -238,9 +243,11 @@ def test_nothing_is_handed_to_the_model_while_it_is_busy():
         win._pump_live_detect(np.zeros((10, 10, 3), np.uint8))
         assert len(handed) == 1
     finally:
+        win.infer_requested.disconnect(handed.append)
         win._live_thread = None
         win._live_worker = None
         win._live_busy = False
+        win._live_loaded = False
 
 
 @ui
@@ -1082,3 +1089,54 @@ def test_a_failing_stage_two_does_not_take_stage_one_with_it():
     worker.infer(np.zeros((100, 200, 3), np.uint8))
     assert emitted, "stage 1 result was lost to a stage 2 failure"
     assert emitted[0][2] == [], "no identities, which is the correct degradation"
+
+
+@ui
+def test_no_frame_is_pumped_before_the_model_has_loaded():
+    """The wedge. infer() returns immediately when the model is not loaded yet,
+    and nothing on that path clears the busy flag -- so the one frame that
+    arrived during loading blocked every frame after it, forever. Moving the
+    model to CUDA at load made loading slow enough that this race went from
+    usually won to always lost."""
+    win = _window()
+    handed = []
+    win.infer_requested.connect(handed.append)
+    win._live_thread = object()
+    win._live_loaded = False
+    win._live_busy = False
+    win._live_last_started = 0.0
+    try:
+        win._pump_live_detect(np.zeros((10, 10, 3), np.uint8))
+        assert handed == [], "handed a frame to a model that does not exist yet"
+        assert win._live_busy is False, "busy latched with nothing able to clear it"
+
+        win._live_loaded = True
+        win._pump_live_detect(np.zeros((10, 10, 3), np.uint8))
+        assert len(handed) == 1
+    finally:
+        win.infer_requested.disconnect(handed.append)
+        win._live_thread = None
+        win._live_busy = False
+        win._live_loaded = False
+
+
+@ui
+def test_a_result_that_never_arrives_does_not_freeze_the_view():
+    """Any lost result -- an exception Qt swallowed, a signal dropped on
+    shutdown -- would otherwise leave the view frozen with no error and no way
+    back but a restart."""
+    win = _window()
+    handed = []
+    win.infer_requested.connect(handed.append)
+    win._live_thread = object()
+    win._live_loaded = True
+    win._live_busy = True
+    win._live_last_started = time.monotonic() - (ld.BUSY_TIMEOUT_S + 1)
+    try:
+        win._pump_live_detect(np.zeros((10, 10, 3), np.uint8))
+        assert len(handed) == 1, "never recovered from a lost result"
+    finally:
+        win.infer_requested.disconnect(handed.append)
+        win._live_thread = None
+        win._live_busy = False
+        win._live_loaded = False
