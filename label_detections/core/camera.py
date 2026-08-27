@@ -431,7 +431,13 @@ class CameraSource:
     # is, LabelDef.color_significant is where that gets recorded.
     BASLER_PIXEL_FORMATS = ("BayerRG8", "BayerBG8", "BayerGR8", "BayerGB8",
                             "Mono8", "BGR8", "RGB8", "YCbCr422_8")
-    DEFAULT_BASLER_PIXEL_FORMAT = "BayerRG8"
+    # Deliberately NOT BayerRG8 any more. Forcing a format changes the payload
+    # on the wire, and it is the only change in this whole run of commits that
+    # alters what the DEVICE does rather than what this program does with the
+    # result -- so it is the only one that can plausibly explain a crash that
+    # appeared alongside them. Bandwidth is worth having, but not before the
+    # camera is stable, and not as something nobody chose.
+    DEFAULT_BASLER_PIXEL_FORMAT = ""
 
     def _basler_pixel_format_options(self) -> list[str]:
         """What this camera actually offers, which is model-specific."""
@@ -1004,7 +1010,7 @@ class CameraSource:
                 return self._latest_ok, self._latest_frame.copy()
 
         if self.last_result.backend_name == "Basler/Pylon":
-            return self._read_basler_frame(timeout_ms=1000)
+            return self._read_basler_frame(timeout_ms=BASLER_GRAB_TIMEOUT_MS)
 
         if self._gst is not None:
             return self._gst.read()

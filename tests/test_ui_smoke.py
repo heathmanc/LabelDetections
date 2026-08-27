@@ -518,7 +518,11 @@ def test_the_basler_pixel_format_is_chosen_not_inherited():
                for i in range(win.pixel_format_combo.count())]
     assert "BayerRG8" in options and "Mono8" in options
     assert any(o.startswith("Auto") for o in options), "must allow leaving it alone"
-    assert win.pixel_format_combo.currentText() == "BayerRG8"
+    # Auto by default: forcing a format changes the payload on the wire, and
+    # that is the device behaving differently rather than this program handling
+    # it differently. Opt in, do not inherit.
+    assert win.pixel_format_combo.currentText().startswith("Auto")
+    assert CameraSource.DEFAULT_BASLER_PIXEL_FORMAT == ""
     assert "BayerRG8" in CameraSource.BASLER_PIXEL_FORMATS
 
 

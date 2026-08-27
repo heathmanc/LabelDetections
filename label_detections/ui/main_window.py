@@ -2924,7 +2924,8 @@ class MainWindow(QMainWindow):
             ["BayerRG8", "BayerBG8", "BayerGR8", "BayerGB8", "Mono8", "BGR8",
              "RGB8", "Auto (leave as camera is set)"])
         self.pixel_format_combo.setCurrentText(
-            str(self.camera_settings.get("pixel_format", "BayerRG8")))
+            str(self.camera_settings.get("pixel_format",
+                                         "Auto (leave as camera is set)")))
         self.pixel_format_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.pixel_format_combo.setToolTip(
             "What the Basler puts on the wire. Ignored by other backends.\n\n"
@@ -3025,6 +3026,14 @@ class MainWindow(QMainWindow):
         self.low_latency_check = QCheckBox("Low latency — reduce buffering/delay")
         self.low_latency_check.setChecked(bool(self.camera_settings.get("low_latency", True)))
         self.threaded_camera_check = QCheckBox("Threaded reader — smoother preview capture")
+        self.threaded_camera_check.setToolTip(
+            "Reads frames on a background thread. Turn it OFF to diagnose a "
+            "camera crash: without it there is no second thread touching the "
+            "camera at all, so any remaining concurrency problem in the driver "
+            "cannot occur.\n\n"
+            "The preview gets choppier and the GUI waits on each grab, but if "
+            "the crash stops with this unticked, the cause is concurrent access "
+            "to the device and not anything downstream of it.")
         self.threaded_camera_check.setChecked(bool(self.camera_settings.get("threaded_camera", True)))
         self.mjpg_check = QCheckBox("MJPG — request compressed camera stream")
         self.mjpg_check.setChecked(bool(self.camera_settings.get("mjpg", True)))
