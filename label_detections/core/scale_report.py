@@ -453,8 +453,12 @@ def advise(scales: dict[str, LabelScale], library=None,
         f"Frame {frame:.0f} px, detector input {imgsz} px -- a "
         f"{frame / max(imgsz, 1):.1f}x reduction before the model sees anything.",
         f"Your smallest label ({smallest.label_id}) is {smallest.median_px:.0f} px "
-        f"in frame and reaches the detector at {at_now:.0f} px "
-        f"(the floor for identity is about {ADEQUATE_PX:.0f}).",
+        f"in frame and reaches the detector at {at_now:.0f} px.",
+        f"Both of those are measured. The {ADEQUATE_PX:.0f} px identity floor "
+        f"they are judged against is a rule of thumb, not a measurement -- "
+        f"every image size below is that floor times "
+        f"frame/label, so halving it halves them. See PROVENANCE for the "
+        f"sensitivity, and the confusion matrix to settle it.",
         "",
     ]
 
@@ -632,6 +636,9 @@ def dataset_details(scales: dict[str, LabelScale], library=None,
             else ["  nothing flagged"])
     out.append("")
 
+    out.append(provenance(scales, imgsz))
+    out.append("")
+
     out.append("WHAT THE TOOL CONCLUDES")
     out.append("")
     out.append(advise(scales, library, imgsz, planned_labels))
@@ -717,3 +724,122 @@ def data_health(scales: dict[str, LabelScale], library=None) -> list[str]:
             f"contributes almost nothing to the loss and the model can score "
             f"well while never predicting it.")
     return issues
+
+
+# --- what is measured, and what is my opinion ------------------------------
+
+def provenance(scales: dict[str, LabelScale], imgsz: int = DEFAULT_IMGSZ) -> str:
+    """Separate the measurements from the assumptions, and show the sensitivity.
+
+    Every image size this module quotes is one line of arithmetic:
+
+        imgsz = floor_px * frame_px / label_px
+
+    frame_px and label_px are measured off the boxes an operator drew, and are
+    exact. floor_px is a threshold I picked. The arithmetic is therefore only
+    as good as that threshold, and the report was presenting its output with
+    the same authority as the measurements -- 1664 printed exactly like 5496,
+    with nothing saying one was counted and the other assumed.
+
+    So it prints the sensitivity instead of hiding it. If the answer swings
+    from 807 to 2017 across a plausible range of the floor, that is the honest
+    shape of the recommendation and the reader should see it.
+    """
+    if not scales:
+        return ""
+    smallest = min(scales.values(), key=lambda s: s.median_px)
+    frame = smallest.frame_sides[0] if smallest.frame_sides else 0.0
+    if not frame or not smallest.median_px:
+        return ""
+
+    def at(floor: float) -> int:
+        return int(math.ceil((floor * frame / smallest.median_px) / STRIDE) * STRIDE)
+
+    out = [
+        "PROVENANCE -- which of these numbers are facts",
+        "",
+        "MEASURED from the boxes you drew, exact:",
+        f"  frame long side           {frame:.0f} px",
+        f"  smallest label            {smallest.median_px:.0f} px "
+        f"({smallest.label_id}, median of {smallest.count})",
+        f"  what the detector gets    label_px * imgsz / frame_px",
+        "",
+        "ASSUMED -- thresholds I chose. Not measured, not from your data, and",
+        "not validated against your labels. Everything below rests on them:",
+        f"  identity floor            {ADEQUATE_PX} px of label",
+        f"  localisation floor        {LOCALISE_FLOOR_PX} px of label",
+        f"  'many labels'             {MANY_LABELS}",
+        f"  thin class                {THIN_CLASS_IMAGES} images",
+        "",
+        "HOW MUCH THAT MATTERS -- the recommendation across plausible floors:",
+        "  identity floor -> single-stage imgsz     localisation floor -> detector",
+    ]
+    ident = [128, 192, 256, 320]
+    local = [48, 64, 96, 128]
+    for i, l in zip(ident, local):
+        mark_i = " <-- used" if i == ADEQUATE_PX else ""
+        mark_l = " <-- used" if l == LOCALISE_FLOOR_PX else ""
+        out.append(f"    {i:>4} px -> {at(i):>5}{mark_i:<10}"
+                   f"        {l:>4} px -> {at(l):>5}{mark_l}")
+    out += [
+        "",
+        "The only way to settle the floor is empirical: train, then read the",
+        "confusion matrix. If labels are being mixed up, the floor was too low",
+        "for how alike yours are; if nothing is confused, it was higher than it",
+        "needed to be and you are paying for resolution you do not use.",
+        "Visually distinct labels tolerate a much lower floor than near-identical",
+        "ones, and no measurement here knows how alike yours look.",
+    ]
+    return "\n".join(out)
+
+
+# --- the short version -----------------------------------------------------
+
+def two_stage_settings(scales: dict[str, LabelScale], library=None,
+                       imgsz: int = DEFAULT_IMGSZ) -> str:
+    """What to type in, and the measurements behind it. Nothing else.
+
+    The long report exists to justify a choice between architectures. Once the
+    choice is made that justification is noise, and noise around a number is
+    how the number gets misread.
+    """
+    if not scales:
+        return "Nothing measured yet -- draw and save some boxes first."
+
+    smallest = min(scales.values(), key=lambda s: s.median_px)
+    largest = max(scales.values(), key=lambda s: s.median_px)
+    frame = smallest.frame_sides[0] if smallest.frame_sides else 0.0
+    det = min_imgsz_for_localisation(scales)
+    crop = crop_for_identity(scales)
+
+    out = [
+        "TWO-STAGE SETTINGS",
+        "",
+        "USE THESE",
+        f"  Detector imgsz      {det}      (Train tab, stage 1)",
+        f"  Classifier imgsz    {crop}      (Train tab, stage 2)",
+        f"  Inference imgsz     {det}      (Test Models tab -- must match the detector)",
+        "",
+        "MEASURED FROM YOUR BOXES",
+        f"  Frame long side     {frame:.0f} px",
+        f"  Smallest label      {smallest.median_px:.0f} px  ({smallest.label_id})",
+        f"  Largest label       {largest.median_px:.0f} px  ({largest.label_id})",
+        f"  At detector {det}    {smallest.detector_px(det, 'median'):.0f} px of the "
+        f"smallest label -- enough to find it",
+        "",
+        f"  Detector size is {LOCALISE_FLOOR_PX} px of the smallest label times "
+        f"frame/label. The {LOCALISE_FLOOR_PX} is a rule of thumb; if the "
+        f"detector misses labels, raise it.",
+        "",
+        "PER LABEL",
+        f"  {'label':<24} {'boxes':>6} {'median px':>10} {'at detector':>12}",
+    ]
+    for label_id in sorted(scales):
+        sc = scales[label_id]
+        out.append(f"  {label_id:<24} {sc.count:>6} {sc.median_px:>10.0f} "
+                   f"{sc.detector_px(det, 'median'):>12.0f}")
+
+    health = data_health(scales, library)
+    if health:
+        out += ["", "BEFORE TRAINING"] + [f"  * {h}" for h in health]
+    return "\n".join(out)

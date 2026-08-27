@@ -3333,12 +3333,19 @@ class MainWindow(QMainWindow):
             "and what the tool concludes from them.\n\n"
             "Plain text, no images, so it can be pasted anywhere it needs "
             "analysing.")
+        self.details_full_check = QCheckBox("Full analysis")
+        self.details_full_check.setToolTip(
+            "Add the architecture comparison, provenance and sensitivity "
+            "working under the settings. Off by default: once the "
+            "architecture is chosen, the justification for choosing it is "
+            "noise around the numbers you actually type in.")
         details_btn.setProperty("rightPanelButton", True)
         details_btn.setMinimumHeight(24)
         details_btn.setMaximumHeight(26)
         details_btn.setMinimumWidth(0)
         details_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         ev.addWidget(details_btn)
+        ev.addWidget(self.details_full_check)
 
         ev.addWidget(QLabel("Export task"))
         ev.addWidget(self.export_task_combo)
@@ -6575,9 +6582,14 @@ class MainWindow(QMainWindow):
             # Named, not counted. "3 datasets on disk" against two labels sent
             # someone looking for a third label that no longer exists.
             extra["orphaned folders (excluded)"] = ", ".join(orphans)
-        text = scale_report.dataset_details(
-            scales, self.library, imgsz=imgsz, extra=extra,
-            planned_labels=self._planned_labels())
+        text = scale_report.two_stage_settings(scales, self.library, imgsz=imgsz)
+        if orphans:
+            text += ("\n\nOrphaned folders on disk, excluded from export: "
+                     + ", ".join(orphans))
+        if self.details_full_check.isChecked():
+            text += "\n\n" + "=" * 70 + "\n\n" + scale_report.dataset_details(
+                scales, self.library, imgsz=imgsz, extra=extra,
+                planned_labels=self._planned_labels())
 
         EXPORT_DIR.mkdir(parents=True, exist_ok=True)
         out = EXPORT_DIR / "dataset_details.txt"
@@ -6615,10 +6627,13 @@ class MainWindow(QMainWindow):
             entries.extend(yolo_export.collect_entries(label_id, reviewed_only=False))
         imgsz = int(self.test_imgsz_spin.value()) if hasattr(self, "test_imgsz_spin") else 640
         scales = scale_report.measure(entries)
-        text = (scale_report.advise(scales, self.library, imgsz=imgsz,
-                                    planned_labels=self._planned_labels()) + "\n\n"
-                + "-" * 70 + "\n\nWORKING\n\n"
-                + scale_report.full_report(scales, self.library, imgsz=imgsz))
+        text = scale_report.two_stage_settings(scales, self.library, imgsz=imgsz)
+        if self.details_full_check.isChecked():
+            text += ("\n\n" + "-" * 70 + "\n\n"
+                     + scale_report.advise(scales, self.library, imgsz=imgsz,
+                                           planned_labels=self._planned_labels())
+                     + "\n\n" + scale_report.full_report(
+                         scales, self.library, imgsz=imgsz))
 
         box = QMessageBox(self)
         box.setWindowTitle("Label scale")

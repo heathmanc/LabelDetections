@@ -693,3 +693,57 @@ def test_the_advice_follows_where_the_library_is_heading():
     headed = sr.advise(scales, lib, imgsz=448, planned_labels=300)
     assert "B, heading for 300" in headed
     assert "A is the simpler place to start" not in headed
+
+
+def test_the_report_says_which_numbers_are_measured_and_which_are_assumed():
+    """1664 was printed exactly like 5496, with nothing saying one was counted
+    off the boxes and the other derived from a threshold I invented."""
+    from label_detections.core import scale_report as sr
+
+    scales = {"a": sr.LabelScale("a", [872.0] * 81, [5496.0] * 81)}
+    text = sr.provenance(scales, 448)
+    assert "MEASURED" in text and "ASSUMED" in text
+    assert "5496" in text.split("ASSUMED")[0], "frame size is a measurement"
+    assert str(sr.ADEQUATE_PX) in text.split("ASSUMED")[1], "the floor is an assumption"
+
+
+def test_the_sensitivity_of_the_recommendation_is_shown_not_hidden():
+    """If the answer swings from 832 to 2048 across a plausible range of the
+    floor, that is the honest shape of it."""
+    from label_detections.core import scale_report as sr
+
+    scales = {"a": sr.LabelScale("a", [872.0] * 81, [5496.0] * 81)}
+    text = sr.provenance(scales, 448)
+    assert "832" in text and "2048" in text
+    assert "<-- used" in text, "must mark which floor produced the recommendation"
+
+
+def test_the_recommendation_flags_its_own_assumption_inline():
+    """A caveat only in a section further down is a caveat most readers never
+    reach."""
+    from label_detections.core import scale_report as sr
+    from label_detections.core.labels import LabelDef, LabelLibrary
+
+    lib = LabelLibrary([LabelDef(label_id="a")])
+    scales = {"a": sr.LabelScale("a", [872.0] * 81, [5496.0] * 81)}
+    text = sr.advise(scales, lib, imgsz=448)
+    assert "rule of thumb, not a measurement" in text
+
+
+def test_the_default_report_is_the_settings_and_little_else():
+    """Once the architecture is chosen, the case for choosing it is noise
+    around the numbers actually being typed in."""
+    from label_detections.core import scale_report as sr
+
+    scales = {"a": sr.LabelScale("a", [872.0] * 81, [5496.0] * 81),
+              "b": sr.LabelScale("b", [3820.0] * 15, [5496.0] * 15)}
+    text = sr.two_stage_settings(scales, None, imgsz=448)
+
+    assert str(sr.min_imgsz_for_localisation(scales)) in text
+    assert str(sr.crop_for_identity(scales)) in text
+    assert "Inference imgsz" in text, "the mismatch that broke a whole session"
+    # None of the architecture argument survives into it.
+    for gone in ("A) Single-stage", "onboarding, not pixels", "PROVENANCE",
+                 "clean two-stage win", "Two ways to fix"):
+        assert gone not in text, f"still carrying the long-form argument: {gone!r}"
+    assert len(text.splitlines()) < 30, "short means short"
