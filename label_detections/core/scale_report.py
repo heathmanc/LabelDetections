@@ -41,9 +41,16 @@ COSTLY_CROP = 512
 MAX_CROP = 1024
 DEFAULT_IMGSZ = 640
 
-# Roughly the label width at which fine-grained identity stops being limited by
-# resolution and starts being limited by the model. A rule of thumb, and the
-# reason the report prefers per-region numbers wherever read-regions exist.
+# The label width below which identity is limited by resolution rather than by
+# the model. A rule of thumb -- the honest number depends on how alike two
+# labels are, which is why the report prefers per-region figures wherever
+# read-regions exist.
+#
+# ONE constant, deliberately. There used to be two -- 128 here and 256 in the
+# sizing helper -- answering the same question in two places, and on a real
+# dataset they reached opposite conclusions inside a single report: "you are
+# already there, single-stage" above "a clean two-stage win" below. A threshold
+# worth arguing about is worth arguing about once.
 ADEQUATE_PX = 256
 
 
@@ -322,9 +329,7 @@ def full_report(scales: dict[str, LabelScale], library=None,
 # coarse to read fine print on a large label, and unnecessary for the gross
 # identity the detector already has.
 
-# A label narrower than this in the detector's input is being asked to be
-# identified from very little. Gross artwork, not fine print.
-IDENTITY_FLOOR_PX = 128
+IDENTITY_FLOOR_PX = ADEQUATE_PX
 # A text region narrower than this cannot be read by anything. Rule of thumb;
 # codes have an exact figure via CodeSpec.min_pixels_needed().
 REGION_FLOOR_PX = 64
@@ -368,11 +373,10 @@ def advise(scales: dict[str, LabelScale], library=None,
            imgsz: int = DEFAULT_IMGSZ) -> str:
     """The recommendation, from the measurements rather than from taste.
 
-    The driving variable is the ratio between frame width and detector input.
-    A 3840 px frame at imgsz 1664 throws away 2.3x; a 5472 px frame at 1280
-    throws away 4.3x, and a 300 px label arrives as 70 px -- enough to find,
-    nowhere near enough to identify. Which of localise-then-crop or one big
-    detector wins is decided by that ratio, not by preference.
+    Presents a fork where one genuinely exists. Raising the detector's input
+    and cropping are both real answers to an under-resolved label, with
+    different costs, and picking one silently hides a decision that belongs to
+    whoever runs the line.
     """
     if not scales:
         return "Nothing measured yet -- draw and save some boxes first."
@@ -384,49 +388,64 @@ def advise(scales: dict[str, LabelScale], library=None,
     crop = recommend_crop(scales, imgsz)
     weak = under_resolved(scales, imgsz)
 
-    lines = [
-        "RECOMMENDATION",
-        "",
-        f"Frame {frame:.0f} px, detector input {imgsz} px -- a {frame / max(imgsz, 1):.1f}x "
-        f"reduction before the model sees anything.",
-        f"Your smallest label ({smallest.label_id}) is {smallest.median_px:.0f} px in "
-        f"frame and reaches the detector at {at_now:.0f} px.",
+    lines = ["RECOMMENDATION", ""]
+
+    health = data_health(scales, library)
+    if health:
+        lines.append("FIRST -- the data, which decides more than any of the below:")
+        lines += [f"  * {h}" for h in health]
+        lines.append("")
+
+    lines += [
+        f"Frame {frame:.0f} px, detector input {imgsz} px -- a "
+        f"{frame / max(imgsz, 1):.1f}x reduction before the model sees anything.",
+        f"Your smallest label ({smallest.label_id}) is {smallest.median_px:.0f} px "
+        f"in frame and reaches the detector at {at_now:.0f} px "
+        f"(the floor for identity is about {ADEQUATE_PX:.0f}).",
         "",
     ]
 
-    if need > IMPRACTICAL_IMGSZ:
+    if not weak:
         lines += [
-            f"1. Detector: keep imgsz around {imgsz}, and train it to LOCALISE only "
-            f"(one generic `label` class -- Export Two-Stage).",
-            f"   One detector doing identity as well would need imgsz {need} to give "
-            f"{smallest.label_id} the {IDENTITY_FLOOR_PX} px identity needs. That is a "
-            f"slow, memory-hungry model, and it is unnecessary: finding a "
-            f"{at_now:.0f} px label is easy, identifying one is not. Spend the "
-            f"resolution where the hard question is.",
+            f"Every label clears the floor at imgsz {imgsz}. Single-stage: one "
+            f"detector, one class per label, one pass, reporting the id the "
+            f"recipe is written in.",
+            "A crop stage would hand the classifier less than the detector "
+            "already has, so it would cost accuracy rather than add it.",
+        ]
+    elif need > IMPRACTICAL_IMGSZ:
+        lines += [
+            f"Under-resolved at this input: {', '.join(weak)}.",
+            f"One detector doing identity too would need imgsz {need}, which is "
+            f"slow and memory-hungry enough not to be worth it.",
             "",
-            f"2. Identity: classify the label crop, taken from the FULL-RESOLUTION "
-            f"frame at {crop} px.",
-            f"   {smallest.label_id} arrives at the classifier near its native "
-            f"{smallest.median_px:.0f} px -- roughly "
-            f"{smallest.median_px / max(at_now, 1):.1f}x what the detector had. This is "
-            f"where a {frame:.0f} px frame finally pays for itself.",
-            "",
+            f"So: detector at imgsz {imgsz} trained to LOCALISE only (one "
+            f"generic `label` class), then identity from a "
+            f"full-resolution crop at {crop} px. Finding a "
+            f"{at_now:.0f} px label is easy; identifying one is not.",
         ]
     else:
         lines += [
-            f"1. Detector, one class per label, imgsz {need}.",
-            f"   Sized so {smallest.label_id} still arrives at {IDENTITY_FLOOR_PX} px. "
-            + ("You are already there." if imgsz >= need else
-               f"At {imgsz} it arrives at {at_now:.0f} px, which is thin."),
-            "   One model, one pass, and it reports the id the recipe is written in.",
+            f"Under-resolved at this input: {', '.join(weak)}. Two ways to fix "
+            f"it, and they are a real choice:",
             "",
-            "2. A whole-label classifier would not help here: "
-            + (f"{', '.join(weak)} aside, " if weak else "")
-            + "the detector already resolves these labels, and a crop would hand it "
-              "less than it had.",
+            f"A) Single-stage at imgsz {need}. One model, one pass, no second "
+            f"thing to keep in step. Costs roughly "
+            f"{(need / max(imgsz, 1)) ** 2:.1f}x the inference time of {imgsz} "
+            f"and more memory to train.",
             "",
+            f"B) Two-stage: detector stays at {imgsz} and only localises, "
+            f"identity comes from a {crop} px crop of the full-resolution "
+            f"frame. Cheaper per frame, and a new label needs no detector "
+            f"retrain -- at the price of two models to train, version and keep "
+            f"matched.",
+            "",
+            f"With {len(scales)} label(s) in the library, A is the simpler "
+            f"place to start; B earns its complexity as the library grows or "
+            f"if A still confuses two labels.",
         ]
 
+    lines.append("")
     fine: list[str] = []
     if library is not None:
         for label_id in sorted(scales):
@@ -437,33 +456,20 @@ def advise(scales: dict[str, LabelScale], library=None,
                      if len(getattr(c, "region", []) or []) >= 4]
             fine += [f"{label_id}:{t.name}" for t in getattr(label, "text_fields", []) or []
                      if len(getattr(t, "region", []) or []) >= 4]
-
     if fine:
         lines += [
-            "3. Check the crop is large enough for your finest deciding region.",
-            f"   {len(fine)} region(s) defined: " + ", ".join(fine[:6])
-            + (" ..." if len(fine) > 6 else ""),
-            "   With two models the classifier is the last word, so whatever "
-            "separates two labels has to survive into its crop. The per-region "
-            "numbers below say whether it does. Where it does not, the honest "
-            "options are a bigger crop, a tighter field of view, or accepting "
-            "that those two labels are not separable by this pipeline.",
+            "Check the crop resolves your finest deciding region: "
+            + ", ".join(fine[:6]) + (" ..." if len(fine) > 6 else ""),
+            "Whatever separates two labels has to survive into whichever stage "
+            "makes the call. The per-region numbers below say whether it does.",
         ]
     else:
         lines += [
-            "3. No read-regions defined yet.",
-            "   Draw one over whatever distinguishes any two similar labels "
-            "(Define Regions). It costs nothing at runtime and it is the only "
-            "way this report can tell you whether the crop resolves the "
-            "difference -- otherwise the first sign is a confusion matrix.",
+            "No read-regions defined. Draw one over whatever distinguishes any "
+            "two similar labels (Define Regions) -- it is the only way this "
+            "report can tell you whether the difference survives, and with two "
+            "labels that look nothing alike it may simply not matter yet.",
         ]
-
-    lines += [
-        "",
-        "Confusable labels: list genuinely mistakable pairs in confusable_with. "
-        "Their images become each other's hard negatives, which is what teaches "
-        "the classifier the difference rather than hoping it notices.",
-    ]
     return "\n".join(lines)
 
 
@@ -534,6 +540,12 @@ def dataset_details(scales: dict[str, LabelScale], library=None,
                                f"{needed:.0f} px to decode")
         out.append("")
 
+    health = data_health(scales, library)
+    out.append("DATA HEALTH")
+    out += ([f"  * {h}" for h in health] if health
+            else ["  nothing flagged"])
+    out.append("")
+
     out.append("WHAT THE TOOL CONCLUDES")
     out.append("")
     out.append(advise(scales, library, imgsz))
@@ -543,3 +555,64 @@ def dataset_details(scales: dict[str, LabelScale], library=None,
     out.append(report(scales, imgsz, crop))
     out.append(region_report(scales, library, imgsz, crop))
     return "\n".join(out)
+
+
+# --- is there enough data to train this at all? ----------------------------
+#
+# Every number above is about resolution, and none of it matters for a class
+# with three images. This is the check that catches the dataset problems
+# resolution analysis walks straight past.
+
+# Below this a class is not learned so much as memorised. Not a hard floor --
+# a visually distinctive label may do fine on fewer -- but reporting nothing
+# until training fails is worse than reporting a rough number now.
+THIN_CLASS_IMAGES = 20
+# A box covering more of the frame than this is more likely a mis-draw -- the
+# battery face drawn as a label -- than a genuinely enormous label.
+SUSPICIOUS_FRAME_FRACTION = 0.60
+
+
+def data_health(scales: dict[str, LabelScale], library=None) -> list[str]:
+    """Problems with the collected data itself, worst first.
+
+    Separate from the resolution report because they fail differently: a
+    resolution problem makes a model worse, a data problem makes it untrained.
+    """
+    issues: list[str] = []
+    for label_id in sorted(scales):
+        sc = scales[label_id]
+        target = 0
+        if library is not None:
+            label = library.get(label_id)
+            target = int(getattr(label, "train_target", 0) or 0)
+
+        if sc.count <= 1:
+            issues.append(
+                f"{label_id}: {sc.count} box. It cannot be both trained and "
+                f"validated -- the split puts it on one side, so the class is "
+                f"either never learned or never checked. Whichever way it "
+                f"falls, the metrics will not mention it.")
+        elif sc.count < THIN_CLASS_IMAGES:
+            issues.append(
+                f"{label_id}: {sc.count} boxes, under the ~{THIN_CLASS_IMAGES} "
+                f"where a class starts being learned rather than memorised.")
+        elif target and sc.count < target:
+            issues.append(f"{label_id}: {sc.count} of {target} toward its target.")
+
+        if sc.frame_sides:
+            frac = sc.median_px / sc.frame_sides[0]
+            if frac > SUSPICIOUS_FRAME_FRACTION:
+                issues.append(
+                    f"{label_id}: covers {frac:.0%} of the frame. Worth opening "
+                    f"one to check it is the label and not the battery face -- "
+                    f"a face drawn as a label trains the detector to fire on "
+                    f"every battery.")
+
+    counts = [s.count for s in scales.values()]
+    if len(counts) > 1 and max(counts) >= 10 * max(min(counts), 1):
+        issues.append(
+            f"Class balance: {max(counts)} boxes for the largest class against "
+            f"{min(counts)} for the smallest. At that ratio the small class "
+            f"contributes almost nothing to the loss and the model can score "
+            f"well while never predicting it.")
+    return issues

@@ -507,8 +507,12 @@ def test_the_imgsz_requirement_is_never_silently_capped():
     from label_detections.core import scale_report as sr
 
     scales = {"small": sr.LabelScale("small", [300.0] * 4, [5472.0] * 4)}
-    assert sr.min_imgsz_for_identity(scales) == 2336
-    assert sr.min_imgsz_for_identity(scales) > sr.IMPRACTICAL_IMGSZ
+    # Derived from the floor rather than hard-coded, so tuning the threshold
+    # does not silently turn this into a test of nothing.
+    exact = sr.ADEQUATE_PX * 5472 / 300
+    got = sr.min_imgsz_for_identity(scales)
+    assert got >= exact and got - exact < sr.STRIDE
+    assert got > sr.IMPRACTICAL_IMGSZ
 
 
 def test_a_big_frame_pushes_the_advice_to_localise_then_crop():
@@ -520,7 +524,8 @@ def test_a_big_frame_pushes_the_advice_to_localise_then_crop():
               for n, w in (("big", 2000), ("small", 300))}
     text = sr.advise(scales, None, imgsz=1280)
     assert "LOCALISE only" in text
-    assert "2336" in text, "must state the requirement it is declining to meet"
+    need = sr.min_imgsz_for_identity(scales)
+    assert str(need) in text, "must state the requirement it is declining to meet"
 
 
 def test_a_modest_frame_keeps_the_single_detector_advice():
@@ -533,3 +538,58 @@ def test_a_modest_frame_keeps_the_single_detector_advice():
     text = sr.advise(scales, None, imgsz=1280)
     assert "one class per label" in text
     assert "LOCALISE only" not in text
+
+
+def test_the_report_cannot_recommend_two_things_at_once():
+    """It did. On real data section 1 said "single-stage, you are already
+    there" and the working below said "a clean two-stage win" -- two
+    thresholds, 128 and 256, answering one question in two places."""
+    from label_detections.core import scale_report as sr
+
+    scales = {"a": sr.LabelScale("a", [872.0] * 81, [5496.0] * 81),
+              "b": sr.LabelScale("b", [3822.0], [5496.0])}
+    assert sr.IDENTITY_FLOOR_PX == sr.ADEQUATE_PX
+    weak = sr.under_resolved(scales, imgsz=1024)
+    text = sr.advise(scales, None, imgsz=1024)
+    # Whatever it concludes, both halves must agree that 'a' is the problem.
+    assert weak == ["a"]
+    assert "Under-resolved at this input: a" in text
+    assert "you are already there" not in text.lower()
+
+
+def test_a_single_capture_class_is_called_out_before_any_resolution_advice():
+    """One box cannot be both trained and validated, and no amount of imgsz
+    fixes that -- so it belongs above the resolution analysis, not after it."""
+    from label_detections.core import scale_report as sr
+
+    scales = {"many": sr.LabelScale("many", [872.0] * 81, [5496.0] * 81),
+              "lonely": sr.LabelScale("lonely", [900.0], [5496.0])}
+    issues = sr.data_health(scales, None)
+    assert any("lonely: 1 box" in i for i in issues)
+    text = sr.advise(scales, None, imgsz=1024)
+    assert text.index("lonely: 1 box") < text.index("Frame 5496")
+
+
+def test_a_box_covering_most_of_the_frame_is_questioned():
+    """A battery face drawn as a label trains the detector to fire on every
+    battery, and nothing else in the report would notice."""
+    from label_detections.core import scale_report as sr
+
+    scales = {"huge": sr.LabelScale("huge", [3822.0] * 30, [5496.0] * 30)}
+    assert any("of the frame" in i for i in sr.data_health(scales, None))
+
+
+def test_a_lopsided_class_balance_is_reported():
+    from label_detections.core import scale_report as sr
+
+    scales = {"big": sr.LabelScale("big", [800.0] * 81, [5496.0] * 81),
+              "small": sr.LabelScale("small", [800.0] * 2, [5496.0] * 2)}
+    assert any("Class balance" in i for i in sr.data_health(scales, None))
+
+
+def test_a_healthy_dataset_is_not_nagged():
+    from label_detections.core import scale_report as sr
+
+    scales = {"a": sr.LabelScale("a", [800.0] * 60, [5496.0] * 60),
+              "b": sr.LabelScale("b", [900.0] * 55, [5496.0] * 55)}
+    assert sr.data_health(scales, None) == []
