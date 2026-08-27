@@ -595,3 +595,33 @@ def test_a_read_that_throws_is_recorded_rather_than_raised():
     assert ok is False
     assert "pylon exploded" in src.last_read_error
     assert "RuntimeError" in src.last_read_error, "the type names the cause"
+
+
+def test_the_camera_dialog_offers_every_capture_setting():
+    """The dialog builds its own copies of the tab's controls, so a field added
+    to one is missing from the other unless it is added twice -- and the dialog
+    is where camera settings are actually reached from."""
+    import re
+    from pathlib import Path
+
+    src = Path("label_detections/ui/main_window.py").read_text()
+    dialog = src[src.index("def open_camera_settings_dialog"):]
+    dialog = dialog[:dialog.index("\n    def ", 10)]
+    for row in ("Backend", "Pixel format", "Source"):
+        assert f'form.addRow("{row}"' in dialog, f"dialog is missing {row}"
+    # And what it collects must be written back, or it silently does nothing.
+    assert "self.pixel_format_combo.setCurrentText(pixfmt_combo.currentText())" in dialog
+
+
+def test_stopping_never_frees_the_model_from_another_thread():
+    """worker.stop() is called from the GUI thread. It used to drop the models
+    there, which -- once inference genuinely moved to the worker's thread --
+    freed a torch model under a running forward pass and exited the process
+    with no traceback."""
+    import inspect
+    from label_detections.ui.live_detect import InferenceWorker
+
+    body = inspect.getsource(InferenceWorker.stop)
+    assert "_stopping = True" in body
+    assert "self._model = None" not in body, "still tearing down across threads"
+    assert "self._classifier = None" not in body

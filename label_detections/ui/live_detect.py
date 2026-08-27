@@ -326,6 +326,15 @@ class InferenceWorker(QObject):
 
     @Slot()
     def stop(self) -> None:
+        """Ask the worker to stop. Sets a flag and nothing else.
+
+        It used to drop the models here, and it is called from the GUI thread.
+        While inference ran on the GUI thread too that was harmless; once it
+        genuinely moved to this worker's thread, it became freeing a torch
+        model out from under a running forward pass -- which exits the process
+        with no Python traceback at all.
+
+        The models are released when this object is dropped, which the owner
+        only does after the thread has actually finished.
+        """
         self._stopping = True
-        self._model = None
-        self._classifier = None

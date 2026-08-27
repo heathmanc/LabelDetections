@@ -2222,13 +2222,30 @@ class MainWindow(QMainWindow):
         worker = getattr(self, "_live_worker", None)
         if worker is not None:
             worker.stop()
+        finished = True
         if thread is not None:
             thread.quit()
             # Bounded: a stuck inference must not hang the window on close.
-            thread.wait(3000)
-        self._live_thread = None
-        self._live_worker = None
+            # A long first inference plus CUDA teardown can exceed a few
+            # seconds, so this is generous rather than snappy.
+            finished = bool(thread.wait(10000))
+        if finished:
+            self._live_thread = None
+            self._live_worker = None
+        else:
+            # The thread is still running. Dropping the references here would
+            # let Python free the worker, and its model, under a live forward
+            # pass. Keep them alive and let the process outlive them instead --
+            # a leaked worker is survivable, freeing one in use is not.
+            self._orphaned_workers = getattr(self, "_orphaned_workers", [])
+            self._orphaned_workers.append((thread, worker))
+            self._live_thread = None
+            self._live_worker = None
+            self.status.showMessage(
+                "Inference did not stop in time; it will finish in the "
+                "background.", 6000)
         self._live_busy = False
+        self._live_loaded = False
         if hasattr(self.canvas, "clear_model_test_overlays"):
             self.canvas.clear_model_test_overlays()
         if hasattr(self, "live_start_btn"):
@@ -3877,6 +3894,16 @@ class MainWindow(QMainWindow):
         backend_combo = QComboBox()
         backend_combo.addItems(["Auto", "V4L2", "GStreamer", "GStreamer (native)", "FFmpeg", "Basler/Pylon"])
         backend_combo.setCurrentText(self.backend_combo.currentText())
+
+        # This dialog builds its own copies of the capture-tab controls, so a
+        # field added to one is missing from the other unless it is added
+        # twice. Pixel format was added to the tab only, and this dialog is
+        # where camera settings are actually reached from.
+        pixfmt_combo = QComboBox()
+        pixfmt_combo.addItems([self.pixel_format_combo.itemText(i)
+                               for i in range(self.pixel_format_combo.count())])
+        pixfmt_combo.setCurrentText(self.pixel_format_combo.currentText())
+        pixfmt_combo.setToolTip(self.pixel_format_combo.toolTip())
         source_edit = QLineEdit(self.source_edit.text())
         source_edit.setPlaceholderText("0, /dev/video0, video.mp4, rtsp://, or Basler serial")
 
@@ -3910,6 +3937,7 @@ class MainWindow(QMainWindow):
         format_grid.setColumnStretch(4, 1)
 
         form.addRow("Backend", backend_combo)
+        form.addRow("Pixel format", pixfmt_combo)
         form.addRow("Source", source_edit)
         form.addRow("Format", format_grid)
         layout.addWidget(form_box)
@@ -3961,6 +3989,7 @@ class MainWindow(QMainWindow):
             old_stream_sig = self._camera_stream_signature() if was_open else None
 
             self.backend_combo.setCurrentText(backend_combo.currentText())
+            self.pixel_format_combo.setCurrentText(pixfmt_combo.currentText())
             self.source_edit.setText(source_edit.text().strip())
             self.width_spin.setText(width_edit.text().strip())
             self.height_spin.setText(height_edit.text().strip())
