@@ -884,3 +884,40 @@ def test_a_throttled_rate_is_called_out_next_to_the_latency():
     for i in range(10):
         fast.record(0.008, now=100 + i * 0.009)
     assert ld.throughput_note(fast) == "", "no note when the rate matches latency"
+
+
+def test_the_three_rates_are_reported_separately():
+    """Camera, display and inference are three different numbers that were
+    being read as one -- "6 fps" meant the third while sounding like the
+    first."""
+    r = ld.Rolling()
+    for i in range(10):
+        r.record(0.130, now=100 + i * 0.14)
+    line = ld.rate_line(58.0, 30.0, r)
+    assert "camera 30/s" in line
+    assert "display 58/s" in line
+    assert "inference 7.1/s" in line and "130 ms" in line
+
+
+def test_slow_inference_on_cpu_says_so_and_stops_there():
+    r = ld.Rolling()
+    for i in range(5):
+        r.record(0.130, now=100 + i * 0.14)
+    cpu = ld.slow_hint(r, "Device: CPU -- torch reports NO CUDA.")
+    assert "running on the CPU" in cpu
+    assert "TensorRT" not in cpu, "no point suggesting TensorRT to a CPU"
+
+
+def test_slow_inference_on_gpu_suggests_the_gpu_causes():
+    r = ld.Rolling()
+    for i in range(5):
+        r.record(0.130, now=100 + i * 0.14)
+    gpu = ld.slow_hint(r, "Device: CUDA available (RTX 5090); model on cuda:0")
+    assert "TensorRT" in gpu and "image size" in gpu
+
+
+def test_a_fast_model_is_not_lectured():
+    r = ld.Rolling()
+    for i in range(5):
+        r.record(0.006, now=100 + i * 0.01)
+    assert ld.slow_hint(r, "Device: CUDA available") == ""

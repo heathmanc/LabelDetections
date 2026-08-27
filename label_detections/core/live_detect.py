@@ -454,3 +454,49 @@ def apply_identities(items: list[dict], identities) -> list[dict]:
                            else f"{name} {conf:.2f}")
         out.append(merged)
     return out
+
+
+# --- what is actually running, and how fast --------------------------------
+
+# Past this, inference is slow enough to be worth explaining rather than just
+# reporting. A YOLO11s at 640 runs in single-digit milliseconds on a current
+# GPU; 100 ms+ is the CPU's signature.
+SLOW_INFER_MS = 60.0
+
+
+def rate_line(display_fps: float, camera_fps: float, rolling: "Rolling") -> str:
+    """Camera, display and inference rates side by side.
+
+    Three different numbers that were being read as one. The camera delivers at
+    its rate, the preview repaints at its own, and the model runs at a third --
+    and "6 fps" meant the third while sounding like the first. Separating them
+    is what makes it obvious which one is the problem.
+    """
+    parts = [f"camera {camera_fps:.0f}/s" if camera_fps else "camera -/s",
+             f"display {display_fps:.0f}/s" if display_fps else "display -/s",
+             f"inference {rolling.rate:.1f}/s"]
+    if rolling.mean_ms:
+        parts.append(f"{rolling.mean_ms:.0f} ms/frame")
+    return "  |  ".join(parts)
+
+
+def slow_hint(rolling: "Rolling", device_line: str) -> str:
+    """Why inference might be taking as long as it is."""
+    if not rolling.mean_ms or rolling.mean_ms < SLOW_INFER_MS:
+        return ""
+    on_cpu = ("NO CUDA" in device_line) or ("model on cpu" in device_line.lower())
+    lines = [f"", f"{rolling.mean_ms:.0f} ms per inference is slow. "]
+    if on_cpu:
+        lines.append("  - This is running on the CPU. That alone explains it; "
+                     "everything else is secondary.")
+    else:
+        lines += [
+            "  - Check the image size: cost rises with its square, so 1664 is "
+            "~7x the work of 640.",
+            "  - A .pt runs through PyTorch every frame. Exporting the model to "
+            "TensorRT (yolo export format=engine half=True) typically gives 2-4x "
+            "on an RTX card, and Live Detect loads a .engine the same way.",
+            "  - A stage 2 classifier adds a pass per detection; the number "
+            "above covers the detector only.",
+        ]
+    return "\n".join(lines)

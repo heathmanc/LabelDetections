@@ -346,6 +346,7 @@ class MainWindow(QMainWindow):
         self._live_tracks = live_logic.TrackBook()
         self._live_tracking = True
         self._live_last_started = 0.0
+        self._live_device_line = ""
         # Set here rather than in start_live_detect: results can arrive on
         # paths that never went through it, and an unset counter turns a quiet
         # view into a crash.
@@ -2187,6 +2188,7 @@ class MainWindow(QMainWindow):
         return getattr(self, "_live_thread", None) is not None
 
     def _on_live_loaded(self, message: str) -> None:
+        self._live_device_line = message
         self.live_status_label.setText(f"{message}\nWatching the live view.")
 
     def _on_live_failed(self, message: str) -> None:
@@ -2208,7 +2210,13 @@ class MainWindow(QMainWindow):
             return
         self._live_busy = True
         self._live_last_started = now
-        self._live_frame = frame.copy()
+        # No copy in threaded mode: CameraSource.read() already hands back a
+        # private array, so copying it again was 13 ms of memcpy per inference
+        # on the GUI thread -- on a 60 MB frame, paid for nothing, and paid on
+        # the thread that draws the preview. Unthreaded backends hand back
+        # OpenCV's reusable buffer, which genuinely must be copied.
+        self._live_frame = (frame if getattr(self.camera, "threaded", False)
+                            else frame.copy())
         # Queued across the thread boundary by Qt, so this returns immediately.
         self._live_worker.infer(self._live_frame)
 
@@ -2242,6 +2250,14 @@ class MainWindow(QMainWindow):
         else:
             self.live_readout.setPlainText(live_logic.frame_summary(
                 counts, self.label_id, self._live_rolling))
+        rates = live_logic.rate_line(
+            getattr(self, "_preview_fps", 0.0),
+            self.camera.read_fps() if hasattr(self.camera, "read_fps") else 0.0,
+            self._live_rolling)
+        self.live_readout.setPlainText(
+            rates + "\n" + self.live_readout.toPlainText()
+            + live_logic.slow_hint(self._live_rolling,
+                                   getattr(self, "_live_device_line", "")))
         hint = live_logic.quiet_hint(
             self._live_empty, float(self.test_conf_spin.value()),
             int(self.test_imgsz_spin.value()),
