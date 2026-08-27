@@ -594,6 +594,13 @@ class MainWindow(QMainWindow):
             self._guarded(self.keep_live_frame_with_detections))
         tools_menu.addAction(keep_json_action)
 
+        scale_action = QAction("Check label scale (single vs two-stage)", self)
+        scale_action.setToolTip(
+            "Measure how many pixels wide your labels actually are, and say "
+            "whether cropping would help or hurt them.")
+        scale_action.triggered.connect(self._guarded(self.show_label_scale_report))
+        tools_menu.addAction(scale_action)
+
         variance_action = QAction("Check variable regions", self)
         variance_action.setToolTip(
             "Measure how much each label's date codes and serials actually differ "
@@ -627,7 +634,8 @@ class MainWindow(QMainWindow):
             capture_action, auto_label_action, validate_action,
             prelabel_action, next_queue_action, shortcuts_action, regions_action,
             define_regions_action, edit_regions_action, replace_artwork_action,
-            variance_action, live_detect_action, keep_frame_action, keep_json_action,
+            variance_action, scale_action, live_detect_action, keep_frame_action,
+            keep_json_action,
         ):
             self.addAction(action)
 
@@ -3050,11 +3058,13 @@ class MainWindow(QMainWindow):
         exp_two.setToolTip(
             "Write both halves of a detect-then-classify pipeline from the same "
             "annotations: a detector that finds WHERE a label is (one generic "
-            "class), and 224 px crops foldered by label id for a classifier "
-            "that decides WHICH.\n\n"
-            "Worth it when labels differ in fine detail. A label 100 px wide in "
-            "the frame gives the detector 100 px to read a revision letter off; "
-            "the same label cropped and resized gives the classifier 224.\n\n"
+            "class), and crops foldered by label id for a classifier that "
+            "decides WHICH.\n\n"
+            "Worth it when the deciding detail is small in the frame. Crop size "
+            "is measured from your own boxes rather than fixed -- a 224 px crop "
+            "is a large gain for a small label and an outright loss for one the "
+            "detector already resolves to 500 px. Tools > Check label scale "
+            "shows the working.\n\n"
             "Both halves share one split and seed, so they hold out the same "
             "batteries."
         )
@@ -6240,6 +6250,29 @@ class MainWindow(QMainWindow):
             return 0
         return int(self.export_augment_spin.value())
 
+    def show_label_scale_report(self) -> None:
+        """Measure how big labels actually are, and say what follows from it.
+
+        The single-stage / two-stage choice turns on a number nobody estimates
+        well by eye, and the tool is holding every box needed to compute it.
+        """
+        from label_detections.core import scale_report, yolo_export
+
+        entries = []
+        for label_id in yolo_export.list_datasets():
+            entries.extend(yolo_export.collect_entries(label_id, reviewed_only=False))
+        imgsz = int(self.test_imgsz_spin.value()) if hasattr(self, "test_imgsz_spin") else 640
+        scales = scale_report.measure(entries)
+        text = scale_report.report(scales, imgsz=imgsz)
+
+        box = QMessageBox(self)
+        box.setWindowTitle("Label scale")
+        box.setText("How big your labels really are, and what that means for "
+                    "single-stage vs two-stage.")
+        box.setDetailedText(text)
+        box.setIcon(QMessageBox.Information)
+        box.exec()
+
     def export_two_stage(self) -> None:
         """Write a detector dataset and a classifier crop dataset together.
 
@@ -6263,15 +6296,22 @@ class MainWindow(QMainWindow):
             return
 
         classes = (classify_dir / "classes.txt").read_text(encoding="utf-8").split()
+        crop_px = 224
+        first = next(classify_dir.rglob("*.jpg"), None)
+        if first is not None:
+            import cv2
+            probe = cv2.imread(str(first))
+            if probe is not None:
+                crop_px = int(probe.shape[0])
         QMessageBox.information(
             self, "Export complete",
             f"Detector (finds where a label is):\n{detect_dir}\n"
             f"  {detect_dir / 'data.yaml'}\n\n"
-            f"Classifier ({len(classes)} label(s)):\n{classify_dir}\n\n"
+            f"Classifier ({len(classes)} label(s), {crop_px} px crops):\n{classify_dir}\n\n"
             f"Both share one split and seed, so they hold out the same "
             f"batteries.\n\nSuggested commands:\n"
             f"  yolo {task} train data={detect_dir / 'data.yaml'} model=yolo11s-obb.pt\n"
-            f"  yolo classify train data={classify_dir} model=yolo11s-cls.pt imgsz=224"
+            f"  yolo classify train data={classify_dir} model=yolo11s-cls.pt imgsz={crop_px}"
         )
         self.status.showMessage(f"Exported two-stage datasets to {classify_dir.parent}", 8000)
 

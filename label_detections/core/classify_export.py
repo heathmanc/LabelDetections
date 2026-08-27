@@ -167,7 +167,8 @@ def export_crops(entries, *, out: Path | None = None, **kwargs) -> Path:
 def export_two_stage(*, task: str = "obb", reviewed_only: bool = True,
                      split_train: float = DEFAULT_SPLIT_TRAIN,
                      seed: int = DEFAULT_SEED, out: Path | None = None,
-                     library=None, size: int = DEFAULT_CROP_PX,
+                     library=None, size: int | None = None,
+                     imgsz: int = 640,
                      margin: float = DEFAULT_MARGIN) -> tuple[Path, Path]:
     """Both halves of a detect-then-classify pipeline, from one set of entries.
 
@@ -177,6 +178,12 @@ def export_two_stage(*, task: str = "obb", reviewed_only: bool = True,
     the two datasets hold out the same batteries. Export them separately and a
     crop of a battery the detector validates on can land in the classifier's
     training set, and the pipeline's measured accuracy stops meaning anything.
+
+    ``size`` defaults to whatever the collected boxes say it should be rather
+    than to a fixed number. A 224 px crop is a large gain for a small label and
+    an outright loss for one the detector already resolves to 500 px, so a
+    dataset with a wide spread of label sizes cannot be served by a constant --
+    see ``core/scale_report``.
     """
     from . import yolo_export
 
@@ -194,7 +201,10 @@ def export_two_stage(*, task: str = "obb", reviewed_only: bool = True,
         base / f"two_stage_detect_{task}", entries, task=task,
         split_train=split_train, seed=seed, reviewed_only=reviewed_only,
         library=library, class_mode="generic")
+    if size is None:
+        from . import scale_report
+        size = scale_report.recommend_crop(scale_report.measure(entries), imgsz)
     classify_dir = write_crop_dataset(
-        base / "two_stage_classify", entries, size=size, margin=margin,
+        base / "two_stage_classify", entries, size=int(size), margin=margin,
         split_train=split_train, seed=seed)
     return detect_dir, classify_dir

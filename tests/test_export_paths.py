@@ -295,3 +295,73 @@ def test_a_box_with_no_identity_is_skipped_rather_than_guessed():
 
     data = {"boxes": [{"kind": "obb", "points": [[0, 0], [9, 0], [9, 9], [0, 9]]}]}
     assert ce.crop_targets(data) == []
+
+
+# --- label scale: does cropping actually help these labels? -----------------
+
+def test_a_big_label_is_reported_as_losing_detail_to_a_small_crop():
+    """The trap a fixed crop size sets. A label the detector already resolves
+    to 500 px arrives at a 224 px classifier with less to go on, not more."""
+    from label_detections.core import scale_report as sr
+
+    scales = {"big": sr.LabelScale("big", [2000.0] * 5, [3840.0] * 5)}
+    assert "LOSES" in sr.verdict(scales["big"], imgsz=640, crop=224)
+
+
+def test_a_small_label_is_reported_as_gaining():
+    from label_detections.core import scale_report as sr
+
+    scales = sr.LabelScale("small", [300.0] * 5, [3840.0] * 5)
+    assert "helps" in sr.verdict(scales, imgsz=640, crop=224)
+
+
+def test_the_recommendation_is_sized_so_no_label_loses():
+    """A mixed dataset cannot be served by a constant: the recommendation comes
+    from the label the detector resolves best, because that is the one a crop
+    can harm."""
+    from label_detections.core import scale_report as sr
+
+    scales = {
+        "big": sr.LabelScale("big", [2000.0] * 4, [3840.0] * 4),
+        "small": sr.LabelScale("small", [300.0] * 4, [3840.0] * 4),
+    }
+    crop = sr.recommend_crop(scales, imgsz=640)
+    assert crop % sr.STRIDE == 0
+    for scale in scales.values():
+        assert "LOSES" not in sr.verdict(scale, imgsz=640, crop=crop)
+
+
+def test_the_frame_each_box_came_from_is_paired_with_it():
+    """400 px of label in a 1000 px frame and 400 px in a 4000 px frame reach
+    the detector at completely different sizes. Averaging the frame widths
+    separately would hide exactly that."""
+    from label_detections.core import scale_report as sr
+
+    scale = sr.LabelScale("mixed", [400.0, 400.0], [1000.0, 4000.0])
+    assert scale.detector_px(640, "max") > scale.detector_px(640, "min") * 3
+
+
+def test_the_battery_face_is_left_out_of_the_measurement():
+    """battery_side is the frame's own size by definition, so including it
+    would drag every statistic toward it."""
+    from label_detections.core import scale_report as sr
+
+    entries = [{"width": 400, "height": 240, "boxes": [
+        {"label": "battery_side", "points": [[0, 0], [399, 0], [399, 239], [0, 239]]},
+        {"label": "sp", "label_id": "sp", "points": [[10, 10], [90, 10], [90, 60], [10, 60]]},
+    ]}]
+    scales = sr.measure(entries)
+    assert list(scales) == ["sp"]
+
+
+def test_the_export_sizes_its_crops_from_the_data_not_a_default(monkeypatch):
+    from label_detections.core import classify_export, storage
+    import cv2
+
+    _window()
+    _dataset("scale_sized", images=3)
+    _, classify_dir = classify_export.export_two_stage(
+        out=storage.EXPORT_DIR / "ts_scaled", imgsz=640)
+    crop = cv2.imread(str(next(classify_dir.rglob("*.jpg"))))
+    assert crop is not None and crop.shape[0] == crop.shape[1]
+    assert crop.shape[0] % 32 == 0
