@@ -16,14 +16,110 @@ import time
 from PySide6.QtCore import QObject, Signal, Slot
 
 
+def _as_array(obj, attr):
+    """An Ultralytics tensor attribute as numpy, or [] when it is not there."""
+    import numpy as np
+
+    value = getattr(obj, attr, None)
+    if value is None:
+        return []
+    try:
+        return value.cpu().numpy()
+    except AttributeError:
+        pass
+    except Exception:
+        return []
+    try:
+        return np.asarray(value)
+    except Exception:
+        return []
+
+
+def _class_name(names, cls_id: int) -> str:
+    """Ultralytics exposes names as a dict or a list depending on version."""
+    try:
+        if isinstance(names, dict):
+            return str(names.get(cls_id, f"class_{cls_id}"))
+        if isinstance(names, (list, tuple)) and 0 <= cls_id < len(names):
+            return str(names[cls_id])
+    except Exception:
+        pass
+    return f"class_{cls_id}"
+
+
+def extract_items(results) -> list[dict]:
+    """Plain dicts from an Ultralytics result. No tensors survive this.
+
+    Runs on the worker thread, deliberately. Emitting the Results object itself
+    put CUDA tensors on a Qt queued signal and left the GUI thread to call
+    .cpu() on them -- GPU work on the thread that paints, and torch objects
+    crossing a thread boundary they were never promised to cross. Everything
+    the UI needs is a handful of floats and a name, so only those cross now.
+    """
+    import numpy as np
+
+    items: list[dict] = []
+    for r in results or []:
+        names = getattr(r, "names", {}) or {}
+
+        obb = getattr(r, "obb", None)
+        if obb is not None:
+            polys = _as_array(obb, "xyxyxyxy")
+            confs = _as_array(obb, "conf")
+            clss = _as_array(obb, "cls")
+            ids = _as_array(obb, "id")
+            if len(polys):
+                for i, poly in enumerate(polys):
+                    pts = np.array(poly, dtype=float).reshape(-1, 2)[:4]
+                    if len(pts) < 4:
+                        continue
+                    cls_id = int(clss[i]) if i < len(clss) else 0
+                    name = _class_name(names, cls_id)
+                    conf = float(confs[i]) if i < len(confs) else 0.0
+                    track_id = int(ids[i]) if i < len(ids) else None
+                    items.append({
+                        "type": "other_obb", "track_id": track_id,
+                        "points": [[float(x), float(y)] for x, y in pts],
+                        "cx": float(np.mean(pts[:, 0])),
+                        "cy": float(np.mean(pts[:, 1])),
+                        "conf": conf, "cls_id": cls_id, "name": name,
+                        "label": (f"{name} #{track_id} {conf:.2f}"
+                                  if track_id is not None else f"{name} {conf:.2f}"),
+                    })
+                continue
+
+        boxes = getattr(r, "boxes", None)
+        if boxes is None:
+            continue
+        xyxy = _as_array(boxes, "xyxy")
+        confs = _as_array(boxes, "conf")
+        clss = _as_array(boxes, "cls")
+        ids = _as_array(boxes, "id")
+        for i, box in enumerate(xyxy):
+            cls_id = int(clss[i]) if i < len(clss) else 0
+            name = _class_name(names, cls_id)
+            x1, y1, x2, y2 = (float(v) for v in box[:4])
+            conf = float(confs[i]) if i < len(confs) else 0.0
+            track_id = int(ids[i]) if i < len(ids) else None
+            items.append({
+                "type": "other_box", "track_id": track_id,
+                "xyxy": [x1, y1, x2, y2],
+                "cx": (x1 + x2) / 2.0, "cy": (y1 + y2) / 2.0,
+                "conf": conf, "cls_id": cls_id, "name": name,
+                "label": (f"{name} #{track_id} {conf:.2f}" if track_id is not None
+                          else f"{name} {conf:.2f}"),
+            })
+    return items
+
+
 class InferenceWorker(QObject):
     """Owns the model and runs it. Lives on its own thread."""
 
     loaded = Signal(str)          # human description of what came up
     failed = Signal(str)
-    # ultralytics results, latency in seconds, per-detection (name, conf) from
-    # stage 2 (empty when no classifier is loaded)
-    result = Signal(object, float, object)
+    # Plain dicts (never tensors), latency in seconds. Identities from stage 2
+    # are already merged in.
+    result = Signal(object, float)
 
     def __init__(self, model_path: str, imgsz: int, conf: float, device,
                  track: bool = True, classifier_path: str = "",
@@ -210,7 +306,16 @@ class InferenceWorker(QObject):
                     f"Stage 2 failed, so boxes will have no identity: "
                     f"{type(exc).__name__}: {exc}\n\n"
                     f"Stage 1 detection continues.")
-        self.result.emit(results, time.perf_counter() - started, identities)
+
+        # Everything torch-shaped is converted here, on this thread, before
+        # anything crosses back. The GUI never sees a tensor.
+        try:
+            from label_detections.core import live_detect as logic
+            items = logic.apply_identities(extract_items(results), identities)
+        except Exception as exc:
+            self.failed.emit(f"Could not read the results: {type(exc).__name__}: {exc}")
+            return
+        self.result.emit(items, time.perf_counter() - started)
 
     def _detection_quads(self, results):
         """Four corners per detection, in the SAME order the overlay builds them.

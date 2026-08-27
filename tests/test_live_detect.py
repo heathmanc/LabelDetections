@@ -200,6 +200,12 @@ class _Results:
         self.boxes = _Boxes()
 
 
+def _items(results):
+    """What the worker now emits: plain dicts, via the real extractor."""
+    from label_detections.ui.live_detect import extract_items
+    return extract_items(results)
+
+
 @ui
 def test_overlays_are_scaled_from_the_inferred_frame_to_the_preview():
     """Inference runs at full resolution -- what production hands the model --
@@ -307,7 +313,7 @@ def test_an_armed_view_keeps_a_frame_the_model_missed():
     before = len(storage.list_images(label_id))
     try:
         # Nothing detected at all: the strongest signal the image is worth having.
-        win._on_live_result([_Results([], {}, [], [])], 0.02)
+        win._on_live_result(_items([_Results([], {}, [], [])]), 0.02)
         assert len(storage.list_images(label_id)) == before + 1
         assert "kept" in win.live_capture_label.text()
     finally:
@@ -328,8 +334,8 @@ def test_an_armed_view_leaves_a_frame_the_model_handled():
     win._live_gate = ld.CaptureGate(cooldown_s=0.0)
     before = len(storage.list_images(label_id))
     try:
-        confident = _Results([[10, 10, 40, 40]], {0: win.label_id}, [0.97], [0])
-        win._on_live_result([confident], 0.02)
+        confident = _items([_Results([[10, 10, 40, 40]], {0: win.label_id}, [0.97], [0])])
+        win._on_live_result(confident, 0.02)
         assert len(storage.list_images(label_id)) == before
     finally:
         win.live_auto_check.setChecked(False)
@@ -345,7 +351,7 @@ def test_the_untracked_readout_reports_what_the_model_saw():
     win._live_overlay_scale = (1.0, 1.0)
     try:
         win._on_live_result(
-            [_Results([[10, 10, 40, 40]], {0: win.label_id}, [0.9], [0])], 0.02)
+            _items([_Results([[10, 10, 40, 40]], {0: win.label_id}, [0.9], [0])]), 0.02)
         text = win.live_readout.toPlainText()
         assert "1 detection(s)" in text
         assert f"{win.label_id}: 1 found" in text
@@ -368,9 +374,9 @@ def test_the_tracked_readout_reports_a_held_average_not_a_flicker():
         # Chosen so the mean (0.90) and the last frame (1.00) differ: with
         # 0.88/0.94/0.91 they are both 0.91 and the assertion proves nothing.
         for conf in (0.80, 0.90, 1.00):
-            win._on_live_result(
+            win._on_live_result(_items(
                 [_Results([[10, 10, 40, 40]], {0: win.label_id}, [conf], [0],
-                          ids=[7])], 0.02)
+                          ids=[7])]), 0.02)
         text = win.live_readout.toPlainText()
         assert "1 tracked" in text
         assert f"#7 {win.label_id} 0.90" in text, "showed the latest frame, not the mean"
@@ -762,8 +768,9 @@ def test_the_readout_counts_label_ids_once_stage_two_has_spoken():
     win._live_overlay_scale = (1.0, 1.0)
     try:
         win._on_live_result(
-            [_Results([[10, 10, 40, 40]], {0: "label"}, [0.9], [0])], 0.02,
-            [("s2_readout", 0.96)])
+            ld.apply_identities(
+                _items([_Results([[10, 10, 40, 40]], {0: "label"}, [0.9], [0])]),
+                [("s2_readout", 0.96)]), 0.02)
         text = win.live_readout.toPlainText()
         assert "s2_readout: 1 found" in text
         assert "label:" not in text, "reported the detector's placeholder class"
@@ -780,7 +787,7 @@ def test_without_a_classifier_the_boxes_keep_the_detectors_own_class():
     win._live_overlay_scale = (1.0, 1.0)
     try:
         win._on_live_result(
-            [_Results([[10, 10, 40, 40]], {0: "label"}, [0.9], [0])], 0.02, [])
+            _items([_Results([[10, 10, 40, 40]], {0: "label"}, [0.9], [0])]), 0.02)
         assert "label" in win.live_readout.toPlainText()
     finally:
         win._live_thread = None
@@ -1088,7 +1095,11 @@ def test_a_failing_stage_two_does_not_take_stage_one_with_it():
     worker.result.connect(lambda *a: emitted.append(a))
     worker.infer(np.zeros((100, 200, 3), np.uint8))
     assert emitted, "stage 1 result was lost to a stage 2 failure"
-    assert emitted[0][2] == [], "no identities, which is the correct degradation"
+    items = emitted[0][0]
+    assert len(items) == 1, "the detection itself must survive"
+    # No identity attached, which is the correct degradation.
+    assert items[0]["name"] == "label"
+    assert "identity_conf" not in items[0]
 
 
 @ui
@@ -1182,3 +1193,35 @@ def test_the_size_is_only_auto_filled_when_the_crops_are_really_there():
     (inside / "best.pt").write_bytes(b"x")
     win._sync_live_crop_size(str(inside / "best.pt"))
     assert win.live_crop_spin.value() == 448
+
+
+@ui
+def test_no_tensor_shaped_object_crosses_back_to_the_gui():
+    """The crash was on the first inference. The worker emitted the Ultralytics
+    Results object, so CUDA tensors travelled a Qt queued signal and were
+    dereferenced on the thread that paints the window -- GPU work on the GUI
+    thread, and torch objects crossing a boundary they were never promised to
+    cross."""
+    import inspect
+    from label_detections.ui.live_detect import InferenceWorker, extract_items
+
+    src = inspect.getsource(InferenceWorker.infer)
+    assert "self.result.emit(items," in src, "still emitting the raw results"
+    assert "extract_items(results)" in src, "conversion must happen worker-side"
+
+    items = extract_items([_Results([[1, 2, 3, 4]], {0: "label"}, [0.9], [0])])
+    assert items and isinstance(items[0]["conf"], float)
+    for value in items[0].values():
+        assert not hasattr(value, "cpu"), "a tensor survived extraction"
+
+
+def test_the_crash_handler_is_armed_at_startup():
+    """A native crash ends the process with no Python traceback, which from
+    outside is indistinguishable from a clean exit -- "it just closes" was the
+    whole of what could be reported."""
+    from pathlib import Path
+
+    src = Path("main.py").read_text()
+    assert "faulthandler.enable()" in src
+    assert "all_threads=True" in src, "the crashing thread may not be the main one"
+    assert "labelvision_crash.log" in src, "a console from a shortcut disappears"

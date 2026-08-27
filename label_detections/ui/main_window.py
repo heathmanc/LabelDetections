@@ -2302,11 +2302,18 @@ class MainWindow(QMainWindow):
         # Queued across the thread boundary by Qt, so this returns immediately.
         self.infer_requested.emit(self._live_frame)
 
-    def _on_live_result(self, results, latency: float, identities=None) -> None:
+    def _on_live_result(self, items, latency: float) -> None:
+        """Results arrive as plain dicts, already identified.
+
+        The worker used to emit the Ultralytics Results object and this method
+        pulled tensors out of it -- meaning CUDA tensors travelled a Qt queued
+        signal and were dereferenced on the thread that paints the window.
+        Everything the UI needs is a few floats and a name; only those cross
+        now, and the conversion happens where the tensors live.
+        """
         self._live_busy = False
         self._live_rolling.record(latency)
-        items, _counts = self._detection_overlay_items(results)
-        items = live_logic.apply_identities(items, identities)
+        items = list(items or [])
         # Counted after stage 2, so the readout reports label ids rather than
         # a screenful of "label" -- which is what the recipe is written in.
         counts: dict[str, int] = {}
@@ -2349,7 +2356,7 @@ class MainWindow(QMainWindow):
 
         if not self.live_auto_check.isChecked():
             return
-        found, total, avg_conf = self._detection_disagreement(results)
+        found, total, avg_conf = self._disagreement_from_items(items)
         score = active_learning.disagreement_score(found, 1, total, avg_conf)
         keep, reason = self._live_gate.consider(score)
         if keep:
@@ -4981,6 +4988,15 @@ class MainWindow(QMainWindow):
             8000,
         )
 
+    def _disagreement_from_items(self, items) -> tuple[int, int, float]:
+        """The same summary, from already-extracted items."""
+        if not items:
+            return 0, 0, 0.0
+        own = sum(1 for i in items
+                  if self.label_id and i.get("name") == self.label_id)
+        avg_conf = sum(float(i.get("conf", 0.0)) for i in items) / len(items)
+        return own, len(items), avg_conf
+
     def _detection_disagreement(self, results) -> tuple[int, int, float]:
         """Summarise one model pass for the review queue.
 
@@ -5035,7 +5051,7 @@ class MainWindow(QMainWindow):
                 # A model failure on an image is itself a reason to look at it.
                 scored.append(active_learning.QueueItem(str(p), active_learning.MISS_PENALTY))
                 continue
-            found, total, avg_conf = self._detection_disagreement(results)
+            found, total, avg_conf = self._disagreement_from_items(items)
             score = active_learning.disagreement_score(found, 1, total, avg_conf)
             scored.append(active_learning.QueueItem(str(p), score))
 
@@ -5121,7 +5137,7 @@ class MainWindow(QMainWindow):
             else:
                 empty += 1
 
-            found, total, avg_conf = self._detection_disagreement(results)
+            found, total, avg_conf = self._disagreement_from_items(items)
             score = active_learning.disagreement_score(found, 1, total, avg_conf)
             scored.append(active_learning.QueueItem(str(p), score))
 

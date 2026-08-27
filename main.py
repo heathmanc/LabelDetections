@@ -27,6 +27,25 @@ from pathlib import Path
 # and never returns -- so the GUI below is only ever reached by a real launch.
 multiprocessing.freeze_support()
 
+# A native crash -- a segfault in torch, CUDA or Qt -- ends the process with no
+# Python traceback at all. From outside that is indistinguishable from a clean
+# exit, and "it just closes" is the whole of what anyone can report. faulthandler
+# prints the C-level stack for every thread when it happens, which turns that
+# into something diagnosable. Written to a file as well as stderr, because a
+# console window launched from a shortcut disappears with the process.
+try:
+    import faulthandler
+
+    faulthandler.enable()
+    _crash_log = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "labelvision_crash.log"
+    try:
+        _crash_fp = open(_crash_log, "a", buffering=1, encoding="utf-8")
+        faulthandler.enable(file=_crash_fp, all_threads=True)
+    except Exception:
+        pass
+except Exception:
+    pass
+
 # Ultralytics pulls in matplotlib. Force the headless Agg backend before any
 # import can pick a GUI one: packaged builds exclude tkinter, so a TkAgg
 # default would fail at import time. Harmless when running from source -- this
