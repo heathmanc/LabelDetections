@@ -504,3 +504,42 @@ def test_train_both_refuses_before_starting_if_stage_two_cannot_run():
         mw.QMessageBox.warning = orig
     assert "warned" in seen and "classifier" in seen["warned"].lower()
     assert not win._train_queue
+
+
+def test_the_basler_pixel_format_is_chosen_not_inherited():
+    """Nothing set PixelFormat, so the camera streamed whatever Pylon Viewer
+    last left it in -- a setting made outside this program, possibly months
+    ago, that silently decided what every capture looked like."""
+    from label_detections.core.camera import CameraSource
+
+    win = _window()
+    assert hasattr(win, "pixel_format_combo")
+    options = [win.pixel_format_combo.itemText(i)
+               for i in range(win.pixel_format_combo.count())]
+    assert "BayerRG8" in options and "Mono8" in options
+    assert any(o.startswith("Auto") for o in options), "must allow leaving it alone"
+    assert win.pixel_format_combo.currentText() == "BayerRG8"
+    assert "BayerRG8" in CameraSource.BASLER_PIXEL_FORMATS
+
+
+def test_changing_the_pixel_format_reopens_the_camera():
+    """It is negotiated when the stream starts, so applying it live would show
+    the old format while claiming the new one."""
+    win = _window()
+    win.backend_combo.setCurrentText("Basler/Pylon")
+    win.pixel_format_combo.setCurrentText("BayerRG8")
+    before = win._camera_stream_signature()
+    win.pixel_format_combo.setCurrentText("Mono8")
+    assert win._camera_stream_signature() != before
+
+
+def test_the_pixel_format_is_only_offered_where_it_exists():
+    """Only Pylon exposes PixelFormat. Leaving it live elsewhere reads as a
+    setting being ignored."""
+    win = _window()
+    win.backend_combo.setCurrentText("V4L2")
+    win._on_camera_backend_changed("V4L2")
+    assert not win.pixel_format_combo.isEnabled()
+    win.backend_combo.setCurrentText("Basler/Pylon")
+    win._on_camera_backend_changed("Basler/Pylon")
+    assert win.pixel_format_combo.isEnabled()

@@ -2813,7 +2813,28 @@ class MainWindow(QMainWindow):
         self.backend_combo.setCurrentText(str(self.camera_settings.get("camera_backend", "V4L2")))
         self.backend_combo.currentTextChanged.connect(self._on_camera_backend_changed)
         self.backend_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+        self.pixel_format_combo = QComboBox()
+        self.pixel_format_combo.addItems(
+            ["BayerRG8", "BayerBG8", "BayerGR8", "BayerGB8", "Mono8", "BGR8",
+             "RGB8", "Auto (leave as camera is set)"])
+        self.pixel_format_combo.setCurrentText(
+            str(self.camera_settings.get("pixel_format", "BayerRG8")))
+        self.pixel_format_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.pixel_format_combo.setToolTip(
+            "What the Basler puts on the wire. Ignored by other backends.\n\n"
+            "Nothing used to set this, so the camera streamed whatever Pylon "
+            "Viewer last left it in -- a setting made outside this program.\n\n"
+            "BayerRG8 is one byte per pixel against BGR8's three: at 20 MP that "
+            "is a third of the transfer time, which on a USB3 or GigE link is "
+            "the frame rate. The host debayers it to BGR8 for the model.\n\n"
+            "Wrong Bayer order shows immediately -- red and blue swap. Try the "
+            "other three if colours look wrong.\n\n"
+            "Mono8 is the same bandwidth and skips debayering entirely. Use it "
+            "if no label is told apart by colour."
+        )
         form.addRow("Backend", self.backend_combo)
+        form.addRow("Pixel format", self.pixel_format_combo)
 
         self.source_edit = QLineEdit(str(self.camera_settings.get("camera_source", "0")))
         self.source_edit.setPlaceholderText("0, /dev/video0, video.mp4, rtsp://, or Basler serial")
@@ -3743,6 +3764,10 @@ class MainWindow(QMainWindow):
         is_basler = backend == "Basler/Pylon"
         return (
             backend,
+            # Pixel format is negotiated when the stream starts, so changing it
+            # must reopen the camera rather than appearing to apply live.
+            (self.pixel_format_combo.currentText()
+             if (is_basler and hasattr(self, "pixel_format_combo")) else ""),
             self.source_edit.text().strip() if hasattr(self, "source_edit") else "0",
             self._int_line_value(self.width_spin, 0) if hasattr(self, "width_spin") else 0,
             self._int_line_value(self.height_spin, 0) if hasattr(self, "height_spin") else 0,
@@ -3878,6 +3903,7 @@ class MainWindow(QMainWindow):
                 self.camera_settings = {
                     "camera_source": self.source_edit.text().strip(),
                     "camera_backend": self.backend_combo.currentText(),
+                    "pixel_format": self.pixel_format_combo.currentText(),
                     "width": self._int_line_value(self.width_spin, 2592),
                     "height": self._int_line_value(self.height_spin, 1944),
                     "fps": self._int_line_value(self.fps_spin, 0),
@@ -4113,6 +4139,10 @@ class MainWindow(QMainWindow):
             self.mjpg_check.setEnabled(not is_basler and not is_gst_native)
         if hasattr(self, "basler_hint_label"):
             self.basler_hint_label.setVisible(is_basler)
+        if hasattr(self, "pixel_format_combo"):
+            # Only Pylon exposes PixelFormat; greying it elsewhere stops it
+            # reading like a setting that is being ignored.
+            self.pixel_format_combo.setEnabled(is_basler)
         if is_basler and hasattr(self, "status"):
             self.status.showMessage("Basler/Pylon selected. Source may be left blank or set to a serial/model filter.", 5000)
         if is_gst_native and hasattr(self, "status"):
@@ -4179,6 +4209,9 @@ class MainWindow(QMainWindow):
             force_v4l2=(False if is_basler else (self.force_v4l2_check.isChecked() if hasattr(self, "force_v4l2_check") else False)),
             exposure_auto=exposure_auto,
             exposure_us=exposure_us,
+            pixel_format=("" if not is_basler else
+                          ("" if self.pixel_format_combo.currentText().startswith("Auto")
+                           else self.pixel_format_combo.currentText())),
         ):
             QMessageBox.warning(
                 self,

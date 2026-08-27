@@ -383,6 +383,62 @@ class CameraSource:
         except Exception:
             return False
 
+    # What the camera puts on the wire. Never set before, so the camera streamed
+    # whatever PixelFormat it happened to be left in -- usually by Pylon Viewer,
+    # which persists it in the camera's user set. That makes captures depend on
+    # a setting made outside this program, months ago, by someone else.
+    #
+    # BayerRG8 is one byte per pixel against BGR8's three, so at 20 MP it is a
+    # third of the bandwidth and a third of the transfer time -- which is the
+    # frame rate, on a USB3 or GigE link. The host debayers it, which is real
+    # CPU work but happens in parallel with the next frame's transfer.
+    #
+    # Mono8 is the same bandwidth as BayerRG8 and skips demosaicing entirely.
+    # Worth it if nothing about a label is decided by colour -- and if something
+    # is, LabelDef.color_significant is where that gets recorded.
+    BASLER_PIXEL_FORMATS = ("BayerRG8", "BayerBG8", "BayerGR8", "BayerGB8",
+                            "Mono8", "BGR8", "RGB8", "YCbCr422_8")
+    DEFAULT_BASLER_PIXEL_FORMAT = "BayerRG8"
+
+    def _basler_pixel_format_options(self) -> list[str]:
+        """What this camera actually offers, which is model-specific."""
+        try:
+            return [str(v) for v in self.cap.PixelFormat.Symbolics]
+        except Exception:
+            return []
+
+    def _set_basler_pixel_format(self, wanted: str) -> str:
+        """Ask for a pixel format, and report what was actually obtained.
+
+        Reported rather than assumed: a mono camera has no Bayer format at all,
+        and silently falling back would leave the wire format a mystery again --
+        which is the whole problem being fixed.
+        """
+        if self.cap is None:
+            return "no camera"
+        options = self._basler_pixel_format_options()
+        current = ""
+        try:
+            current = str(self.cap.PixelFormat.GetValue())
+        except Exception:
+            pass
+        wanted = str(wanted or "").strip()
+        if not wanted or wanted.lower() == "auto":
+            return f"left as {current or 'camera default'}"
+        if options and wanted not in options:
+            return (f"{wanted} not offered by this camera; left as "
+                    f"{current or 'camera default'}. Available: "
+                    + ", ".join(options[:8]))
+        try:
+            self.cap.PixelFormat.SetValue(wanted)
+        except Exception as exc:
+            return f"could not set {wanted} ({exc}); left as {current or 'default'}"
+        try:
+            got = str(self.cap.PixelFormat.GetValue())
+        except Exception:
+            got = wanted
+        return f"{got}" + ("" if got == wanted else f" (asked for {wanted})")
+
     def _set_basler_aoi(self, width: int | None, height: int | None) -> str:
         """Set Basler AOI deterministically.
 
@@ -471,7 +527,7 @@ class CameraSource:
         except Exception as e:
             return f"Exposure apply failed: {e}"
 
-    def _open_basler(self, source: str | int, width: int | None, height: int | None, fps: int | None, threaded: bool, exposure_auto: bool = True, exposure_us: int | None = None) -> bool:
+    def _open_basler(self, source: str | int, width: int | None, height: int | None, fps: int | None, threaded: bool, exposure_auto: bool = True, exposure_us: int | None = None, pixel_format: str = "") -> bool:
         if pylon is None:
             self.last_result = CameraOpenResult(False, "Basler/Pylon selected, but pypylon is not installed in this Python environment. Run: pip install pypylon")
             return False
@@ -507,6 +563,13 @@ class CameraSource:
 
             exposure_msg = self._set_basler_exposure(exposure_auto, exposure_us)
 
+            pixfmt_msg = self._set_basler_pixel_format(
+                pixel_format or self.DEFAULT_BASLER_PIXEL_FORMAT)
+
+            # Whatever comes off the wire, the model gets BGR8. A Bayer frame
+            # handed straight to a detector is a mosaic of single-channel
+            # samples, not a picture, and nothing trained on photographs can
+            # read it.
             self.converter = pylon.ImageFormatConverter()
             self.converter.OutputPixelFormat = pylon.PixelType_BGR8packed
             self.converter.OutputBitAlignment = pylon.OutputBitAlignment_MsbAligned
@@ -552,7 +615,7 @@ class CameraSource:
 
         self.last_result = CameraOpenResult(
             True,
-            f"Opened Basler/Pylon camera {model} serial {serial}. Actual size {actual_w:.0f}x{actual_h:.0f}, reported FPS {actual_fps:.1f}. {aoi_msg}. Exposure: {exposure_msg}. First frame shape: {last_shape}.",
+            f"Opened Basler/Pylon camera {model} serial {serial}. Actual size {actual_w:.0f}x{actual_h:.0f}, reported FPS {actual_fps:.1f}. {aoi_msg}. Exposure: {exposure_msg}. Pixel format: {pixfmt_msg} (converted to BGR8 on the host). First frame shape: {last_shape}.",
             "Basler/Pylon",
             actual_w,
             actual_h,
@@ -598,6 +661,7 @@ class CameraSource:
         force_v4l2: bool = False,
         exposure_auto: bool = True,
         exposure_us: int | None = None,
+        pixel_format: str = "",
     ) -> bool:
         self.close()
         self.source = source
@@ -605,7 +669,9 @@ class CameraSource:
         force_message = ""
 
         if backend == "Basler/Pylon":
-            return self._open_basler(source, width, height, fps, threaded=threaded, exposure_auto=exposure_auto, exposure_us=exposure_us)
+            return self._open_basler(source, width, height, fps, threaded=threaded,
+                                     exposure_auto=exposure_auto, exposure_us=exposure_us,
+                                     pixel_format=pixel_format)
 
         if backend == "GStreamer (native)":
             return self._open_gst_native(source, width, height, fps, threaded=threaded, exposure_auto=exposure_auto, exposure_us=exposure_us)
