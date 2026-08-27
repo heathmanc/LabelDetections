@@ -813,3 +813,48 @@ def test_every_native_camera_call_is_serialised():
                    "_set_basler_pixel_format", "close"):
         body = inspect.getsource(getattr(cam.CameraSource, method))
         assert "_cam_lock" in body, f"{method} touches the camera unguarded"
+
+
+def test_drain_never_calls_opencv_methods_on_a_pylon_camera():
+    """isOpened() and grab() are cv2.VideoCapture methods. A pylon
+    InstantCamera answers unknown attributes with a PlaceholderParameter, which
+    is not callable -- so this raised the moment it ran against a Basler. It
+    never did while the threaded reader was on, because drain returns above
+    that; turning the reader off to diagnose something else is what reached
+    it."""
+    from label_detections.core import camera as cam
+
+    touched = []
+
+    class Pylon:
+        def __getattr__(self, name):
+            touched.append(name)
+            raise AssertionError(f"drain() called {name}() on a pylon camera")
+
+    src = cam.CameraSource()
+    src.threaded = False
+    src.cap = Pylon()
+    src.last_result = cam.CameraOpenResult(True, "", "Basler/Pylon")
+
+    src.drain(2)          # must be a no-op, not an exception
+    assert touched == []
+
+
+def test_drain_still_works_for_opencv():
+    from label_detections.core import camera as cam
+
+    grabs = {"n": 0}
+
+    class CV:
+        def isOpened(self):
+            return True
+
+        def grab(self):
+            grabs["n"] += 1
+
+    src = cam.CameraSource()
+    src.threaded = False
+    src.cap = CV()
+    src.last_result = cam.CameraOpenResult(True, "", "V4L2")
+    src.drain(3)
+    assert grabs["n"] == 3

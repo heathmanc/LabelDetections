@@ -1032,10 +1032,26 @@ class CameraSource:
         return int(self._frame_seq)
 
     def drain(self, count: int = 2) -> None:
-        # In threaded mode, the reader loop already keeps only the newest frame.
+        """Throw away buffered frames so the preview shows the newest one.
+
+        OpenCV only. isOpened() and grab() are cv2.VideoCapture methods, and a
+        pylon InstantCamera answers unknown attributes with a
+        PlaceholderParameter -- which is not callable, so this raised the
+        moment it ran against a Basler. It never did while the threaded reader
+        was on, because that returns above; turning the reader off to diagnose
+        something else is what first reached it.
+
+        Nothing to do for Basler regardless: GrabStrategy_LatestImageOnly
+        already discards everything but the newest frame at the driver.
+        """
         if self.threaded:
+            # The reader loop already keeps only the newest frame.
             return
-        if self.cap is None or not self.cap.isOpened():
+        if self.cap is None:
+            return
+        if self.last_result.backend_name == "Basler/Pylon":
+            return
+        if not self.cap.isOpened():
             return
         for _ in range(max(0, count)):
             try:
