@@ -117,9 +117,9 @@ class InferenceWorker(QObject):
 
     loaded = Signal(str)          # human description of what came up
     failed = Signal(str)
-    # Plain dicts (never tensors), latency in seconds. Identities from stage 2
-    # are already merged in.
-    result = Signal(object, float)
+    # Plain dicts (never tensors), latency in seconds, and Ultralytics' own
+    # per-phase timings. Identities from stage 2 are already merged in.
+    result = Signal(object, float, object)
 
     def __init__(self, model_path: str, imgsz: int, conf: float, device,
                  track: bool = True, classifier_path: str = "",
@@ -141,6 +141,8 @@ class InferenceWorker(QObject):
         # Reported once, not once per frame: a failure that repeats at the
         # camera's rate buries every other message in the log.
         self._stage2_failed = False
+        # Where Ultralytics actually ran, asked once after the first inference.
+        self._device_checked = False
 
     @Slot()
     def load(self) -> None:
@@ -315,7 +317,43 @@ class InferenceWorker(QObject):
         except Exception as exc:
             self.failed.emit(f"Could not read the results: {type(exc).__name__}: {exc}")
             return
-        self.result.emit(items, time.perf_counter() - started)
+        # Ultralytics already times its own three phases and we were throwing
+        # the numbers away. "120 ms" is not actionable; "preprocess 95,
+        # inference 8, postprocess 3" says immediately that the GPU is idle and
+        # the cost is resizing a 20 MP frame on the CPU.
+        # Ultralytics builds its own predictor on the first call, with its own
+        # device. The model object reporting cuda:0 says nothing about where
+        # the predictor ended up -- and a YOLO11 OBB at 640 costing 120 ms on a
+        # current card is CPU-speed, not GPU-speed. Checked once, reported once.
+        if not self._device_checked:
+            self._device_checked = True
+            try:
+                where = str(getattr(getattr(self._model, "predictor", None),
+                                    "device", "") or "")
+                wanted = self._torch_device()
+                if where and wanted and where.startswith("cpu") \
+                        and not wanted.startswith("cpu"):
+                    self.failed.emit(
+                        f"The model object is on {wanted}, but Ultralytics is "
+                        f"running inference on {where}.\n\n"
+                        f"That is why it is slow: this is CPU inference. The "
+                        f"usual cause is a torch build without kernels for this "
+                        f"card -- a 5090 is Blackwell (sm_120) and needs a "
+                        f"CUDA 12.8+ wheel.")
+                elif where:
+                    self.loaded.emit(f"Inference is running on {where}.")
+            except Exception:
+                pass
+
+        speed = {}
+        try:
+            raw = getattr(results[0], "speed", None) if results else None
+            if isinstance(raw, dict):
+                speed = {k: float(v) for k, v in raw.items()
+                         if isinstance(v, (int, float))}
+        except Exception:
+            speed = {}
+        self.result.emit(items, time.perf_counter() - started, speed)
 
     def _detection_quads(self, results):
         """Four corners per detection, in the SAME order the overlay builds them.

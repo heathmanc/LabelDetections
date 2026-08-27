@@ -512,3 +512,31 @@ def slow_hint(rolling: "Rolling", device_line: str) -> str:
             "above covers the detector only.",
         ]
     return "\n".join(lines)
+
+
+def phase_line(speed: dict) -> str:
+    """Where the milliseconds actually go, from Ultralytics' own timings.
+
+    A single latency figure cannot distinguish a slow model from a slow resize
+    in front of it, and on a 20 MP source those look identical from outside.
+    The three phases separate them: preprocess is CPU work on the full frame,
+    inference is the GPU, postprocess is NMS and decoding.
+    """
+    if not speed:
+        return ""
+    order = ("preprocess", "inference", "postprocess")
+    parts = [f"{name} {float(speed[name]):.0f}" for name in order if name in speed]
+    if not parts:
+        return ""
+    line = "   ms: " + "  ".join(parts)
+
+    pre = float(speed.get("preprocess", 0.0))
+    inf = float(speed.get("inference", 0.0))
+    if pre > inf * 1.5 and pre > 20:
+        line += ("\n   Most of it is preprocess -- CPU work resizing the frame "
+                 "before the model sees it, not the model. A smaller camera AOI "
+                 "or a smaller frame would cut it; a faster model would not.")
+    elif inf > 40:
+        line += ("\n   Most of it is the model. Lower the image size, or export "
+                 "to TensorRT (yolo export format=engine half=True).")
+    return line

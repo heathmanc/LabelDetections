@@ -1260,3 +1260,33 @@ def test_the_default_rate_is_the_one_that_ran_stably():
     """Conservative by default. Raising it drives the capture path harder, so
     it is a step someone takes and can walk back -- not one taken for them."""
     assert abs(1.0 / ld.MIN_INTERVAL_S - 6.7) < 0.2
+
+
+def test_the_phase_breakdown_separates_the_gpu_from_the_resize():
+    """A single latency figure cannot tell a slow model from a slow resize in
+    front of it, and on a 20 MP source those look identical from outside."""
+    slow_cpu_work = ld.phase_line({"preprocess": 95.0, "inference": 8.0,
+                                   "postprocess": 3.0})
+    assert "preprocess 95" in slow_cpu_work
+    assert "not the model" in slow_cpu_work
+    assert "TensorRT" not in slow_cpu_work, "wrong advice for a preprocess cost"
+
+    slow_model = ld.phase_line({"preprocess": 4.0, "inference": 110.0,
+                                "postprocess": 6.0})
+    assert "Most of it is the model" in slow_model
+    assert "TensorRT" in slow_model
+
+    assert ld.phase_line({}) == ""
+
+
+@ui
+def test_the_predictor_device_is_checked_not_assumed():
+    """Ultralytics builds its own predictor with its own device on the first
+    call. The model object reporting cuda:0 says nothing about where the
+    predictor ended up -- and 120 ms for an OBB at 640 is CPU-speed."""
+    import inspect
+    from label_detections.ui.live_detect import InferenceWorker
+
+    body = inspect.getsource(InferenceWorker.infer)
+    assert 'getattr(self._model, "predictor", None)' in body
+    assert "_device_checked" in body, "must report once, not every frame"

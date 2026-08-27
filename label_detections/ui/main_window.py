@@ -349,6 +349,7 @@ class MainWindow(QMainWindow):
         self._live_last_started = 0.0
         self._live_device_line = ""
         self._live_loaded = False
+        self._live_speed: dict = {}
         # Set here rather than in start_live_detect: results can arrive on
         # paths that never went through it, and an unset counter turns a quiet
         # view into a crash.
@@ -2324,7 +2325,7 @@ class MainWindow(QMainWindow):
         # Correct and destabilising is still destabilising.
         self._live_worker.infer(self._live_frame)
 
-    def _on_live_result(self, items, latency: float) -> None:
+    def _on_live_result(self, items, latency: float, speed=None) -> None:
         """Results arrive as plain dicts, already identified.
 
         The worker used to emit the Ultralytics Results object and this method
@@ -2335,6 +2336,7 @@ class MainWindow(QMainWindow):
         """
         self._live_busy = False
         self._live_rolling.record(latency)
+        self._live_speed = dict(speed or {})
         items = list(items or [])
         # Counted after stage 2, so the readout reports label ids rather than
         # a screenful of "label" -- which is what the recipe is written in.
@@ -2365,6 +2367,7 @@ class MainWindow(QMainWindow):
             getattr(self, "_preview_fps", 0.0),
             self.camera.read_fps() if hasattr(self.camera, "read_fps") else 0.0,
             self._live_rolling)
+        rates += live_logic.phase_line(self._live_speed)
         self.live_readout.setPlainText(
             rates + "\n" + self.live_readout.toPlainText()
             + live_logic.slow_hint(self._live_rolling,
