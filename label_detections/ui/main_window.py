@@ -107,6 +107,7 @@ from label_detections.core import augment as augment_logic
 from label_detections.core import dataset as dataset_logic
 from label_detections.core import live_detect as live_logic
 from label_detections.core import segment_assist
+from label_detections.core import hang_watch
 from label_detections.version import APP_TITLE
 from label_detections.ui import wizards
 from label_detections.ui.canvas import Box, ImageCanvas
@@ -2594,6 +2595,58 @@ class MainWindow(QMainWindow):
         # second to about 60. That is the change that destabilised the camera.
         # Correct and destabilising is still destabilising.
         self._live_worker.infer(self._live_frame)
+
+    def start_hang_watch(self, threshold_s: float = hang_watch.DEFAULT_THRESHOLD_S,
+                         path: Path | None = None) -> Path:
+        """Stamp a heartbeat, and have a daemon thread notice when it stops.
+
+        faulthandler covers a crash; a hang prints nothing at all -- the window
+        is up, clicking does nothing, and that one sentence describes a blocked
+        event loop, a deadlock on a camera lock and a worker that never
+        returned equally well. This is the difference between reporting that
+        and knowing where it stopped.
+
+        The heartbeat rides a timer of its own rather than the preview tick:
+        the preview tick stopping is one of the things worth catching.
+        """
+        import threading
+
+        self._heartbeat = hang_watch.Heartbeat()
+        self._hang_log = Path(path) if path is not None else (
+            Path(os.environ.get("LOCALAPPDATA", Path.home())) / "labelvision_hang.log")
+
+        self._heartbeat_timer = QTimer(self)
+        self._heartbeat_timer.setInterval(500)
+        self._heartbeat_timer.timeout.connect(self._heartbeat.beat)
+        self._heartbeat_timer.start()
+
+        beat, log = self._heartbeat, self._hang_log
+
+        def watch() -> None:
+            # Touches nothing the GUI owns: a watchdog that can block on the
+            # thing it watches is not one. Its own file handle, its own clock,
+            # no shared lock.
+            import faulthandler
+            last_dump = -1e9
+            while True:
+                time.sleep(hang_watch.DEFAULT_POLL_S)
+                now = time.monotonic()
+                stale = beat.stale_for(now)
+                if not hang_watch.should_dump(stale, now - last_dump, threshold_s):
+                    continue
+                last_dump = now
+                try:
+                    with open(log, "a", encoding="utf-8") as fh:
+                        fh.write(hang_watch.header(stale))
+                        fh.flush()
+                        faulthandler.dump_traceback(file=fh, all_threads=True)
+                except Exception:
+                    pass
+
+        self._hang_thread = threading.Thread(
+            target=watch, name="LabelVisionHangWatch", daemon=True)
+        self._hang_thread.start()
+        return self._hang_log
 
     def _tick_floor_s(self) -> float:
         """The shortest gap between two ticks that do work, in seconds."""
@@ -7754,6 +7807,11 @@ def main() -> None:
     # does not. Nothing here depends on the animation, so turn it off.
     QApplication.setEffectEnabled(Qt.UIEffect.UI_AnimateCombo, False)
     win = MainWindow()
+    # Before the window is shown, so a hang during startup is caught too.
+    try:
+        win.start_hang_watch()
+    except Exception:
+        pass          # diagnostics must never be the reason the app will not run
     win.show()
     # A configured library that could not be opened (typically an offline
     # network share) silently relocates the app's data. Say so rather than let
