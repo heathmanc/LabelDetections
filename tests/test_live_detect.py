@@ -1559,3 +1559,150 @@ def test_identical_text_is_not_rewritten():
         assert calls == ["changed"]
     finally:
         win.live_readout.setPlainText = original
+
+
+# --- pacing the display tick ------------------------------------------------
+
+def test_the_tick_follows_the_camera_rather_than_a_fixed_rate():
+    """A fixed 16 ms was ~60 firings a second whatever the camera did. That was
+    invisible only because inference sat in the tick and made it impossible."""
+    assert ld.tick_interval_ms(17.0) == 39      # ~25 ticks/s for a 17/s camera
+    assert ld.tick_interval_ms(30.0) == 22      # ~45 ticks/s for a 30/s camera
+
+
+def test_the_tick_oversamples_so_frames_are_not_shown_late():
+    """A tick exactly at the frame interval drifts in and out of phase."""
+    for fps in (10.0, 17.0, 30.0, 60.0):
+        interval = ld.tick_interval_ms(fps)
+        assert interval < 1000.0 / fps, f"{fps}/s tick is not faster than the camera"
+
+
+def test_an_unknown_rate_keeps_the_interval_it_always_had():
+    """True for the first second of every session."""
+    assert ld.tick_interval_ms(0.0) == ld.TICK_DEFAULT_MS
+    assert ld.tick_interval_ms(-1.0) == ld.TICK_DEFAULT_MS
+    assert ld.tick_interval_ms(None) == ld.TICK_DEFAULT_MS
+
+
+def test_the_interval_is_clamped_at_both_ends():
+    """A very fast camera must not spin the GUI, and a very slow one must not
+    leave the preview feeling dead."""
+    assert ld.tick_interval_ms(500.0) == ld.TICK_FASTEST_MS
+    assert ld.tick_interval_ms(0.5) == ld.TICK_SLOWEST_MS
+
+
+@ui
+def test_an_unthreaded_tick_does_not_read_faster_than_the_camera():
+    """The hole this closes. An unthreaded backend has no frame counter, so
+    every firing reached read() -- which blocks the GUI thread until the camera
+    produces something. Invisible while inference sat in the tick and made 60
+    firings a second impossible."""
+    win = _window()
+    reads = []
+
+    class Unthreaded:
+        threaded = False
+
+        def is_open(self):
+            return True
+
+        def read(self):
+            reads.append(time.perf_counter())
+            return True, np.zeros((8, 8, 3), np.uint8)
+
+        def read_fps(self):
+            return 17.0
+
+        def frame_seq(self):
+            return 0
+
+        def drain(self, count=2):
+            pass
+
+    real = win.camera
+    try:
+        win.camera = Unthreaded()
+        win._tick_fps = 17.0
+        win._last_tick_worked = 0.0
+        win.last_raw = None
+        win._on_timer()                      # first tick always works
+        assert len(reads) == 1
+        # Immediately again: the camera cannot have a new frame yet.
+        win._on_timer()
+        win._on_timer()
+        assert len(reads) == 1, "read the camera again inside one frame interval"
+        # Once the interval has passed, it works again.
+        win._last_tick_worked -= win._tick_floor_s()
+        win._on_timer()
+        assert len(reads) == 2
+    finally:
+        win.camera = real
+        win.last_raw = None
+        win._last_tick_worked = 0.0
+
+
+@ui
+def test_a_threaded_tick_still_paces_on_the_frame_counter():
+    """Exact beats estimated: where a counter exists it decides, so a camera
+    running faster than the last measurement cannot have frames skipped."""
+    win = _window()
+    reads = []
+
+    class Threaded:
+        threaded = True
+
+        def __init__(self):
+            self.seq = 1
+
+        def is_open(self):
+            return True
+
+        def read(self):
+            reads.append(1)
+            return True, np.zeros((8, 8, 3), np.uint8)
+
+        def read_fps(self):
+            return 17.0
+
+        def frame_seq(self):
+            return self.seq
+
+        def drain(self, count=2):
+            pass
+
+    real = win.camera
+    cam = Threaded()
+    try:
+        win.camera = cam
+        win.last_raw = None
+        win._last_frame_seq = None
+        win._on_timer()
+        assert len(reads) == 1
+        win._on_timer()                      # same frame
+        assert len(reads) == 1
+        # A new frame arrives inside the estimated interval -- it must still be
+        # taken, because the counter says it is genuinely new.
+        cam.seq = 2
+        win._last_tick_worked = time.perf_counter()
+        win._on_timer()
+        assert len(reads) == 2, "a real new frame was skipped by the time floor"
+    finally:
+        win.camera = real
+        win.last_raw = None
+        win._last_frame_seq = None
+
+
+@ui
+def test_the_timer_retunes_to_the_camera_that_showed_up():
+    win = _window()
+    win.timer.start(16)
+    try:
+        win._retune_tick(30.0)
+        assert win.timer.interval() == ld.tick_interval_ms(30.0) == 22
+        win._retune_tick(17.0)
+        assert win.timer.interval() == 39
+        # Unknown rate falls back rather than leaving the last camera's pacing.
+        win._retune_tick(0.0)
+        assert win.timer.interval() == ld.TICK_DEFAULT_MS
+    finally:
+        win.timer.stop()

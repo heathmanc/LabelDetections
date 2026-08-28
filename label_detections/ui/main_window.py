@@ -2595,6 +2595,25 @@ class MainWindow(QMainWindow):
         # Correct and destabilising is still destabilising.
         self._live_worker.infer(self._live_frame)
 
+    def _tick_floor_s(self) -> float:
+        """The shortest gap between two ticks that do work, in seconds."""
+        return live_logic.tick_interval_ms(getattr(self, "_tick_fps", 0.0)) / 1000.0
+
+    def _retune_tick(self, camera_fps: float) -> None:
+        """Point the display timer at the rate the camera is actually running.
+
+        A fixed interval is either wasteful or too slow the moment the camera
+        changes -- and one is coming that runs at nearly twice the current
+        rate. Derived from the measurement rather than from the configured fps,
+        because what a camera is set to and what it delivers are not the same
+        number.
+        """
+        self._tick_fps = float(camera_fps or 0.0)
+        wanted = live_logic.tick_interval_ms(self._tick_fps)
+        if hasattr(self, "timer") and self.timer.isActive() \
+                and self.timer.interval() != wanted:
+            self.timer.setInterval(wanted)
+
     def _infer_interval(self) -> float:
         """Seconds between inference starts, from the configured rate."""
         if hasattr(self, "live_rate_spin"):
@@ -4975,6 +4994,8 @@ class MainWindow(QMainWindow):
             return
         # Force the first tick after (re)opening to process a frame.
         self._last_frame_seq = None
+        self._last_tick_worked = 0.0
+        self._tick_fps = 0.0
         # Overlays are a result computed for one image. The still they were
         # computed on is about to be replaced by a stream, so they stop being
         # true the moment the first frame lands -- and an overlay that outlives
@@ -5063,6 +5084,16 @@ class MainWindow(QMainWindow):
                 return
         else:
             seq = None
+            # No frame counter exists here: it is bumped inside the reader
+            # thread and nowhere else, so an unthreaded backend has nothing to
+            # compare. Time is the only guard available, and it is needed --
+            # every firing that gets past this line calls read(), which blocks
+            # the GUI thread until the camera produces something. A Basler at a
+            # 1 s grab timeout can hold the window for that long, per tick.
+            if self.last_raw is not None and (
+                    _tick_started - getattr(self, "_last_tick_worked", 0.0)
+                    < self._tick_floor_s()):
+                return
 
         ok, frame = self.camera.read()
         if not ok or frame is None:
@@ -5079,6 +5110,7 @@ class MainWindow(QMainWindow):
             return
 
         self._last_frame_seq = seq
+        self._last_tick_worked = _tick_started
         self.blank_frame_count = 0
         # Drop stale buffered frames when requested. This makes the display feel current,
         # even if it means skipping intermediate frames.
@@ -5113,6 +5145,10 @@ class MainWindow(QMainWindow):
             self._preview_frame_counter = 0
             self._preview_fps_t0 = now_t
             cam_fps = self.camera.read_fps() if hasattr(self.camera, "read_fps") else 0.0
+            # Re-tune the timer to whatever the camera turned out to deliver.
+            # Once a second, and only when it actually changes, because setting
+            # an interval restarts the timer.
+            self._retune_tick(cam_fps)
             self.status.showMessage(f"Live view: display {self._preview_fps:.1f} FPS, camera read {cam_fps:.1f} FPS", 1200)
 
 

@@ -120,6 +120,45 @@ class CaptureGate:
         self._last = -1e9
 
 
+# --- pacing the display tick ------------------------------------------------
+#
+# The preview timer used to be a fixed 16 ms -- about 60 firings a second -- on
+# the assumption that a tick is cheap when there is nothing new. That holds only
+# for a threaded reader, where frame_seq() lets the tick return before touching
+# the camera. Unthreaded backends have no such counter (it is bumped inside the
+# reader thread and nowhere else), so every firing reaches read(), which blocks
+# on the GUI thread until the camera produces something.
+#
+# While inference sat inside the tick that never showed: the tick took 66 ms, so
+# it could not fire 60 times a second no matter what the timer asked for. Take
+# inference out and the timer's rate becomes the camera's rate.
+#
+# Derived from what the camera actually delivers, and oversampled rather than
+# matched: a tick exactly at the frame interval drifts in and out of phase and
+# shows every other frame late. Half again as fast leaves margin without
+# spinning. At 17/s that is 39 ms; at 30/s, 22 ms.
+TICK_DEFAULT_MS = 16
+TICK_FASTEST_MS = 8
+TICK_SLOWEST_MS = 100
+TICK_OVERSAMPLE = 1.5
+
+
+def tick_interval_ms(camera_fps: float) -> int:
+    """How often the preview timer should fire for a camera at this rate.
+
+    Falls back to the old fixed interval when the rate is not known yet, which
+    is the first second of any session.
+    """
+    try:
+        fps = float(camera_fps)
+    except (TypeError, ValueError):
+        return TICK_DEFAULT_MS
+    if fps <= 0:
+        return TICK_DEFAULT_MS
+    interval = 1000.0 / (fps * TICK_OVERSAMPLE)
+    return int(max(TICK_FASTEST_MS, min(TICK_SLOWEST_MS, round(interval))))
+
+
 def should_infer(busy: bool, since_last_s: float,
                  min_interval_s: float = MIN_INTERVAL_S) -> bool:
     """Start another inference, or let the preview have the frame?
