@@ -1,12 +1,26 @@
 """Shared builders. Kept terse so the tests read as scenarios, not setup."""
 from __future__ import annotations
 
+import os
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+# Somewhere to write, chosen before anything imports storage -- which resolves
+# the data root once, at import, and never again. Test modules used to each set
+# this themselves, so whichever imported storage first decided where the whole
+# suite wrote; a module that imported it and forgot pointed the suite at the
+# repository's own data folder, where the datasets survived the run and every
+# later run counted them. conftest is imported before any test module, so
+# putting it here means no module has to remember.
+os.environ.setdefault("LABELVISION_DATA_DIR",
+                      tempfile.mkdtemp(prefix="labelvision-tests-"))
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+os.environ.setdefault("MPLBACKEND", "Agg")
 
 from label_detections.core import annotations as ann
 from label_detections.core.labels import CodeSpec, LabelDef, LabelLibrary, TextField
