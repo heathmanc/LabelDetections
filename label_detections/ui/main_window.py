@@ -1130,7 +1130,21 @@ class MainWindow(QMainWindow):
             return spin
 
         _aug_note = (
-            "Ultralytics ships mosaic 1.0, scale 0.5, fliplr 0.5. Those suit COCO-like data; a bolted-down camera at a fixed working distance sees one scene geometry.\n\nMosaic tiles four images into one, roughly halving each, and scale jitters size on top of that -- so a detector whose image size you computed from measured label pixels spends most of training seeing labels well below it. Mosaic also pushes labels onto tile edges, teaching the model to fire on partial ones.\n\nA mirrored label is a label that does not exist, so fliplr defaults to 0.\n\nRaise them if the model overfits and more captures are not an option; they are the first thing to try when a run memorises the training set.")
+            "Ultralytics ships mosaic 1.0, scale 0.5, fliplr 0.5. Those suit "
+            "COCO-like data; a bolted-down camera at a fixed working distance "
+            "sees one scene geometry.\n\n"
+            "Mosaic tiles four images into one, roughly halving each, and scale "
+            "jitters size on top of that -- so a detector whose image size you "
+            "computed from measured label pixels spends most of training seeing "
+            "labels well below it. Mosaic also pushes labels onto tile edges, "
+            "teaching the model to fire on partial ones.\n\n"
+            "A mirrored label is a label that does not exist, so fliplr "
+            "defaults to 0.\n\n"
+            "close_mosaic follows Mosaic: at 0 there is nothing to close, so a "
+            "run no longer announces closing it 10 epochs from the end.\n\n"
+            "Raise them if the model overfits and more captures are not an "
+            "option; they are the first thing to try when a run memorises the "
+            "training set.")
         self.train_mosaic_spin = _aug_spin(
             "mosaic", "mosaic",
             "Probability of tiling four images into one.\n\n" + _aug_note)
