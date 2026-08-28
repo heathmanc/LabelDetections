@@ -304,6 +304,12 @@ class TrainingMetricsChart(QWidget):
 
 class MainWindow(QMainWindow):
 
+    # Emitted to hand the live worker a frame. A signal rather than a call:
+    # the worker lives on another thread, and Qt only queues across threads
+    # for signal-slot connections. A direct call runs on the caller's thread,
+    # which is what put inference inside the display tick.
+    infer_requested = Signal(object)
+
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle(APP_TITLE)
@@ -356,6 +362,9 @@ class MainWindow(QMainWindow):
         self._live_busy = False
         self._live_frame = None
         self._live_overlay_scale = (1.0, 1.0)
+        # The frame and scale a result in flight was submitted with.
+        self._inflight_frame = None
+        self._inflight_scale = (1.0, 1.0)
         self._live_rolling = live_logic.Rolling()
         self._live_gate = live_logic.CaptureGate()
         self._live_tracks = live_logic.TrackBook()
@@ -2471,6 +2480,8 @@ class MainWindow(QMainWindow):
             track=self._live_tracking, classifier_path=classifier_path,
             crop_px=int(self.live_crop_spin.value()))
         self._live_worker.moveToThread(self._live_thread)
+        # Queued, because the worker is on another thread by the line above.
+        self.infer_requested.connect(self._live_worker.infer)
         self._live_worker.loaded.connect(self._on_live_loaded)
         self._live_worker.failed.connect(self._on_live_failed)
         self._live_worker.result.connect(self._on_live_result)
@@ -2486,6 +2497,14 @@ class MainWindow(QMainWindow):
         thread = getattr(self, "_live_thread", None)
         worker = getattr(self, "_live_worker", None)
         if worker is not None:
+            # Before anything else: a start after this one would otherwise wire
+            # a second worker to the same signal while this one stayed
+            # connected, and emitting to a worker whose thread has gone is not
+            # survivable.
+            try:
+                self.infer_requested.disconnect(worker.infer)
+            except (RuntimeError, TypeError):
+                pass
             worker.stop()
         finished = True
         if thread is not None:
@@ -2579,21 +2598,33 @@ class MainWindow(QMainWindow):
         # In threaded mode CameraSource.read() has already handed back a
         # private array -- it copies out of _latest_frame under the lock -- so
         # copying again is a second 60 MB memcpy of the same pixels, on the
-        # thread that draws the preview. That is more time than the model now
-        # takes. Unthreaded backends return OpenCV's reusable buffer, which
-        # genuinely must be copied.
+        # thread that draws the preview. Unthreaded backends return OpenCV's
+        # reusable buffer, which genuinely must be copied.
         #
-        # Safe because inference is synchronous here: infer() has returned
-        # before this frame can be replaced.
+        # Safe to share with the worker: every tick gets its own array from
+        # read(), and nothing on this thread writes to it afterwards --
+        # apply_adjustments copies before it touches anything, and set_frame
+        # converts into a new buffer. Two readers, no writer.
         self._live_frame = (frame if getattr(self.camera, "threaded", False)
                             else frame.copy())
-        # Called directly, on this thread, which is how this ran when it was
-        # stable. Queuing it to the worker was correct in isolation -- and it
-        # is precisely what stopped the display tick being blocked by
-        # inference, taking the whole capture path from about 7 iterations a
-        # second to about 60. That is the change that destabilised the camera.
-        # Correct and destabilising is still destabilising.
-        self._live_worker.infer(self._live_frame)
+        # What this frame was submitted with, held until its result comes back.
+        # The result used to be scaled by whatever _live_overlay_scale happened
+        # to hold when it arrived, and paired with whatever _live_frame had
+        # become. That was only ever true because the call below was
+        # synchronous; it is not any more.
+        self._inflight_frame = self._live_frame
+        self._inflight_scale = self._live_overlay_scale
+        # Queued onto the worker's thread. This is what takes inference out of
+        # the display tick: the preview then runs at the camera's rate instead
+        # of at 1/(tick + inference). The reason it destabilised things last
+        # time was not the threading -- it was that an unblocked tick then ran
+        # at the timer's 60 Hz and drove the camera nine times harder. The
+        # frame-sequence guard at the top of _on_timer closes that: with a
+        # threaded reader the tick returns before touching the camera unless a
+        # new frame exists. Unthreaded live backends pace themselves by
+        # blocking in read(); an unthreaded video *file* does not, but there is
+        # no camera there to overrun, only a decoder.
+        self.infer_requested.emit(self._live_frame)
 
     def _infer_interval(self) -> float:
         """Seconds between inference starts, from the configured rate."""
@@ -2621,14 +2652,18 @@ class MainWindow(QMainWindow):
             counts[item["name"]] = counts.get(item["name"], 0) + 1
         self._live_counts = counts
         self._live_empty = (self._live_empty + 1) if not items else 0
-        # Hold the frame *these* boxes came from. By the time an operator
-        # clicks, _live_frame has usually moved on, and saving a newer image
-        # against older boxes writes a sidecar that is wrong everywhere.
-        self._live_result_frame = self._live_frame
+        # The frame these boxes came from, and the scale it was submitted
+        # with -- not whatever the live view holds now. With inference on its
+        # own thread the two are routinely different, and either mismatch is
+        # silent: a sidecar written against a newer image, or boxes scaled by a
+        # factor that belonged to another frame.
+        self._live_result_frame = getattr(self, "_inflight_frame", self._live_frame)
         self._live_result_items = items
         if hasattr(self.canvas, "set_model_test_overlays"):
             self.canvas.set_model_test_overlays(
-                self._scaled_overlay_items(items, self._live_overlay_scale))
+                self._scaled_overlay_items(
+                    items, getattr(self, "_inflight_scale",
+                                   self._live_overlay_scale)))
 
         if getattr(self, "_live_tracking", False):
             self._live_tracks.update(

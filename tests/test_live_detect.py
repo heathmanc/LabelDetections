@@ -176,6 +176,26 @@ def _window():
     return _win
 
 
+def _watch_infer(win, sink: list):
+    """Collect the frames the pump submits.
+
+    It emits rather than calls now -- inference lives on the worker's own
+    thread, and Qt only queues across threads for signal-slot connections -- so
+    the frame is watched on the signal, not on a stubbed method.
+
+    Any previous watcher is dropped first: the window is shared across this
+    module, and a connection left behind would keep filling an earlier test's
+    list.
+    """
+    previous = getattr(win, "_test_infer_watcher", None)
+    if previous is not None:
+        # Disconnect the exact slot: a bare disconnect() warns when nothing is
+        # connected, and PySide6 warns rather than raising.
+        win.infer_requested.disconnect(previous)
+    win._test_infer_watcher = sink.append
+    win.infer_requested.connect(sink.append)
+
+
 def _label(win, label_id="live_sp", ):
     from label_detections.core import persistence
     from label_detections.core.labels import LabelDef
@@ -245,7 +265,8 @@ def test_nothing_is_handed_to_the_model_while_it_is_busy():
     handed = []
     win._live_thread = object()          # pretend it is running
     win._live_loaded = True              # ...and that the model finished loading
-    win._live_worker = type("W", (), {"infer": lambda _s, f: handed.append(f)})()
+    win._live_worker = object()
+    _watch_infer(win, handed)
     win._live_busy = True
     # Recent enough that the lost-result watchdog stays out of it, old enough
     # that the minimum-interval floor is satisfied -- so this tests the busy
@@ -1209,7 +1230,8 @@ def test_no_frame_is_pumped_before_the_model_has_loaded():
     usually won to always lost."""
     win = _window()
     handed = []
-    win._live_worker = type("W", (), {"infer": lambda _s, f: handed.append(f)})()
+    win._live_worker = object()
+    _watch_infer(win, handed)
     win._live_thread = object()
     win._live_loaded = False
     win._live_busy = False
@@ -1235,7 +1257,8 @@ def test_a_result_that_never_arrives_does_not_freeze_the_view():
     back but a restart."""
     win = _window()
     handed = []
-    win._live_worker = type("W", (), {"infer": lambda _s, f: handed.append(f)})()
+    win._live_worker = object()
+    _watch_infer(win, handed)
     win._live_thread = object()
     win._live_loaded = True
     win._live_busy = True
@@ -1331,7 +1354,8 @@ def test_the_inference_rate_is_a_setting_and_governs_the_pump():
     second and destabilised a camera that had been fine."""
     win = _window()
     handed = []
-    win._live_worker = type("W", (), {"infer": lambda _s, f: handed.append(f)})()
+    win._live_worker = object()
+    _watch_infer(win, handed)
     win._live_thread = object()
     win._live_loaded = True
     win._live_busy = False
@@ -1428,7 +1452,8 @@ def test_a_threaded_camera_frame_is_not_copied_twice():
     that draws the preview -- more time than the model now takes."""
     win = _window()
     handed = []
-    win._live_worker = type("W", (), {"infer": lambda _s, f: handed.append(f)})()
+    win._live_worker = object()
+    _watch_infer(win, handed)
     win._live_thread = object()
     win._live_loaded = True
     win._live_busy = False
@@ -1559,3 +1584,118 @@ def test_identical_text_is_not_rewritten():
         assert calls == ["changed"]
     finally:
         win.live_readout.setPlainText = original
+
+
+# --- inference is off the display tick --------------------------------------
+
+@ui
+def test_the_frame_reaches_the_worker_on_the_workers_own_thread():
+    """The whole point. A direct call ran inference inside the display tick, so
+    the preview was pinned to 1/(tick + inference) -- 10/s against a camera
+    delivering 17. Qt only queues across threads for signal-slot connections,
+    so this checks the connection really is one."""
+    from PySide6.QtCore import QObject, QThread, Signal, Slot
+
+    class Recorder(QObject):
+        done = Signal()
+
+        def __init__(self):
+            super().__init__()
+            self.thread_name = ""
+
+        @Slot(object)
+        def infer(self, _frame):
+            self.thread_name = QThread.currentThread().objectName() or str(
+                id(QThread.currentThread()))
+            self.done.emit()
+
+    win = _window()
+    thread = QThread()
+    thread.setObjectName("worker-thread")
+    worker = Recorder()
+    worker.moveToThread(thread)
+    thread.start()
+
+    finished = []
+    worker.done.connect(lambda: finished.append(True))
+    previous = getattr(win, "_test_infer_watcher", None)
+    if previous is not None:
+        win.infer_requested.disconnect(previous)
+        win._test_infer_watcher = None
+    win.infer_requested.connect(worker.infer)
+    try:
+        gui_thread = str(id(QThread.currentThread()))
+        win.infer_requested.emit(np.zeros((4, 4, 3), np.uint8))
+        deadline = time.monotonic() + 5.0
+        while not finished and time.monotonic() < deadline:
+            QApplication.processEvents()
+            thread.eventDispatcher() and time.sleep(0.005)
+        assert finished, "the worker never received the frame"
+        assert worker.thread_name == "worker-thread", (
+            f"inference ran on {worker.thread_name}, not the worker's thread "
+            f"(the GUI thread is {gui_thread})")
+    finally:
+        win.infer_requested.disconnect(worker.infer)
+        thread.quit()
+        thread.wait(3000)
+
+
+@ui
+def test_the_result_uses_the_frame_and_scale_it_was_submitted_with():
+    """With inference on its own thread the live view has usually moved on by
+    the time a result lands. Scaling by the current factor, or pairing the
+    boxes with the current frame, is silently wrong in both directions."""
+    win = _window()
+    _label(win, "inflight")
+    win._live_thread = object()
+    win._live_tracking = False
+    submitted = np.zeros((8, 8, 3), np.uint8)
+    win._inflight_frame = submitted
+    win._inflight_scale = (0.25, 0.25)
+    # The live view has already moved on to a different frame and scale.
+    win._live_frame = np.ones((8, 8, 3), np.uint8)
+    win._live_overlay_scale = (1.0, 1.0)
+    try:
+        win._on_live_result(
+            [{"type": "other_box", "xyxy": [100.0, 200.0, 300.0, 400.0],
+              "cx": 200.0, "cy": 300.0, "name": "inflight", "conf": 0.9,
+              "points": [[100.0, 200.0], [300.0, 200.0],
+                         [300.0, 400.0], [100.0, 400.0]]}],
+            0.02, {})
+        assert win._live_result_frame is submitted, "paired with a newer frame"
+        drawn = win.canvas.model_test_overlays[0]
+        assert drawn["xyxy"] == [25.0, 50.0, 75.0, 100.0], (
+            "scaled by the live view's factor, not the submitted one")
+    finally:
+        win._live_thread = None
+
+
+@ui
+def test_stopping_unwires_the_worker_so_a_restart_does_not_double_up():
+    """Left connected, a second start would wire another worker alongside one
+    whose thread has gone, and emitting to that is not survivable."""
+    win = _window()
+    received = []
+
+    class Worker:
+        def infer(self, frame):
+            received.append(frame)
+
+        def stop(self):
+            pass
+
+    worker = Worker()
+    win._live_worker = worker
+    win._live_thread = None
+    win.infer_requested.connect(worker.infer)
+    try:
+        win.infer_requested.emit(np.zeros((2, 2, 3), np.uint8))
+        assert len(received) == 1
+
+        win.stop_live_detect()
+
+        win.infer_requested.emit(np.zeros((2, 2, 3), np.uint8))
+        assert len(received) == 1, "still wired to the stopped worker"
+    finally:
+        win._live_worker = None
+        win._live_thread = None
