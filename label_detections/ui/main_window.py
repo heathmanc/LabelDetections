@@ -1559,8 +1559,17 @@ class MainWindow(QMainWindow):
     def start_training(self) -> None:
         self._start_training_run(self._gather_train_params(), "detector")
 
-    def _start_training_run(self, params: dict, stage: str = "detector") -> None:
+    def _start_training_run(self, params: dict, stage: str = "detector", *,
+                            fresh: bool = True) -> None:
         """Launch one training run. Both stages come through here.
+
+        ``fresh`` says whether this starts a new piece of work or continues one
+        already in flight. It is passed in rather than inferred, because the
+        only thing available to infer it from -- the queue -- has already been
+        popped by the time the second stage launches. Inferring it there wiped
+        the detector's recorded metrics and weights the moment the classifier
+        started, so the summary showed one stage and the button that wires both
+        models never appeared.
 
         One launch path rather than two, so the parts that were hard to get
         right -- resolving which results.csv belongs to this run, streaming the
@@ -1616,10 +1625,8 @@ class MainWindow(QMainWindow):
         proc.errorOccurred.connect(self._on_train_error)
         self._train_process = proc
 
-        if not getattr(self, "_train_queue", None) or stage == "detector":
-            self.train_log.clear()
-            self._stage_results = {}
-            self._stage_weights = {}
+        if fresh:
+            self._begin_fresh_run()
         self.train_log.append(f"--- {stage} ---")
         self.train_log.append("$ " + " ".join(cmd) + "\n")
         for b in (self.train_start_btn, self.train_cls_btn, self.train_both_btn):
@@ -1649,6 +1656,17 @@ class MainWindow(QMainWindow):
             self._metrics_timer.start()
 
         proc.start(cmd[0], cmd[1:])
+
+    def _begin_fresh_run(self) -> None:
+        """Drop everything the last piece of work left behind.
+
+        Called only for a run somebody started, never for a queued second
+        stage: the classifier continues the detector's work and must not erase
+        its record.
+        """
+        self.train_log.clear()
+        self._stage_results = {}
+        self._stage_weights = {}
 
     def _resolve_results_csv(self) -> Path | None:
         """Find the results.csv for the active run.
@@ -1786,7 +1804,7 @@ class MainWindow(QMainWindow):
         if queued and exit_code == 0 and not stopped:
             params, stage = queued.pop(0)
             self.train_log.append(f"\n[queue] Detector finished. Starting {stage}.")
-            self._start_training_run(params, stage)
+            self._start_training_run(params, stage, fresh=False)
             return
         if queued:
             self._train_queue = []
@@ -6070,8 +6088,7 @@ class MainWindow(QMainWindow):
                             "conf": conf,
                             "cls_id": cls_id,
                             "name": name,
-                            "label": (f"{name} #{track_id} {conf:.2f}"
-                                      if track_id is not None else f"{name} {conf:.2f}"),
+                            "label": f"{name} {conf:.2f}",
                         })
                         counts[name] = counts.get(name, 0) + 1
                     continue
@@ -6098,8 +6115,7 @@ class MainWindow(QMainWindow):
                     "conf": conf,
                     "cls_id": cls_id,
                     "name": name,
-                    "label": (f"{name} #{track_id} {conf:.2f}" if track_id is not None
-                              else f"{name} {conf:.2f}"),
+                    "label": f"{name} {conf:.2f}",
                 })
                 counts[name] = counts.get(name, 0) + 1
         return items, counts

@@ -1575,3 +1575,50 @@ def test_the_train_tab_carries_the_augmentation_into_the_run():
     cls = win._gather_classifier_params()
     assert cls["erasing"] == pytest.approx(0.0)
     assert cls["fliplr"] == pytest.approx(0.0)
+
+
+def test_the_queue_advance_does_not_start_a_fresh_run():
+    """The regression this pins: the queue is popped before the second stage
+    launches, so a "fresh run?" test that read the queue saw it empty and wiped
+    the detector's metrics and weights the moment the classifier started. One
+    cause, two symptoms -- a summary with one chart, and no button to wire both
+    models. It is passed in now, not inferred."""
+    win = _window()
+    calls = []
+    original = win._start_training_run
+    win._start_training_run = lambda params, stage, **kw: calls.append((stage, kw))
+    win._train_queue = [({"task": "classify"}, "classifier")]
+    win._train_stage = "detector"
+    win._stage_results = {}
+    win._stage_weights = {}
+    win._train_start_time = 0.0
+    win._train_stopped = False
+    win._train_process = None
+    try:
+        win._on_train_finished(0, None)
+    finally:
+        win._start_training_run = original
+        win._train_queue = []
+
+    assert calls, "the classifier stage never started"
+    stage, kwargs = calls[0]
+    assert stage == "classifier"
+    assert kwargs.get("fresh") is False, (
+        "the second stage was treated as a new run, which clears stage 1")
+
+
+def test_a_fresh_run_clears_the_last_one_and_a_queued_stage_does_not(tmp_path):
+    """The reset still has to happen, or a second run shows the first's charts."""
+    win = _window()
+    win._stage_results = {"detector": {"stage": "detector"}}
+    win._stage_weights = {"detector": tmp_path / "old.pt"}
+
+    win._begin_fresh_run()
+    assert win._stage_results == {}
+    assert win._stage_weights == {}
+
+    # And nothing else in the launch path touches them, so a stage started with
+    # fresh=False keeps whatever stage 1 recorded.
+    win._stage_results = {"detector": {"stage": "detector"}}
+    win._stage_weights = {"detector": tmp_path / "det.pt"}
+    assert "detector" in win._stage_results and "detector" in win._stage_weights

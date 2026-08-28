@@ -315,7 +315,10 @@ class TrackBook:
 # still recorded -- rows() orders by them, and a mean is only worth reading
 # because it is held over frames -- just not printed.
 def track_line(track: Track) -> str:
-    return f"#{track.track_id} {track.name} {track.mean_conf:.2f}"
+    # The id and the confidence, nothing else -- the same rule the drawn plate
+    # follows. The track number is still the key the book groups by; it just is
+    # not something anyone reads while parts are moving past.
+    return f"{track.name} {track.mean_conf:.2f}"
 
 
 def track_summary(book: TrackBook, label_id: str, rolling: Rolling) -> str:
@@ -474,9 +477,10 @@ def apply_identities(items: list[dict], identities) -> list[dict]:
         merged["detector_name"] = item.get("name", "")
         merged["name"] = name
         merged["identity_conf"] = float(conf)
-        track = merged.get("track_id")
-        merged["label"] = (f"{name} #{track} {conf:.2f}" if track is not None
-                           else f"{name} {conf:.2f}")
+        # Stage 2's name and stage 2's confidence, and nothing else. The track
+        # id stays on the item for the readout to group by; on the box it only
+        # competes with the two things worth reading as parts move past.
+        merged["label"] = f"{name} {conf:.2f}"
         out.append(merged)
     return out
 

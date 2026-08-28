@@ -58,6 +58,10 @@ def extract_items(results) -> list[dict]:
     """
     import numpy as np
 
+    # The drawn plate is the label id and its confidence, nothing else. The
+    # track id is still carried on the item -- the readout groups by it -- but
+    # on the box it only competes with the two things worth reading while parts
+    # are moving past.
     items: list[dict] = []
     for r in results or []:
         names = getattr(r, "names", {}) or {}
@@ -83,8 +87,7 @@ def extract_items(results) -> list[dict]:
                         "cx": float(np.mean(pts[:, 0])),
                         "cy": float(np.mean(pts[:, 1])),
                         "conf": conf, "cls_id": cls_id, "name": name,
-                        "label": (f"{name} #{track_id} {conf:.2f}"
-                                  if track_id is not None else f"{name} {conf:.2f}"),
+                        "label": f"{name} {conf:.2f}",
                     })
                 continue
 
@@ -106,8 +109,7 @@ def extract_items(results) -> list[dict]:
                 "xyxy": [x1, y1, x2, y2],
                 "cx": (x1 + x2) / 2.0, "cy": (y1 + y2) / 2.0,
                 "conf": conf, "cls_id": cls_id, "name": name,
-                "label": (f"{name} #{track_id} {conf:.2f}" if track_id is not None
-                          else f"{name} {conf:.2f}"),
+                "label": f"{name} {conf:.2f}",
             })
     return items
 

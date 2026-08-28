@@ -131,7 +131,7 @@ def test_the_readout_names_the_id_the_recipe_is_written_in():
     book = ld.TrackBook()
     book.update([(1, "2220-9199", 0.94)], now=0.0)
     tracked = ld.track_summary(book, "2220-9199", rolling)
-    assert "#1 2220-9199 0.94" in tracked
+    assert "2220-9199 0.94" in tracked
     assert "this label" in tracked
 
 
@@ -386,7 +386,7 @@ def test_the_tracked_readout_reports_a_held_average_not_a_flicker():
                           ids=[7])]), 0.02)
         text = win.live_readout.toPlainText()
         assert "1 tracked" in text
-        assert f"#7 {win.label_id} 0.90" in text, "showed the latest frame, not the mean"
+        assert f"{win.label_id} 0.90" in text, "showed the latest frame, not the mean"
         assert "frames" not in text
     finally:
         win._live_thread = None
@@ -482,7 +482,7 @@ def test_the_track_summary_reports_what_is_there_not_what_is_open():
     rolling.record(0.01, now=100)
     text = ld.track_summary(book, "sp_g31", rolling)
     assert "sp_g31" not in text
-    assert "#1 cert_mark" in text
+    assert "cert_mark 0.90" in text
 
 
 def test_the_open_label_is_marked_when_it_is_one_of_the_tracks():
@@ -493,7 +493,7 @@ def test_the_open_label_is_marked_when_it_is_one_of_the_tracks():
     rolling = ld.Rolling()
     rolling.record(0.01, now=100)
     text = ld.track_summary(book, "sp_g31", rolling)
-    assert "#2 sp_g31 0.80  <-- this label" in text
+    assert "sp_g31 0.80  <-- this label" in text
     assert "<-- this label" not in text.split("\n")[1]
 
 
@@ -747,7 +747,10 @@ def test_identities_land_on_the_boxes_they_belong_to():
              {"name": "label", "track_id": 7, "conf": 0.8}]
     out = ld.apply_identities(items, [("2220-9199", 0.97), ("warn-g31-en", 0.88)])
     assert out[0]["name"] == "2220-9199" and out[1]["name"] == "warn-g31-en"
-    assert "2220-9199 #3 0.97" == out[0]["label"]
+    # The plate is the id and the confidence, nothing else -- the track id is
+    # still on the item for the readout to group by, just not drawn on the box.
+    assert out[0]["label"] == "2220-9199 0.97"
+    assert out[0]["track_id"] == 3
     # The detector's own answer is kept, so a disagreement stays visible.
     assert out[0]["detector_name"] == "label"
 
@@ -1422,3 +1425,17 @@ def test_starting_a_run_clears_the_previous_run_s_boxes(monkeypatch):
     finally:
         win._live_thread = None
     assert win.canvas.model_test_overlays == []
+
+
+def test_the_plate_carries_the_id_and_the_confidence_and_nothing_else():
+    """Read at a glance while parts move past: every extra character on the box
+    competes with the two that matter. The track id stays on the item, because
+    the readout groups by it."""
+    results = [_Results([[10, 10, 40, 40]], {0: "2220-9199"}, [0.91], [0], ids=[5])]
+    items = _items(results)
+    assert items[0]["label"] == "2220-9199 0.91"
+    assert items[0]["track_id"] == 5
+
+    identified = ld.apply_identities(items, [("ODX-Long", 0.87)])
+    assert identified[0]["label"] == "ODX-Long 0.87"
+    assert identified[0]["track_id"] == 5
