@@ -50,6 +50,30 @@ class Read:
     def __bool__(self) -> bool:
         return bool(self.text)
 
+    def candidates(self) -> list[str]:
+        """Every spelling of this read a pattern may reasonably be written for.
+
+        One spelling, except for the UPC-A / EAN-13 overlap, which is a trap
+        worth spending code on. A UPC-A is a 12-digit code and the label prints
+        12 digits, so that is what anyone types a pattern against -- but the
+        two symbologies share an encoding, and decoders commonly report a
+        UPC-A as its EAN-13 form with a leading zero. The pattern then fails
+        on every genuine part, which is the expensive direction: good stock
+        rejected, and the readout blaming the printing.
+
+        Only ever adds spellings, never replaces one, so this cannot turn a
+        read that already matched into one that does not. The zero-stripped
+        form is the same code by definition, so admitting it is not a
+        loosening of the check.
+        """
+        text = str(self.text or "")
+        out = [text]
+        if len(text) == 13 and text.startswith("0") and text.isdigit():
+            out.append(text[1:])          # EAN-13 carrying a UPC-A
+        elif len(text) == 12 and text.isdigit():
+            out.append("0" + text)        # the same code, written the other way
+        return out
+
 
 @dataclass
 class Verdict:
@@ -108,7 +132,8 @@ def owners(patterns: dict[str, list[str]], reads) -> list[str]:
     found = []
     for label_id, label_patterns in sorted((patterns or {}).items()):
         for pattern in label_patterns or []:
-            if any(matches(pattern, r.text) for r in reads or []):
+            if any(matches(pattern, text)
+                   for r in reads or [] for text in r.candidates()):
                 found.append(label_id)
                 break
     return found

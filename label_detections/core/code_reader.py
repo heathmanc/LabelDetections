@@ -31,8 +31,15 @@ from .imageio import rectify_quad
 FALLBACK_MAX_SIDE = 1600
 
 # A little context around the symbol. Decoders want the quiet zone, and a
-# region drawn tight to the printed bars does not include one.
+# region drawn tight to the printed bars does not include one. This is the
+# floor, used when the print spec was never entered; a label that declares its
+# quiet zone gets the real number instead. See region_margin.
 REGION_MARGIN = 0.25
+
+# However wrong a typed number is, the crop stays a crop. A quiet zone entered
+# in the wrong units would otherwise swallow the whole label and read whatever
+# else is printed on it.
+MAX_REGION_MARGIN = 1.5
 
 _BACKEND = None
 _REASON = ""
@@ -92,14 +99,18 @@ class Spec:
     crosses between them is a snapshot rather than a live reference.
     """
 
-    __slots__ = ("role", "symbology", "policy", "pattern", "region")
+    __slots__ = ("role", "symbology", "policy", "pattern", "region",
+                 "quiet_zone_mm", "code_width_mm")
 
-    def __init__(self, role="", symbology="", policy="", pattern="", region=()):
+    def __init__(self, role="", symbology="", policy="", pattern="", region=(),
+                 quiet_zone_mm=0.0, code_width_mm=0.0):
         self.role = role
         self.symbology = symbology
         self.policy = policy
         self.pattern = pattern
         self.region = list(region)
+        self.quiet_zone_mm = float(quiet_zone_mm or 0.0)
+        self.code_width_mm = float(code_width_mm or 0.0)
 
 
 def specs_from(label) -> list[Spec]:
@@ -109,9 +120,37 @@ def specs_from(label) -> list[Spec]:
              symbology=str(getattr(spec, "symbology", "") or ""),
              policy=str(getattr(spec, "policy", "") or ""),
              pattern=str(getattr(spec, "pattern", "") or ""),
-             region=[float(v) for v in (getattr(spec, "region", None) or [])])
+             region=[float(v) for v in (getattr(spec, "region", None) or [])],
+             quiet_zone_mm=getattr(spec, "quiet_zone_mm", 0.0),
+             code_width_mm=getattr(spec, "code_width_mm", 0.0))
         for spec in (getattr(label, "codes", None) or [])
     ]
+
+
+def region_margin(spec) -> float:
+    """How far to grow a drawn region so the decoder gets its quiet zone.
+
+    The drawn box follows the printed bars, because that is what an operator
+    can see to drag around. Decoders need the blank margin either side of them,
+    and how much is not a matter of taste -- the symbology specifies it, and
+    for a small code it can be most of the symbol's own width again. A fixed
+    guess is fine for a Code 128 across a battery face and far too tight for an
+    8 mm DataMatrix, where cropping inside the quiet zone means a good part
+    reading "no code".
+
+    So when the label declares its quiet zone and printed width, use them.
+    ``_expand`` splits the margin either side of the region, so each side gets
+    ``width * margin / 2`` -- which makes the margin twice the quiet zone as a
+    fraction of the width.
+
+    Never tighter than the guess it replaces, so a label whose spec says less
+    than the old fixed value keeps behaving as it did.
+    """
+    quiet = float(getattr(spec, "quiet_zone_mm", 0.0) or 0.0)
+    width = float(getattr(spec, "code_width_mm", 0.0) or 0.0)
+    if quiet <= 0 or width <= 0:
+        return REGION_MARGIN
+    return min(MAX_REGION_MARGIN, max(REGION_MARGIN, 2.0 * quiet / width))
 
 
 def _expand(rect: list[float], margin: float) -> list[float]:
@@ -143,7 +182,7 @@ def read_label(frame, quad, specs) -> list[logic.Read]:
         region = list(getattr(spec, "region", None) or [])
         if len(region) < 4:
             continue
-        placed = place_unit_rect(quad, _expand(region, REGION_MARGIN))
+        placed = place_unit_rect(quad, _expand(region, region_margin(spec)))
         if not placed:
             continue
         # No max_side: this is the one crop in the pipeline that must not be

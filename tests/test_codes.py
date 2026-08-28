@@ -422,3 +422,85 @@ def test_the_load_message_names_the_labels_it_cannot_verify(monkeypatch):
     assert worker._codes_on is True
     assert "1 label(s) verifiable" in worker._code_note
     assert "NOT verifiable: bare" in worker._code_note
+
+
+# --- the print spec: what it does and does not do ---------------------------
+#
+# Width, module size and quiet zone are never handed to a decoder. Two of them
+# feed one advisory number -- how many pixels the camera needs -- and the third
+# was stored and read by nothing at all until it was given this job.
+
+def test_the_crop_margin_falls_back_to_a_guess_with_no_print_spec():
+    """Most labels will never have these numbers typed in, and the check has
+    to work anyway."""
+    from label_detections.core import code_reader as cr
+
+    assert cr.region_margin(cr.Spec()) == cr.REGION_MARGIN
+
+
+def test_a_declared_quiet_zone_widens_the_crop_when_the_code_is_small():
+    """The failure this prevents: an 8 mm DataMatrix with a 2.5 mm quiet zone
+    needs more than half its own width again either side. A fixed guess crops
+    inside the quiet zone, the decode fails, and a good part reads 'no code'
+    with the readout blaming the printing."""
+    from label_detections.core import code_reader as cr
+
+    small = cr.Spec(quiet_zone_mm=2.5, code_width_mm=8.0)
+    assert cr.region_margin(small) == pytest.approx(0.625)
+
+
+def test_a_spec_asking_for_less_than_the_guess_does_not_tighten_the_crop():
+    """Every label that works today has to keep working. The spec may only
+    widen the crop, never narrow it."""
+    from label_detections.core import code_reader as cr
+
+    roomy = cr.Spec(quiet_zone_mm=1.0, code_width_mm=46.0)   # 0.043 on its own
+    assert cr.region_margin(roomy) == cr.REGION_MARGIN
+
+
+def test_a_quiet_zone_typed_in_the_wrong_units_still_leaves_a_crop():
+    """Millimetres and thousandths of an inch are both plausible things to type
+    into a box labelled mm, and one of them is 25x the other."""
+    from label_detections.core import code_reader as cr
+
+    assert cr.region_margin(cr.Spec(quiet_zone_mm=250.0, code_width_mm=8.0)) \
+        == cr.MAX_REGION_MARGIN
+
+
+# --- UPC-A, which is what the batteries actually carry ----------------------
+
+UPC = "635241140996"
+UPC_PATTERNS = {"PC680": [f"^{UPC}$"]}
+UPC_SPEC = [_Spec(pattern=f"^{UPC}$")]
+
+
+def test_a_upc_read_as_ean13_still_matches_the_twelve_digit_pattern():
+    """The trap. A UPC-A is 12 digits and the label prints 12 digits, so that
+    is what anyone writes a pattern against -- but the two symbologies share an
+    encoding and decoders commonly return the EAN-13 form with a leading zero.
+    Every genuine part would read NO MATCH, which is the expensive direction."""
+    v = cd.verdict("PC680", UPC_SPEC, [cd.Read("0" + UPC, "EAN13")], UPC_PATTERNS)
+    assert v.state == cd.CONFIRMED
+
+
+def test_a_pattern_written_for_the_ean13_form_matches_a_upca_read():
+    """The same trap from the other side, for anyone who copied the 13-digit
+    form out of a decoder's output."""
+    patterns = {"PC680": [f"^0{UPC}$"]}
+    v = cd.verdict("PC680", [_Spec(pattern=f"^0{UPC}$")],
+                   [cd.Read(UPC, "UPCA")], patterns)
+    assert v.state == cd.CONFIRMED
+
+
+def test_the_leading_zero_rule_does_not_make_a_different_code_match():
+    """Admitting the same code spelled two ways is not a loosening. A code that
+    is genuinely different still has to fail."""
+    v = cd.verdict("PC680", UPC_SPEC, [cd.Read("635241140997", "UPCA")],
+                   UPC_PATTERNS)
+    assert v.state == cd.CONTRADICTED and v.label_id == ""
+
+
+def test_only_all_digit_reads_get_the_leading_zero_treatment():
+    """A 13-character alphanumeric that happens to start with 0 is not a UPC."""
+    assert cd.Read("0ABC123456789").candidates() == ["0ABC123456789"]
+    assert cd.Read("").candidates() == [""]
