@@ -2432,6 +2432,17 @@ class MainWindow(QMainWindow):
         self.code_readiness_btn = QPushButton("What can be verified")
         self.code_readiness_btn.clicked.connect(self._show_code_readiness)
         code_row.addWidget(self.code_readiness_btn)
+        self.code_test_btn = QPushButton("Test read")
+        self.code_test_btn.clicked.connect(self.test_code_read)
+        self.code_test_btn.setToolTip(
+            "Run the same crop the runtime takes, against the box drawn on the "
+            "current image, and show the pixels next to what the decoder made "
+            "of them.\n\n"
+            "For answering 'why does it say no code'. It also decodes the whole "
+            "label as a comparison: if the region reads nothing and the whole "
+            "label reads fine, the region is landing in the wrong place rather "
+            "than the code being unreadable.")
+        code_row.addWidget(self.code_test_btn)
         cv_.addLayout(code_row)
 
         rate_row = QHBoxLayout()
@@ -7796,6 +7807,100 @@ class MainWindow(QMainWindow):
         lines.append(code_logic.readiness(
             self.library.all() if self.library is not None else []))
         QMessageBox.information(self, "What can be verified", "\n".join(lines))
+
+    def test_code_read(self) -> None:
+        """Show the pixels the decoder was actually handed, and what came back.
+
+        "no code" on a plate is the end of a chain with several failure points
+        and no way to tell them apart from outside it. This runs the same crop
+        the runtime takes, against the box on screen, and puts the image in
+        front of the operator next to the decode result.
+        """
+        from label_detections.core import code_reader
+
+        label = self.library.get(self.label_id) if self.label_id else None
+        if label is None:
+            QMessageBox.information(self, "Test Code Read", "Open a label first.")
+            return
+        specs = code_reader.specs_from(label)
+        from label_detections.core import codes as code_logic
+        if not code_logic.demanded(specs):
+            QMessageBox.information(
+                self, "Test Code Read",
+                f"'{self.label_id}' declares no code for inspection, so there is "
+                f"nothing to read. Draw its code region and set the policy to "
+                f"must_decode first.")
+            return
+
+        frame = self.last_raw
+        if frame is None and self.current_image_path:
+            frame = cv2.imread(str(self.current_image_path))
+        if frame is None:
+            QMessageBox.information(
+                self, "Test Code Read",
+                "No frame. Open one of this label's images, or start the live "
+                "preview, and draw the label's box.")
+            return
+        box = self._label_box_for_regions(label)
+        if box is None:
+            return
+
+        report = code_reader.diagnose(
+            frame, box.to_dict().get("points") or [], specs)
+        self._show_code_diagnosis(report, code_reader.diagnosis_text(report))
+
+    def _show_code_diagnosis(self, report: dict, text: str) -> None:
+        """The crops, at real pixels, above the reading of them."""
+        from PySide6.QtGui import QImage, QPixmap
+        from PySide6.QtWidgets import QDialog, QDialogButtonBox, QScrollArea
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Test Code Read")
+        dialog.resize(760, 620)
+        outer = QVBoxLayout(dialog)
+        area = QScrollArea()
+        area.setWidgetResizable(True)
+        inner = QWidget()
+        column = QVBoxLayout(inner)
+
+        def add_crop(caption: str, crop) -> None:
+            if crop is None or getattr(crop, "size", 0) == 0:
+                return
+            head = QLabel(caption)
+            head.setStyleSheet("font-weight: 700;")
+            column.addWidget(head)
+            rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
+            h, w, ch = rgb.shape
+            image = QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888).copy()
+            view = QLabel()
+            # Never enlarged: this is about how many real pixels the decoder
+            # got, and an upscaled crop of a code that is too small to read
+            # looks perfectly legible.
+            pixmap = QPixmap.fromImage(image)
+            if pixmap.width() > 700:
+                pixmap = pixmap.scaledToWidth(700, Qt.SmoothTransformation)
+            view.setPixmap(pixmap)
+            view.setStyleSheet("border: 1px solid #334155;")
+            column.addWidget(view)
+
+        for entry in report.get("regions") or []:
+            add_crop(f"Region '{getattr(entry['spec'], 'role', '?')}' "
+                     f"— what the runtime crops", entry.get("crop"))
+        whole = report.get("whole") or {}
+        add_crop("Whole label — the comparison", whole.get("crop"))
+
+        body = QLabel(text)
+        body.setWordWrap(True)
+        body.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        column.addWidget(body)
+        column.addStretch(1)
+        area.setWidget(inner)
+        outer.addWidget(area, 1)
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons.rejected.connect(dialog.reject)
+        buttons.accepted.connect(dialog.accept)
+        outer.addWidget(buttons)
+        dialog.exec()
 
     def _build_novelty_profile(self) -> None:
         """Measure where each enrolled label sits, so the rest can be refused."""

@@ -504,3 +504,74 @@ def test_only_all_digit_reads_get_the_leading_zero_treatment():
     """A 13-character alphanumeric that happens to start with 0 is not a UPC."""
     assert cd.Read("0ABC123456789").candidates() == ["0ABC123456789"]
     assert cd.Read("").candidates() == [""]
+
+
+# --- saying why a code did not read -----------------------------------------
+#
+# "no code" is the end of a chain with several places to fail and no way to
+# tell them apart from outside: the region lands wrong, the crop is too few
+# pixels, the print is out of focus, the decoder is absent. The diagnostic
+# exists to split that chain, and the split that matters is region-vs-whole.
+
+def _report(region_reads=(), whole_reads=(), region_px=(300, 90), ok=True):
+    import numpy as np
+
+    from label_detections.core import code_reader as cr
+
+    crop = np.zeros((region_px[1], region_px[0], 3), dtype=np.uint8)
+    return {
+        "ok": ok, "reason": "" if ok else "zxing-cpp is not installed",
+        "regions": [{"spec": _Spec(), "crop": crop,
+                     "reads": list(region_reads), "note": ""}],
+        "whole": {"crop": np.zeros((200, 900, 3), dtype=np.uint8),
+                  "reads": list(whole_reads)},
+    }, cr
+
+
+def test_a_region_that_reads_hands_back_the_text_to_compare():
+    """The next failure after a good decode is a pattern that does not match
+    it, and that is settled by looking at the two strings side by side."""
+    report, cr = _report(region_reads=[cd.Read("635241140996", "UPCA")])
+    text = cr.diagnosis_text(report)
+    assert "635241140996" in text
+    assert "character for character" in text
+
+
+def test_a_whole_label_read_with_an_empty_region_blames_the_placement():
+    """The decisive fork. The code is legible in this very frame, so nothing is
+    wrong with the picture -- the crop simply did not contain it."""
+    report, cr = _report(whole_reads=[cd.Read("635241140996", "UPCA")])
+    text = cr.diagnosis_text(report)
+    assert "LANDING IN THE WRONG PLACE" in text
+    assert "DETECTOR" in text, "must name why the region can move at runtime"
+
+
+def test_both_empty_blames_the_picture_rather_than_the_placement():
+    """No placement change fixes a code the optics never resolved."""
+    report, cr = _report()
+    text = cr.diagnosis_text(report)
+    assert "picture problem" in text
+    assert "190" in text, "should give the number to compare the crop against"
+    assert "LANDING IN THE WRONG PLACE" not in text
+
+
+def test_the_crop_size_is_always_reported():
+    """The one number that decides whether it could ever have worked."""
+    report, cr = _report(region_px=(140, 40))
+    assert "140x40 px" in cr.diagnosis_text(report)
+
+
+def test_a_missing_decoder_is_said_first_and_stops_there():
+    """Everything below it would read as a picture problem otherwise, and send
+    somebody to re-shoot a label when the fix is a pip install."""
+    report, cr = _report(ok=False)
+    text = cr.diagnosis_text(report)
+    assert text.startswith("No decoder")
+    assert "picture problem" not in text
+
+
+def test_diagnose_is_safe_with_nothing_to_work_on():
+    from label_detections.core import code_reader as cr
+
+    report = cr.diagnose(None, None, [])
+    assert report["regions"] == [] and report["whole"] is None

@@ -200,6 +200,109 @@ def read_label(frame, quad, specs) -> list[logic.Read]:
     return decode(rectify_quad(frame, quad, max_side=FALLBACK_MAX_SIDE))
 
 
+def diagnose(frame, quad, specs) -> dict:
+    """Why a code did not read, in a form somebody can look at.
+
+    "no code" on the plate is the end of a chain with several places to fail
+    and no way to tell them apart from the outside: the region can land in the
+    wrong place, the crop can be too few pixels, the print can be out of focus,
+    or the decoder can simply not be there. Guessing between those from a
+    screenshot is not a method.
+
+    So this hands back the actual pixels each step used, plus the one
+    comparison that splits the chain in half: the whole label decoded as well.
+    A region that reads nothing while the whole label reads fine is a region
+    landing in the wrong place -- almost always because the runtime maps it
+    onto the detector's box, and the detector's box is not exactly the outline
+    the artwork was flattened from. Both empty is a picture problem, not a
+    placement one.
+    """
+    ok, reason = available()
+    out = {"ok": ok, "reason": reason, "regions": [], "whole": None}
+    if not ok or frame is None or quad is None or len(quad) < 4:
+        return out
+
+    for spec in logic.demanded(specs):
+        region = list(getattr(spec, "region", None) or [])
+        entry = {"spec": spec, "crop": None, "reads": [], "note": ""}
+        if len(region) < 4:
+            entry["note"] = "no region drawn, so the whole label is searched"
+            out["regions"].append(entry)
+            continue
+        placed = place_unit_rect(quad, _expand(region, region_margin(spec)))
+        if not placed:
+            entry["note"] = "the region could not be placed on this box"
+            out["regions"].append(entry)
+            continue
+        crop = rectify_quad(frame, placed)
+        entry["crop"] = crop
+        entry["reads"] = decode(crop)
+        out["regions"].append(entry)
+
+    whole = rectify_quad(frame, quad, max_side=FALLBACK_MAX_SIDE)
+    out["whole"] = {"crop": whole, "reads": decode(whole)}
+    return out
+
+
+def diagnosis_text(report: dict) -> str:
+    """What the crops say, in the order that narrows it down fastest."""
+    if not report.get("ok"):
+        return (f"No decoder: {report.get('reason', '')}\n\n"
+                f"Nothing below could have read anything.")
+
+    lines = []
+    regions = report.get("regions") or []
+    whole = report.get("whole") or {}
+    got_region = any(r["reads"] for r in regions)
+    got_whole = bool(whole.get("reads"))
+
+    for entry in regions:
+        crop = entry.get("crop")
+        size = f"{crop.shape[1]}x{crop.shape[0]} px" if crop is not None else "no crop"
+        role = getattr(entry["spec"], "role", "?")
+        if entry["reads"]:
+            found = ", ".join(f"{r.text} [{r.symbology}]" for r in entry["reads"])
+            lines.append(f"Region '{role}' ({size}): {found}")
+        else:
+            lines.append(f"Region '{role}' ({size}): nothing decoded"
+                         + (f" -- {entry['note']}" if entry["note"] else ""))
+
+    if whole.get("crop") is not None:
+        crop = whole["crop"]
+        size = f"{crop.shape[1]}x{crop.shape[0]} px"
+        if got_whole:
+            found = ", ".join(f"{r.text} [{r.symbology}]" for r in whole["reads"])
+            lines.append(f"Whole label ({size}): {found}")
+        else:
+            lines.append(f"Whole label ({size}): nothing decoded")
+
+    lines.append("")
+    if got_region:
+        lines.append("READS. Whatever comes back here is what the pattern is "
+                     "matched against -- compare it character for character "
+                     "with what you typed.")
+    elif got_whole:
+        lines.append(
+            "THE REGION IS LANDING IN THE WRONG PLACE. The code is legible in "
+            "this frame -- the whole label read it -- but the crop taken from "
+            "the region did not contain it.\n\n"
+            "The region is a fraction of the label, and at runtime it is mapped "
+            "onto the DETECTOR's box, not the outline the artwork was flattened "
+            "from. If those two differ, or the detector's box is oriented the "
+            "other way round, the region lands somewhere else on the label. "
+            "Redraw the region with a wider margin around the code, or draw the "
+            "artwork outline to match what the detector actually produces.")
+    else:
+        lines.append(
+            "NOTHING IS DECODING, from the region or the whole label. This is a "
+            "picture problem rather than a placement one: too few pixels across "
+            "the bars, out of focus, glare across the symbol, or the label at an "
+            "angle steep enough to close the bars up. Compare the pixel size "
+            "above against what the symbology needs -- a UPC-A wants about 190 "
+            "px across the bars.")
+    return "\n".join(lines)
+
+
 def library_snapshot(library) -> tuple[dict, dict]:
     """``({label_id: [spec, ...]}, {label_id: [pattern, ...]})`` for the worker."""
     specs, patterns = {}, {}
