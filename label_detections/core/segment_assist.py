@@ -19,6 +19,12 @@ from __future__ import annotations
 
 import numpy as np
 
+# Canonical corner ordering. It lives in core.geometry because rectify_quad
+# needs the same rule, and two copies of a convention is how they drift apart.
+from .geometry import order_quad
+
+__all__ = ["order_quad"]
+
 # The frame is downscaled before the model sees it. A full frame is ~20 MP and
 # the model's cost scales with pixels, while a label's outline does not need
 # 20 MP to be found -- the corners come back within a pixel or two of where a
@@ -100,27 +106,6 @@ def clamp_quad(quad: list[list[float]], width: int, height: int) -> list[list[fl
         return []
     return [[max(0.0, min(float(width), float(x))),
              max(0.0, min(float(height), float(y)))] for x, y in quad]
-
-
-def order_quad(quad: list[list[float]]) -> list[list[float]]:
-    """Corners clockwise from the top-left, which is what a Box stores.
-
-    ``minAreaRect`` starts wherever it likes. Left alone, the same label
-    outlined twice can come back with its corners in different slots -- and the
-    corner handles are numbered, so a region drawn against corner 1 would move.
-    """
-    if len(quad) != 4:
-        return list(quad)
-    points = [(float(x), float(y)) for x, y in quad]
-    cx = sum(p[0] for p in points) / 4.0
-    cy = sum(p[1] for p in points) / 4.0
-    import math
-    # Sorted by angle from the centre, starting from the up-left diagonal so
-    # the first corner is the top-left one for any rotation.
-    ordered = sorted(points, key=lambda p: math.atan2(p[1] - cy, p[0] - cx))
-    start = min(range(4), key=lambda i: ordered[i][0] + ordered[i][1])
-    ordered = ordered[start:] + ordered[:start]
-    return [[x, y] for x, y in ordered]
 
 
 def quad_area(quad: list[list[float]]) -> float:

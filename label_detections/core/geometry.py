@@ -66,6 +66,41 @@ def rect_corners(x: float, y: float, w: float, h: float) -> Quad:
     return [[x, y], [x + w, y], [x + w, y + h], [x, y + h]]
 
 
+def order_quad(quad: Quad) -> Quad:
+    """Corners clockwise from the top-left, whatever order they arrive in.
+
+    A quad is four points, and which slot each corner sits in is a convention
+    -- one that nothing outside this codebase shares. An operator-drawn box
+    stores them clockwise from the top-left; ``minAreaRect`` starts wherever it
+    likes; and a detector's oriented box comes out of whatever the predicted
+    angle implied, which for some angles winds the other way round entirely.
+
+    That last one is not cosmetic. ``rectify_quad`` maps slot 0 to the output's
+    top-left, slot 1 to its top-right, and so on -- so a quad wound
+    anticlockwise produces a MIRRORED flatten. Mirrored artwork is obvious once
+    seen; a mirrored crop fed to a classifier that trained on unmirrored ones
+    is not obvious at all, and a mirrored 1D barcode simply does not decode.
+
+    Sorting by angle about the centre fixes the winding, and rotating so the
+    top-left corner leads fixes the starting slot. Already-canonical quads come
+    back unchanged, so this is safe to apply everywhere.
+
+    It normalises to the image's top-left, not to the label's reading
+    direction: a label physically upside down still flattens upside down.
+    Nothing in the geometry can know which way up the printing is.
+    """
+    if len(quad) != 4:
+        return list(quad)
+    points = [(float(x), float(y)) for x, y in quad]
+    cx = sum(p[0] for p in points) / 4.0
+    cy = sum(p[1] for p in points) / 4.0
+    # Ascending atan2 with y pointing down the image is clockwise on screen.
+    ordered = sorted(points, key=lambda p: math.atan2(p[1] - cy, p[0] - cx))
+    start = min(range(4), key=lambda i: ordered[i][0] + ordered[i][1])
+    ordered = ordered[start:] + ordered[:start]
+    return [[x, y] for x, y in ordered]
+
+
 def quad_centroid(quad: Quad) -> tuple[float, float]:
     n = len(quad) or 1
     return (sum(p[0] for p in quad) / n, sum(p[1] for p in quad) / n)

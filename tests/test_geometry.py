@@ -165,3 +165,92 @@ def test_the_capped_crop_still_reads_the_same():
     capped = letterbox(rectify_quad(frame, quad, max_side=448), 224)
     diff = np.abs(native.astype(np.int16) - capped.astype(np.int16))
     assert diff.mean() < 4.0, "the cheaper warp changed the crop materially"
+
+
+# --- corner order, and the mirror it caused ---------------------------------
+#
+# rectify_quad maps slot 0 to the output's top-left and slot 1 to its
+# top-right. A quad wound anticlockwise therefore flattens to a mirror image --
+# and a detector's oriented box winds whichever way the predicted angle
+# implies. It showed up as a barcode that would not decode; the same crop was
+# feeding the classifier, which had trained on unmirrored ones.
+
+CANONICAL = [[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]]
+
+
+def test_an_already_canonical_quad_is_left_alone():
+    """Drawn boxes are stored in this order, so ordering them must be a no-op
+    or every existing reference artwork changes."""
+    assert geo.order_quad(CANONICAL) == CANONICAL
+
+
+def test_an_anticlockwise_quad_is_rewound():
+    """The mirror. Same four corners, opposite winding."""
+    assert geo.order_quad([[0, 0], [0, 10], [10, 10], [10, 0]]) == CANONICAL
+
+
+def test_a_quad_starting_at_any_corner_is_rotated_to_the_top_left():
+    for start in range(4):
+        rolled = CANONICAL[start:] + CANONICAL[:start]
+        assert geo.order_quad(rolled) == CANONICAL
+
+
+def test_ordering_survives_a_rotated_label():
+    """A label at an angle still has a corner nearest the image's top-left, and
+    the winding still has to come out clockwise."""
+    tilted = [[50, 10], [90, 50], [50, 90], [10, 50]]      # diamond, clockwise
+    ordered = geo.order_quad(tilted)
+    assert ordered[0] == [50.0, 10.0]
+    # Shoelace with y down: clockwise on screen is a negative signed area.
+    signed = sum(ordered[i][0] * ordered[(i + 1) % 4][1]
+                 - ordered[(i + 1) % 4][0] * ordered[i][1] for i in range(4))
+    assert signed > 0, "came back wound the wrong way"
+
+
+def test_a_degenerate_quad_is_handed_back_rather_than_reordered():
+    assert geo.order_quad([[0, 0], [1, 1]]) == [[0, 0], [1, 1]]
+
+
+def test_the_flatten_is_identical_however_the_corners_arrive():
+    """The point of all of it, on real pixels rather than coordinates."""
+    import numpy as np
+    import pytest
+
+    pytest.importorskip("cv2")
+    import cv2
+
+    from label_detections.core.imageio import rectify_quad
+
+    frame = np.full((300, 600, 3), 255, np.uint8)
+    cv2.putText(frame, "ODYSSEY", (60, 180), cv2.FONT_HERSHEY_DUPLEX, 2.2,
+                (0, 0, 0), 4)
+    upright = [[40, 100], [560, 100], [560, 220], [40, 220]]
+    good = rectify_quad(frame, upright)
+
+    for name, quad in (
+        ("anticlockwise", [[40, 100], [40, 220], [560, 220], [560, 100]]),
+        ("started bottom-right", [[560, 220], [40, 220], [40, 100], [560, 100]]),
+    ):
+        assert np.array_equal(rectify_quad(frame, quad), good), name
+
+
+def test_without_ordering_the_flatten_really_does_come_out_mirrored():
+    """Proves the bug is real rather than the fix being decorative -- and that
+    the landscape label turns portrait, which is how it was first spotted."""
+    import numpy as np
+    import pytest
+
+    pytest.importorskip("cv2")
+
+    from label_detections.core.imageio import rectify_quad
+
+    frame = np.full((300, 600, 3), 255, np.uint8)
+    frame[100:220, 40:300] = 0                      # asymmetric, so a mirror shows
+    upright = [[40, 100], [560, 100], [560, 220], [40, 220]]
+    anticlockwise = [[40, 100], [40, 220], [560, 220], [560, 100]]
+
+    good = rectify_quad(frame, upright)
+    raw = rectify_quad(frame, anticlockwise, orient=False)
+    assert not np.array_equal(raw, good)
+    assert (raw.shape[1], raw.shape[0]) == (good.shape[0], good.shape[1]), (
+        "the wide label should have flattened portrait without ordering")

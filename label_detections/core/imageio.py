@@ -19,6 +19,8 @@ from typing import Any
 import cv2
 import numpy as np
 
+from .geometry import order_quad
+
 from .storage import (
     IMAGE_SUFFIXES, dataset_folder, image_label_json_path, safe_token,
     save_annotations,
@@ -28,7 +30,8 @@ IMPORT_IMAGE_EXTS = IMAGE_SUFFIXES + (".webp",)
 
 
 def rectify_quad(image_bgr: np.ndarray, quad: list[list[float]],
-                 out_width: int = 0, max_side: int = 0) -> np.ndarray | None:
+                 out_width: int = 0, max_side: int = 0,
+                 orient: bool = True) -> np.ndarray | None:
     """Flatten a drawn label out of a captured frame.
 
     The operator has already drawn the label's four corners on a real capture.
@@ -45,10 +48,20 @@ def rectify_quad(image_bgr: np.ndarray, quad: list[list[float]],
     shrinking it to a 224 px crop pays for 2000 px of warp to keep 224 -- about
     25x the work, measured on a 5496x3672 frame. It only ever shrinks: a label
     smaller than the cap is left alone rather than blown up.
+
+    The corners are put in a known order first. This function maps slot 0 to
+    the output's top-left and slot 1 to its top-right, so a quad that happens
+    to wind anticlockwise flattens to a MIRROR IMAGE -- and a detector's
+    oriented box winds whichever way the predicted angle implies. Drawn boxes
+    are already in this order, so ordering them changes nothing; detector boxes
+    are the ones that were coming out mirrored, or with the short edge across
+    the top. Pass ``orient=False`` only when the caller's slot order is itself
+    the thing being tested.
     """
     if image_bgr is None or len(quad) < 4:
         return None
-    points = [[float(x), float(y)] for x, y in quad[:4]]
+    points = [[float(x), float(y)] for x, y in
+              (order_quad(quad[:4]) if orient else quad[:4])]
 
     def edge(a, b):
         return float(np.hypot(points[b][0] - points[a][0], points[b][1] - points[a][1]))
