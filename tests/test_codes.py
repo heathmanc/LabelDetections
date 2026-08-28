@@ -401,9 +401,18 @@ def test_the_check_turns_itself_off_when_no_label_can_be_verified(monkeypatch):
     assert "no label has both" in worker._code_note
 
 
-def test_a_missing_decoder_is_reported_before_anything_else():
+def test_a_missing_decoder_is_reported_before_anything_else(monkeypatch):
     """It is the more fundamental problem, and a note about patterns would
-    send somebody to edit the library when the fix is a pip install."""
+    send somebody to edit the library when the fix is a pip install.
+
+    Forced rather than inferred from the environment: zxing-cpp is a real
+    dependency and this has to keep testing the missing case on a machine that
+    has it installed.
+    """
+    from label_detections.core import code_reader
+
+    monkeypatch.setattr(code_reader, "available",
+                        lambda: (False, "zxing-cpp is not installed. pip install zxing-cpp"))
     worker = _worker()
     worker._load_codes()
     assert worker._codes_on is False

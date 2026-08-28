@@ -64,19 +64,10 @@ def available() -> tuple[bool, str]:
     return module is not None, reason
 
 
-def decode(image) -> list[logic.Read]:
-    """Every symbol in one image.
-
-    Returns an empty list for anything that goes wrong, deliberately. A frame
-    where the decoder threw and a frame with no code in it are the same fact as
-    far as the verdict is concerned -- nothing was read -- and the policy above
-    already treats that as a failure to verify rather than as a pass.
-    """
-    module, _reason = backend()
-    if module is None or image is None or getattr(image, "size", 0) == 0:
-        return []
+def _read_once(module, image, **options) -> list[logic.Read]:
+    """One pass of the decoder, with everything that can go wrong swallowed."""
     try:
-        results = module.read_barcodes(image)
+        results = module.read_barcodes(image, **options)
     except Exception:
         return []
     out = []
@@ -87,9 +78,62 @@ def decode(image) -> list[logic.Read]:
         # zxing reports validity per symbol; a checksum failure is not a read.
         if getattr(result, "valid", True) is False:
             continue
-        symbology = getattr(result, "format", "")
-        out.append(logic.Read(text=text, symbology=str(symbology)))
+        out.append(logic.Read(text=text,
+                              symbology=str(getattr(result, "format", ""))))
     return out
+
+
+def decode(image, detail: bool = False):
+    """Every symbol in one image, trying harder as each attempt comes back empty.
+
+    A ladder rather than one call, because a tight crop of a printed code and a
+    whole label are different pictures and the decoder's defaults suit the
+    second.
+
+    Measured on rectified barcodes at 2-4 px per module with the blur a
+    perspective warp leaves behind:
+
+      * the default local-average binarizer fails on every blurred case. It is
+        built for finding a code somewhere in a large scene with uneven light,
+        and on a crop that is almost entirely one code it adapts to the bars
+        themselves.
+      * a fixed threshold reads every one of those cases. A cropped code is a
+        small evenly-lit patch, which is exactly the picture a global threshold
+        wants.
+      * upscaling recovers blurred codes that both binarizers miss at 3-4 px
+        per module -- it invents no detail, but it gives the scanline more
+        samples per bar to work with.
+
+    Cost is only paid on failure: a code that reads on the first attempt costs
+    one call. ``detail`` returns ``(reads, how)`` so a diagnostic can say which
+    rung it took, since needing the last one is worth knowing before the print
+    or the optics drift any further.
+    """
+    module, _reason = backend()
+    if module is None or image is None or getattr(image, "size", 0) == 0:
+        return ([], "") if detail else []
+
+    attempts = [("as taken", image, {})]
+    try:
+        fixed = {"binarizer": module.Binarizer.FixedThreshold}
+        attempts.append(("fixed threshold", image, fixed))
+    except Exception:
+        fixed = {}
+    try:
+        import cv2
+
+        big = cv2.resize(image, None, fx=2.0, fy=2.0,
+                         interpolation=cv2.INTER_CUBIC)
+        attempts.append(("2x upscale", big, fixed))
+        attempts.append(("2x upscale, default binarizer", big, {}))
+    except Exception:
+        pass
+
+    for how, candidate, options in attempts:
+        reads = _read_once(module, candidate, **options)
+        if reads:
+            return (reads, how) if detail else reads
+    return ([], "") if detail else []
 
 
 class Spec:
@@ -224,7 +268,7 @@ def diagnose(frame, quad, specs) -> dict:
 
     for spec in logic.demanded(specs):
         region = list(getattr(spec, "region", None) or [])
-        entry = {"spec": spec, "crop": None, "reads": [], "note": ""}
+        entry = {"spec": spec, "crop": None, "reads": [], "note": "", "how": ""}
         if len(region) < 4:
             entry["note"] = "no region drawn, so the whole label is searched"
             out["regions"].append(entry)
@@ -236,11 +280,12 @@ def diagnose(frame, quad, specs) -> dict:
             continue
         crop = rectify_quad(frame, placed)
         entry["crop"] = crop
-        entry["reads"] = decode(crop)
+        entry["reads"], entry["how"] = decode(crop, detail=True)
         out["regions"].append(entry)
 
     whole = rectify_quad(frame, quad, max_side=FALLBACK_MAX_SIDE)
-    out["whole"] = {"crop": whole, "reads": decode(whole)}
+    whole_reads, whole_how = decode(whole, detail=True)
+    out["whole"] = {"crop": whole, "reads": whole_reads, "how": whole_how}
     return out
 
 
@@ -262,7 +307,9 @@ def diagnosis_text(report: dict) -> str:
         role = getattr(entry["spec"], "role", "?")
         if entry["reads"]:
             found = ", ".join(f"{r.text} [{r.symbology}]" for r in entry["reads"])
-            lines.append(f"Region '{role}' ({size}): {found}")
+            how = entry.get("how") or ""
+            lines.append(f"Region '{role}' ({size}): {found}"
+                         + (f"  [{how}]" if how and how != "as taken" else ""))
         else:
             lines.append(f"Region '{role}' ({size}): nothing decoded"
                          + (f" -- {entry['note']}" if entry["note"] else ""))
@@ -281,6 +328,19 @@ def diagnosis_text(report: dict) -> str:
         lines.append("READS. Whatever comes back here is what the pattern is "
                      "matched against -- compare it character for character "
                      "with what you typed.")
+        first = next((r for e in regions for r in e["reads"]), None)
+        if first is not None and len(first.candidates()) > 1:
+            lines.append(
+                f"A UPC-A and an EAN-13 share an encoding, and decoders "
+                f"commonly return the 13-digit form. A pattern written for "
+                f"either spelling matches: {' or '.join(first.candidates())}.")
+        rung = next((e.get("how") for e in regions if e["reads"] and e.get("how")), "")
+        if rung and rung != "as taken":
+            lines.append(
+                f"It only read on the '{rung}' attempt, which means this crop is "
+                f"marginal -- readable today, and the first thing to fail when "
+                f"the print, the focus or the lighting drifts. More pixels "
+                f"across the bars is the durable fix.")
     elif got_whole:
         lines.append(
             "THE REGION IS LANDING IN THE WRONG PLACE. The code is legible in "
