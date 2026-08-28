@@ -7,6 +7,7 @@ whether Ultralytics works.
 """
 from __future__ import annotations
 
+import contextlib
 import os
 import sys
 import tempfile
@@ -1486,3 +1487,75 @@ def test_the_plate_carries_the_id_and_the_confidence_and_nothing_else():
     identified = ld.apply_identities(items, [("ODX-Long", 0.87)])
     assert identified[0]["label"] == "ODX-Long 0.87"
     assert identified[0]["track_id"] == 5
+
+
+# --- the readout is readable while it updates -------------------------------
+
+@contextlib.contextmanager
+def _laid_out_readout(win):
+    """Swap in a readout Qt will actually lay out, and hand back its scrollbar.
+
+    The real one lives inside a tab of a window that is never shown offscreen,
+    and Qt gives an unshown widget no scroll range at all -- so the thing under
+    test cannot be exercised in place.
+    """
+    from PySide6.QtWidgets import QTextEdit
+
+    original = win.live_readout
+    stand_in = QTextEdit()
+    stand_in.setReadOnly(True)
+    stand_in.setFixedSize(300, 60)
+    stand_in.show()
+    QApplication.processEvents()
+    win.live_readout = stand_in
+    try:
+        yield stand_in.verticalScrollBar()
+    finally:
+        win.live_readout = original
+        stand_in.deleteLater()
+
+@ui
+def test_scrolling_the_readout_survives_the_next_update():
+    """It was rewritten three times per result, each rebuilding the document
+    and resetting the scroll position -- thirty times a second, so the
+    scrollbar could be dragged but never stayed anywhere."""
+    win = _window()
+    with _laid_out_readout(win) as bar:
+        win._set_live_readout("\n".join(f"line {i}" for i in range(80)))
+        QApplication.processEvents()
+        assert bar.maximum() > 0, "the readout must be scrollable to test this"
+
+        bar.setValue(20)
+        win._set_live_readout("\n".join(f"line {i} updated" for i in range(80)))
+        assert bar.value() == 20, "the update yanked the view back"
+
+
+@ui
+def test_a_readout_at_the_bottom_keeps_following():
+    """Someone parked at the bottom is watching the newest line, not a fixed
+    offset."""
+    win = _window()
+    with _laid_out_readout(win) as bar:
+        win._set_live_readout("\n".join(f"line {i}" for i in range(80)))
+        QApplication.processEvents()
+        bar.setValue(bar.maximum())
+        win._set_live_readout("\n".join(f"line {i}" for i in range(120)))
+        assert bar.value() == bar.maximum()
+
+
+@ui
+def test_identical_text_is_not_rewritten():
+    """Rebuilding a document to produce the same characters costs the GUI
+    thread real time ten times a second."""
+    win = _window()
+    win._set_live_readout("steady")
+    calls = []
+    original = win.live_readout.setPlainText
+    win.live_readout.setPlainText = lambda t: (calls.append(t), original(t))[1]
+    try:
+        win._set_live_readout("steady")
+        assert calls == []
+        win._set_live_readout("changed")
+        assert calls == ["changed"]
+    finally:
+        win.live_readout.setPlainText = original

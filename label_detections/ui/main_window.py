@@ -2537,6 +2537,23 @@ class MainWindow(QMainWindow):
         self._live_busy = False
         self.live_status_label.setText(f"Inference problem: {message}")
 
+    def _set_live_readout(self, text: str) -> None:
+        """Write the readout without stealing the scrollbar.
+
+        Two rules. Unchanged text is not written at all, because rebuilding a
+        document to produce the same characters costs the GUI thread real time
+        ten times a second. And when it does change, the scroll position is put
+        back where the operator had it -- unless they were already at the
+        bottom, where following the newest line is what they wanted.
+        """
+        if text == self.live_readout.toPlainText():
+            return
+        bar = self.live_readout.verticalScrollBar()
+        at_bottom = bar.value() >= bar.maximum() - 2
+        keep = bar.value()
+        self.live_readout.setPlainText(text)
+        bar.setValue(bar.maximum() if at_bottom else min(keep, bar.maximum()))
+
     def _pump_live_detect(self, frame) -> None:
         """Hand the model a frame, if it is idle and enough time has passed.
 
@@ -2616,33 +2633,32 @@ class MainWindow(QMainWindow):
         if getattr(self, "_live_tracking", False):
             self._live_tracks.update(
                 [(i.get("track_id"), i.get("name"), i.get("conf", 0.0)) for i in items])
-            self.live_readout.setPlainText(
-                live_logic.track_summary(self._live_tracks, self.label_id,
-                                         self._live_rolling))
+            summary = live_logic.track_summary(self._live_tracks, self.label_id,
+                                               self._live_rolling)
         else:
-            self.live_readout.setPlainText(live_logic.frame_summary(
-                counts, self.label_id, self._live_rolling))
-        interval = self._infer_interval()
+            summary = live_logic.frame_summary(counts, self.label_id,
+                                               self._live_rolling)
+        camera_fps = self.camera.read_fps() if hasattr(self.camera, "read_fps") else 0.0
         rates = live_logic.rate_line(
-            getattr(self, "_preview_fps", 0.0),
-            self.camera.read_fps() if hasattr(self.camera, "read_fps") else 0.0,
+            getattr(self, "_preview_fps", 0.0), camera_fps,
             self._live_rolling, getattr(self, "_gui_ms", 0.0))
         rates += live_logic.throughput_note(
-            self._live_rolling, interval,
-            self.camera.read_fps() if hasattr(self.camera, "read_fps") else 0.0)
+            self._live_rolling, self._infer_interval(), camera_fps)
         rates += live_logic.phase_line(self._live_speed,
                                        self._live_rolling.mean_ms)
-        self.live_readout.setPlainText(
-            rates + "\n" + self.live_readout.toPlainText()
+        # Assembled once and written once. It used to be three setPlainText
+        # calls per result, each reading the widget back and rebuilding the
+        # document -- thirty rebuilds a second, every one of them resetting the
+        # scroll position, which is why the scrollbar could not be used.
+        self._set_live_readout(
+            rates + "\n" + summary
             + live_logic.slow_hint(self._live_rolling,
                                    getattr(self, "_live_device_line", ""),
-                                   self._live_speed))
-        hint = live_logic.quiet_hint(
-            self._live_empty, float(self.test_conf_spin.value()),
-            int(self.test_imgsz_spin.value()),
-            bool(self.live_classifier_edit.text().strip()))
-        if hint:
-            self.live_readout.setPlainText(self.live_readout.toPlainText() + hint)
+                                   self._live_speed)
+            + live_logic.quiet_hint(
+                self._live_empty, float(self.test_conf_spin.value()),
+                int(self.test_imgsz_spin.value()),
+                bool(self.live_classifier_edit.text().strip())))
 
         if not self.live_auto_check.isChecked():
             return
