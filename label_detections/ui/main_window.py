@@ -3684,7 +3684,7 @@ class MainWindow(QMainWindow):
                 ann_logic.apply_reference_regions(
                     box, label, flipped=self._label_is_flipped(box, label))
         return boxes
-    def _label_is_flipped(self, box: dict, label) -> bool:
+    def _label_is_flipped(self, box: dict, label, frame=None) -> bool:
         """Is this label presented upside down in this frame?
 
         Only asked where the library says it can be. A label with a fixed
@@ -3704,7 +3704,8 @@ class MainWindow(QMainWindow):
 
         if str(getattr(label, "rotation_policy", "") or "") not in code_reader.FLIPPABLE:
             return False
-        frame = self.last_raw
+        if frame is None:
+            frame = self.last_raw
         quad = ann_logic.box_polygon(box)
         if frame is None or len(quad) < 4:
             return False
@@ -3715,16 +3716,21 @@ class MainWindow(QMainWindow):
                             for spec in code_logic.demanded(specs)) if p]
         fields = text_reader.fields_from(label)
         expected = text_logic.expected_for([label])
+        aspect = reference_logic.aspect_of(label)
         for flipped in (False, True):
-            settled = geo.oriented(quad, flipped)
+            # The low-level readers, not read_label: read_label settles the
+            # quad itself, which normalises the choice being tested straight
+            # back out and reads the same way up twice.
+            settled = geo.oriented(quad, flipped, aspect)
             if wanted:
-                reads = code_reader.read_label(frame, settled, specs)
+                reads = code_reader.read_oriented(
+                    frame, settled, code_logic.demanded(specs))
                 if any(code_logic.matches(pattern, text)
                        for read in reads for text in read.candidates()
                        for pattern in wanted):
                     return flipped
             if expected and text_logic.demanded(fields):
-                reads = text_reader.read_label(frame, settled, fields)
+                reads = text_reader.read_oriented(frame, settled, fields)
                 joined = " ".join(read.text for read in reads)
                 _who, score, _runner = text_logic.best_match(joined, expected)
                 if score >= text_logic.MIN_SIMILARITY:
@@ -5665,6 +5671,113 @@ class MainWindow(QMainWindow):
             return ""
         return str(raw) if raw else ""
 
+    def _reference_annotation(self, label, result: dict, source: str) -> bool:
+        """Label the photograph the artwork was flattened out of.
+
+        The reference capture had no sidecar, which is absurd on its face: it
+        is the one image in the dataset whose label position is known exactly,
+        because the operator drew it. It showed up in the list as unlabelled
+        next to images the model had guessed at.
+
+        So the outline just drawn is written as this image's box, with the
+        label's regions placed on it. Not marked reviewed -- approval says
+        every label in the frame is boxed, and this only knows about one.
+
+        An image already carrying a box for this label keeps it, and only has
+        its regions refreshed: the operator may have drawn a better outline
+        there than the one this window took.
+        """
+        if not source:
+            return False
+        path = Path(source)
+        quad = [[float(x), float(y)] for x, y in (result.get("quad") or [])[:4]]
+        if len(quad) < 4:
+            return False
+
+        data = persistence.load_annotation(self.label_id, path)
+        if data is None:
+            frame = result.get("frame")
+            shape = getattr(frame, "shape", None) or (0, 0)
+            data = ann_logic.new_annotation(
+                path.name, self.label_id,
+                int(shape[1]) if len(shape) > 1 else 0,
+                int(shape[0]) if len(shape) > 0 else 0,
+                source="reference")
+        if not ann_logic.boxes_for(data, self.label_id):
+            data.setdefault("boxes", []).append(ann_logic.make_box(
+                "spec_plate", quad, label_id=self.label_id,
+                source="reference"))
+        ann_logic.refresh_reference_regions(data, label)
+        persistence.save_annotation(self.label_id, path, data)
+        return True
+
+    def _place_regions_from_library(self, data: dict, frame=None) -> int:
+        """Re-place every reference-placed region in one sidecar, from the library.
+
+        Where a region sits is not a decision recorded per image -- it is a
+        fraction of the label's artwork, held once in the library, and what
+        lands on an image is derived from it. Treating it as stored data is
+        what produced a dataset where some images carry the field box and
+        others do not: each box kept whatever the library happened to say on
+        the day it was labelled, and nothing ever went back.
+
+        So the library is re-read instead. Only regions placed from the
+        reference are replaced; anything else on the box is left alone.
+
+        ``frame`` may be an image or a callable returning one, and is only ever
+        asked for when a label that may arrive turned over is actually present
+        -- reading a frame to decide which way up it was is not worth doing for
+        a label whose rotation is fixed.
+        """
+        pixels = frame
+        asked = not callable(frame)
+
+        def _frame():
+            nonlocal pixels, asked
+            if not asked:
+                pixels, asked = frame(), True
+            return pixels
+
+        changed = 0
+        known: dict[str, object] = {}
+        for box in ann_logic.boxes(data):
+            label_id = str(box.get("label_id", "") or "")
+            if not label_id:
+                continue
+            if label_id not in known:
+                known[label_id] = self.library.get(label_id)
+            label = known[label_id]
+            if label is None:
+                continue
+            flippable = (str(getattr(label, "rotation_policy", "") or "")
+                         in code_reader.FLIPPABLE)
+            flipped = self._label_is_flipped(box, label, _frame()) if flippable else False
+            before = list(ann_logic.regions(box))
+            ann_logic.apply_reference_regions(
+                box, label, overwrite=True, flipped=flipped)
+            if ann_logic.regions(box) != before:
+                changed += 1
+        return changed
+
+    def _replace_dataset_regions(self, label) -> int:
+        """Bring every already-annotated image in this dataset up to date.
+
+        Run when a reference is saved, because that is the moment the library
+        changed. Images are re-read from disk only where the label may arrive
+        turned over, which is the one case where placement needs to know
+        something the sidecar does not record.
+        """
+        label_id = str(getattr(label, "label_id", "") or "")
+        touched = 0
+        for image in list_images(self.label_id):
+            data = persistence.load_annotation(self.label_id, image)
+            if not data or not ann_logic.boxes_for(data, label_id):
+                continue
+            if self._place_regions_from_library(data, lambda i=image: cv2.imread(str(i))):
+                persistence.save_annotation(self.label_id, image, data)
+                touched += 1
+        return touched
+
     def _save_reference(self, label, result: dict) -> None:
         """Write the artwork and the regions the dialog came back with.
 
@@ -5682,6 +5795,7 @@ class MainWindow(QMainWindow):
 
         path = imageio.save_reference(self.label_id, artwork)
         source = self._keep_reference_photo(result)
+        shape = getattr(artwork, "shape", None) or ()
         updated = labels_mod.LabelDef.from_dict({
             **label.to_dict(),
             "codes": result["codes"],
@@ -5697,19 +5811,46 @@ class MainWindow(QMainWindow):
             # usually the first shot taken, so a newest-first list buries it a
             # row deeper with every capture after it.
             "reference_source": source,
+            # The artwork's proportions, recorded now because this is the only
+            # moment they are known for certain. Regions are fractions of the
+            # label, which says nothing about which way round the label's own
+            # long axis runs -- so placing one onto a detected quad needs this
+            # or a label photographed standing up gets its regions a quarter
+            # turn out. See ``geometry.align_quad``.
+            "reference_aspect": (float(shape[1]) / float(shape[0])
+                                 if len(shape) > 1 and shape[0] else 0.0),
             "variable_data": bool(label.variable_data or result["anchor_region"]),
         })
         self.library.add(updated, replace=True)
         persistence.save_library(self.library)
         self.library = persistence.load_library()
+        saved = self.library.get(self.label_id) or updated
+
+        # The photograph the outline was drawn on is the one image whose label
+        # position is known rather than guessed, and it had no sidecar at all.
+        labelled = self._reference_annotation(saved, result, source)
+        # And every image already annotated is re-placed from the new regions,
+        # so the dataset says what the library says rather than whatever the
+        # library happened to hold when each image was labelled. A dataset of a
+        # few hundred is a visible pause, and one of a label that may arrive
+        # turned over reads every frame to decide which way up it was.
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        QApplication.processEvents()
+        try:
+            touched = self._replace_dataset_regions(saved)
+        finally:
+            QApplication.restoreOverrideCursor()
 
         count = len(result["codes"]) + len(result["text_fields"])
         self._refresh_labels()
         self._refresh_active_label_panel()
         self._refresh_images()
-        self.status.showMessage(
-            f"{self.label_id}: reference image saved with {count} region(s)",
-            8000)
+        note = f"{self.label_id}: reference image saved with {count} region(s)"
+        if labelled:
+            note += "; the capture it came from is labelled"
+        if touched:
+            note += f"; regions re-placed on {touched} image(s)"
+        self.status.showMessage(note, 8000)
 
 
     def _box_is_active_label(self, box) -> bool:
@@ -6665,6 +6806,12 @@ class MainWindow(QMainWindow):
         self.canvas.image_path = path
         data = load_annotations(path)
         if data:
+            # Regions are derived from the library, not stored decisions, so
+            # they are re-placed on the way in rather than shown as they were
+            # left. An image labelled before a field was added showed no field;
+            # one placed under an older rule showed it in the old spot; and
+            # neither had any visible cause from the image or the library.
+            self._place_regions_from_library(data, lambda: self.last_raw)
             self.canvas.set_boxes_from_dicts(data.get("boxes", []))
         else:
             self.canvas.clear_boxes()

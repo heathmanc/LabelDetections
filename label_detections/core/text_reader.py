@@ -16,6 +16,7 @@ question was answered once, on the artwork, by an operator drawing a box.
 from __future__ import annotations
 
 from . import text_read as logic
+from . import reference as reference_logic
 from .geometry import oriented, place_unit_rect
 from .imageio import rectify_quad
 
@@ -102,19 +103,43 @@ def _expand(rect: list[float], margin: float) -> list[float]:
     return [x, y, min(w, 1.0 - x), min(h, 1.0 - y)]
 
 
-def crop_field(frame, quad, spec, flipped: bool = False):
-    """The pixels of one text field, out of the full-resolution frame."""
+def crop_oriented(frame, settled, spec):
+    """One field's pixels from a quad already in the label's reading order.
+
+    Takes the corners exactly as given. A caller working out which way up a
+    label is needs to ask for one specific reading, and going back through the
+    settling would normalise its choice away.
+    """
     region = list(getattr(spec, "region", None) or [])
-    if frame is None or quad is None or len(quad) < 4 or len(region) < 4:
+    if frame is None or settled is None or len(settled) < 4 or len(region) < 4:
         return None
-    placed = place_unit_rect(oriented(quad, flipped),
-                             _expand(region, REGION_MARGIN), orient=False)
+    placed = place_unit_rect(settled, _expand(region, REGION_MARGIN), orient=False)
     if not placed:
         return None
     return rectify_quad(frame, placed)
 
 
-def read_label(frame, quad, fields, rotation_policy: str = "") -> list[logic.Read]:
+def crop_field(frame, quad, spec, flipped: bool = False, aspect: float = 0.0):
+    """The pixels of one text field, out of the full-resolution frame."""
+    if quad is None or len(quad) < 4:
+        return None
+    return crop_oriented(frame, oriented(quad, flipped, aspect), spec)
+
+
+def read_oriented(frame, settled, fields) -> list[logic.Read]:
+    """Read every demanded field off a quad already in reading order."""
+    if frame is None or settled is None or len(settled) < 4:
+        return []
+    out: list[logic.Read] = []
+    for spec in logic.demanded(fields):
+        crop = crop_oriented(frame, settled, spec)
+        if crop is not None:
+            out.extend(recognise(crop))
+    return out
+
+
+def read_label(frame, quad, fields, rotation_policy: str = "",
+               aspect: float = 0.0) -> list[logic.Read]:
     """Read every text field this label demands, out of one frame.
 
     Both ways up where the library says the label may arrive turned over. Four
@@ -129,21 +154,19 @@ def read_label(frame, quad, fields, rotation_policy: str = "") -> list[logic.Rea
     from .code_reader import orientations
 
     engine, _reason = backend()
-    if engine is None:
+    if engine is None or quad is None or len(quad) < 4:
         return []
     out: list[logic.Read] = []
-    for spec in logic.demanded(fields):
-        for flipped in orientations(rotation_policy):
-            crop = crop_field(frame, quad, spec, flipped)
-            if crop is not None:
-                out.extend(recognise(crop))
+    for flipped in orientations(rotation_policy):
+        out.extend(read_oriented(frame, oriented(quad, flipped, aspect), fields))
     return out
 
 
 class Field:
     """A frozen copy of one TextField, safe to hand to the worker thread."""
 
-    __slots__ = ("name", "policy", "pattern", "region", "rotation_policy")
+    __slots__ = ("name", "policy", "pattern", "region", "rotation_policy",
+                 "aspect")
 
     def __init__(self, name="", policy="", pattern="", region=()):
         self.name = name
@@ -151,16 +174,26 @@ class Field:
         self.pattern = pattern
         self.region = list(region)
         self.rotation_policy = ""
+        self.aspect = 0.0
 
 
 def fields_from(label) -> list[Field]:
-    return [
+    """One label's text fields, frozen, carrying the label's own two facts:
+    which rotations it may arrive in, and the shape of the artwork its regions
+    are fractions of. See ``code_reader.specs_from``."""
+    policy = str(getattr(label, "rotation_policy", "") or "")
+    shape = reference_logic.aspect_of(label)
+    out = [
         Field(name=str(getattr(f, "name", "") or ""),
               policy=str(getattr(f, "policy", "") or ""),
               pattern=str(getattr(f, "pattern", "") or ""),
               region=[float(v) for v in (getattr(f, "region", None) or [])])
         for f in (getattr(label, "text_fields", None) or [])
     ]
+    for field in out:
+        field.rotation_policy = policy
+        field.aspect = shape
+    return out
 
 
 def library_snapshot(library) -> tuple[dict, dict]:
@@ -169,9 +202,6 @@ def library_snapshot(library) -> tuple[dict, dict]:
     for label in (library.all() if library is not None else []):
         label_id = str(getattr(label, "label_id", ""))
         frozen = fields_from(label)
-        policy = str(getattr(label, "rotation_policy", "") or "")
-        for spec in frozen:
-            spec.rotation_policy = policy
         if frozen:
             fields[label_id] = frozen
         wanted = [f.pattern.lstrip("^").rstrip("$")
@@ -188,9 +218,13 @@ def diagnose(frame, quad, fields) -> dict:
     if not ok or frame is None or quad is None or len(quad) < 4:
         return out
 
+    # Settled exactly as the runtime settles it, or the diagnosis is of a
+    # different placement from the one that failed.
+    settled = oriented(quad, False, next(
+        (float(getattr(f, "aspect", 0.0) or 0.0) for f in fields), 0.0))
     for spec in logic.demanded(fields):
         entry = {"spec": spec, "crop": None, "reads": [], "note": ""}
-        crop = crop_field(frame, quad, spec)
+        crop = crop_oriented(frame, settled, spec)
         if crop is None:
             entry["note"] = "no region drawn for this field"
         else:

@@ -20,6 +20,7 @@ whole label, which works and costs more.
 from __future__ import annotations
 
 from . import codes as logic
+from . import reference as reference_logic
 from .geometry import oriented, place_unit_rect
 from .imageio import rectify_quad
 
@@ -203,7 +204,7 @@ class Spec:
     """
 
     __slots__ = ("role", "symbology", "policy", "pattern", "region",
-                 "quiet_zone_mm", "code_width_mm", "rotation_policy")
+                 "quiet_zone_mm", "code_width_mm", "rotation_policy", "aspect")
 
     def __init__(self, role="", symbology="", policy="", pattern="", region=(),
                  quiet_zone_mm=0.0, code_width_mm=0.0):
@@ -215,11 +216,22 @@ class Spec:
         self.quiet_zone_mm = float(quiet_zone_mm or 0.0)
         self.code_width_mm = float(code_width_mm or 0.0)
         self.rotation_policy = ""
+        self.aspect = 0.0
 
 
 def specs_from(label) -> list[Spec]:
-    """One label's code specs, frozen."""
-    return [
+    """One label's code specs, frozen.
+
+    Two facts about the label itself ride along on every spec: which rotations
+    it may arrive in, and the shape of the artwork its regions are fractions
+    of. Both belong to the label rather than to any one code, and both are
+    needed wherever a region is placed -- so they are stamped on here, where
+    the label is still in hand, rather than at each of the call sites that only
+    ever sees the specs.
+    """
+    policy = str(getattr(label, "rotation_policy", "") or "")
+    shape = reference_logic.aspect_of(label)
+    out = [
         Spec(role=str(getattr(spec, "role", "") or ""),
              symbology=str(getattr(spec, "symbology", "") or ""),
              policy=str(getattr(spec, "policy", "") or ""),
@@ -229,6 +241,10 @@ def specs_from(label) -> list[Spec]:
              code_width_mm=getattr(spec, "code_width_mm", 0.0))
         for spec in (getattr(label, "codes", None) or [])
     ]
+    for spec in out:
+        spec.rotation_policy = policy
+        spec.aspect = shape
+    return out
 
 
 def region_margin(spec) -> float:
@@ -283,43 +299,65 @@ def orientations(rotation_policy: str) -> list[bool]:
     return [False, True] if str(rotation_policy or "") in FLIPPABLE else [False]
 
 
-def read_label(frame, quad, specs, rotation_policy: str = "") -> list[logic.Read]:
+def read_oriented(frame, settled, specs) -> list[logic.Read]:
+    """Decode the declared regions of a quad that is already in reading order.
+
+    Takes the corners exactly as given -- no ordering, no aligning, no
+    flipping. Split out from ``read_label`` because a caller that is trying to
+    work out WHICH way up a label is has to be able to ask for one specific
+    reading; going through ``read_label`` re-normalised the quad and quietly
+    read the same way up twice.
+
+    Stops as soon as something decodes: one good read answers the question, and
+    the remaining warps are work for an answer already in hand.
+    """
+    if frame is None or settled is None or len(settled) < 4:
+        return []
+    for spec in specs:
+        region = list(getattr(spec, "region", None) or [])
+        if len(region) < 4:
+            continue
+        placed = place_unit_rect(settled, _expand(region, region_margin(spec)),
+                                 orient=False)
+        if not placed:
+            continue
+        # No max_side: this is the one crop in the pipeline that must not be
+        # shrunk. Everything else here downsamples for a model; a decoder wants
+        # every printed module it can get.
+        reads = decode(rectify_quad(frame, placed))
+        if reads:
+            return reads
+    return []
+
+
+def read_label(frame, quad, specs, rotation_policy: str = "",
+               aspect: float = 0.0) -> list[logic.Read]:
     """Decode the codes of one detected label out of the full-resolution frame.
 
-    Tries each declared region first and stops as soon as something decodes --
-    one good read answers the question, and the remaining warps are work for an
-    answer already in hand. Falls back to the whole label only when no region
-    decoded, because that is the expensive path and it exists for labels whose
-    artwork was never marked up.
+    Tries each declared region first, both ways up where the library says the
+    label may arrive turned over. Falls back to the whole label only when no
+    region decoded, because that is the expensive path and it exists for labels
+    whose artwork was never marked up.
+
+    ``aspect`` is the reference artwork's width over its height, and without it
+    a label photographed standing up has its regions placed a quarter turn out.
     """
     module, _reason = backend()
     if module is None or frame is None or quad is None or len(quad) < 4:
         return []
 
     wanted = logic.demanded(specs)
-    tries = [(flipped, oriented(quad, flipped))
-             for flipped in orientations(rotation_policy)]
-    for spec in wanted:
-        region = list(getattr(spec, "region", None) or [])
-        if len(region) < 4:
-            continue
-        for _flipped, settled in tries:
-            placed = place_unit_rect(settled, _expand(region, region_margin(spec)),
-                                     orient=False)
-            if not placed:
-                continue
-            # No max_side: this is the one crop in the pipeline that must not
-            # be shrunk. Everything else here downsamples for a model; a
-            # decoder wants every printed module it can get.
-            reads = decode(rectify_quad(frame, placed))
-            if reads:
-                return reads
+    for flipped in orientations(rotation_policy):
+        reads = read_oriented(frame, oriented(quad, flipped, aspect), wanted)
+        if reads:
+            return reads
 
     if any(len(list(getattr(s, "region", None) or [])) >= 4 for s in wanted):
         # Regions were drawn and none of them decoded. Searching the whole
         # label would usually find the same nothing for five times the cost.
         return []
-    return decode(rectify_quad(frame, quad, max_side=FALLBACK_MAX_SIDE))
+    return decode(rectify_quad(frame, oriented(quad, False, aspect),
+                               max_side=FALLBACK_MAX_SIDE))
 
 
 def diagnose(frame, quad, specs) -> dict:
@@ -344,6 +382,10 @@ def diagnose(frame, quad, specs) -> dict:
     if not ok or frame is None or quad is None or len(quad) < 4:
         return out
 
+    # Settled exactly as the runtime settles it, or the diagnosis is of a
+    # different placement from the one that failed.
+    quad = oriented(quad, False, next(
+        (float(getattr(s, "aspect", 0.0) or 0.0) for s in specs), 0.0))
     for spec in logic.demanded(specs):
         region = list(getattr(spec, "region", None) or [])
         entry = {"spec": spec, "crop": None, "reads": [], "note": "",
@@ -352,7 +394,8 @@ def diagnose(frame, quad, specs) -> dict:
             entry["note"] = "no region drawn, so the whole label is searched"
             out["regions"].append(entry)
             continue
-        placed = place_unit_rect(quad, _expand(region, region_margin(spec)))
+        placed = place_unit_rect(quad, _expand(region, region_margin(spec)),
+                                 orient=False)
         if not placed:
             entry["note"] = "the region could not be placed on this box"
             out["regions"].append(entry)
@@ -539,11 +582,6 @@ def library_snapshot(library) -> tuple[dict, dict]:
     for label in (library.all() if library is not None else []):
         label_id = str(getattr(label, "label_id", ""))
         frozen = specs_from(label)
-        # Carried on the specs rather than in a parallel map: the policy
-        # belongs to the label and every spec on it is read the same way up.
-        policy = str(getattr(label, "rotation_policy", "") or "")
-        for spec in frozen:
-            spec.rotation_policy = policy
         if frozen:
             specs[label_id] = frozen
         found = [s.pattern for s in logic.demanded(frozen) if s.pattern]

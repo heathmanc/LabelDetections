@@ -155,6 +155,11 @@ class LabelDef:
     # is otherwise unanswerable once a dataset has a few hundred frames.
     reference_images: list[str] = field(default_factory=list)
     reference_source: str = ""
+    # The artwork's width over its height. Regions are fractions of the label,
+    # which is proportion without orientation -- so placing one back onto a
+    # detected quad needs to know which way round the label's own proportions
+    # run, or a label photographed standing up gets them ninety degrees out.
+    reference_aspect: float = 0.0
     codes: list[CodeSpec] = field(default_factory=list)
     text_fields: list[TextField] = field(default_factory=list)
 

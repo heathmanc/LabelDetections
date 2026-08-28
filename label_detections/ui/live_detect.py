@@ -839,7 +839,8 @@ class InferenceWorker(QObject):
             else:
                 quad = quads[index] if index < len(quads) else None
                 policy = str(getattr(fields[0], "rotation_policy", "") or "")
-                reads = text_reader.read_label(frame, quad, fields, policy)
+                shape = float(getattr(fields[0], "aspect", 0.0) or 0.0)
+                reads = text_reader.read_label(frame, quad, fields, policy, shape)
                 verdict = text_logic.verdict(proposed, fields, reads,
                                              self._text_expected)
                 if track_id is not None and verdict.state != text_logic.UNREADABLE:
@@ -888,7 +889,8 @@ class InferenceWorker(QObject):
             else:
                 quad = quads[index] if index < len(quads) else None
                 policy = str(getattr(specs[0], "rotation_policy", "") or "")
-                reads = code_reader.read_label(frame, quad, specs, policy)
+                shape = float(getattr(specs[0], "aspect", 0.0) or 0.0)
+                reads = code_reader.read_label(frame, quad, specs, policy, shape)
                 verdict = code_logic.verdict(name, specs, reads,
                                              self._code_patterns)
                 # Only a settled answer is worth keeping. An unreadable frame

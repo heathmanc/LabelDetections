@@ -204,7 +204,7 @@ def test_the_code_region_is_taken_from_the_full_resolution_frame():
 
     from label_detections.core import code_reader
 
-    source = inspect.getsource(code_reader.read_label)
+    source = inspect.getsource(code_reader.read_oriented)
     assert "rectify_quad(frame, placed)" in source, (
         "the region crop must come off the frame with no size cap")
 

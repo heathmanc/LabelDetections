@@ -121,6 +121,61 @@ def flip_quad(quad: Quad) -> Quad:
     return [list(quad[2]), list(quad[3]), list(quad[0]), list(quad[1])]
 
 
+SQUARE_TOL = 1.15
+"""How far from square a shape has to be before its proportions mean anything.
+
+Below this, "landscape or portrait?" is a question about measurement noise, and
+answering it would rotate regions by ninety degrees on the strength of a couple
+of pixels of keystone.
+"""
+
+
+def quad_aspect(quad: Quad) -> float:
+    """Mean width over mean height, with the corners in the order given."""
+    w, h = quad_size(quad)
+    return (w / h) if h > 0 else 0.0
+
+
+def align_quad(quad: Quad, aspect: float) -> Quad:
+    """Corners ordered so the quad reads with the proportions of the artwork.
+
+    ``order_quad`` normalises to the IMAGE's top-left, and that is not enough.
+    A long label lying flat has its long edge running left-to-right, so the
+    topmost-leftmost corner leads into the long side; stand the same label up
+    and the topmost-leftmost corner leads into the SHORT side instead. The
+    corner order is legal and clockwise either way -- but the unit square has
+    been laid on the label rotated ninety degrees, so every region drawn on
+    landscape artwork lands across the label's width instead of along its
+    length. A tall thin region appears wide and squats at one end. That is what
+    an auto-labelled upright battery showed.
+
+    Proportion is the thing that survives rotation, so it is what settles it:
+    the artwork is (say) three times as wide as it is tall, and the reading of
+    the corners that makes the quad three times as wide as it is tall is the
+    one that means the same thing. Rotating the corner order by one swaps which
+    pair of edges reads as the width, which is exactly the correction needed.
+
+    It cannot settle which END is the top -- both candidate rotations differ by
+    a hundred and eighty degrees, and no arrangement of four corners says which
+    way up the printing is. That is left to ``flipped``, which is decided by
+    reading the label. Square-ish shapes are left alone: there is no proportion
+    to match, so there is nothing to learn.
+    """
+    settled = order_quad(quad)
+    own = quad_aspect(settled)
+    if aspect <= 0 or own <= 0:
+        return settled
+    if (own >= 1.0) == (aspect >= 1.0):
+        return settled
+    if max(own, 1.0 / own) < SQUARE_TOL or max(aspect, 1.0 / aspect) < SQUARE_TOL:
+        return settled
+    # Both +1 and +3 swap width for height and differ by 180 degrees. Start
+    # from whichever of them sits nearer the image's top-left, so the choice is
+    # repeatable, and let ``flipped`` carry the half-turn it cannot see.
+    first = 1 if (settled[1][0] + settled[1][1]) <= (settled[3][0] + settled[3][1]) else 3
+    return [list(settled[(first + i) % 4]) for i in range(4)]
+
+
 def quad_centroid(quad: Quad) -> tuple[float, float]:
     n = len(quad) or 1
     return (sum(p[0] for p in quad) / n, sum(p[1] for p in quad) / n)
@@ -263,15 +318,19 @@ def homography_from_unit(quad: Quad, orient: bool = True) -> Matrix | None:
                                   order_quad(quad) if orient else list(quad))
 
 
-def oriented(quad: Quad, flipped: bool = False) -> Quad:
-    """A quad in canonical order, optionally read as the label turned over.
+def oriented(quad: Quad, flipped: bool = False, aspect: float = 0.0) -> Quad:
+    """A quad in the label's own reading order: ordered, aligned, maybe turned.
 
-    The one place the two operations are combined, because the order matters:
+    The one place the three operations are combined, because the order matters:
     flipping first and ordering afterwards normalises the flip straight back
     out again. Everything downstream takes the result of this and is told not
     to re-order it.
+
+    ``aspect`` is the reference artwork's width over its height. Without it
+    this can only normalise to the image, which puts every region ninety
+    degrees out on a label that was photographed standing up.
     """
-    settled = order_quad(quad)
+    settled = align_quad(quad, aspect)
     return flip_quad(settled) if flipped else settled
 
 

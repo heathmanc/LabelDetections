@@ -117,3 +117,47 @@ def test_apply_reference_regions_passes_the_orientation_through():
     box = _box()
     ann.apply_reference_regions(box, _label(), flipped=True)
     assert _span(ann.regions(box)[0]["points"]) == (7, 158)
+
+
+# --- asking for one specific reading -----------------------------------------
+
+def test_a_settled_quad_handed_back_through_the_front_door_loses_its_flip():
+    """The bug that made the whole thing inert. ``_label_is_flipped`` settled a
+    quad and passed it to ``read_label`` -- which settles again, and ordering a
+    flipped quad normalises the flip straight back out. Both passes of the loop
+    therefore read the same pixels, and the answer was always "upright"."""
+    cv2 = pytest.importorskip("cv2")
+    np = pytest.importorskip("numpy")
+
+    from label_detections.core import text_reader
+
+    frame = np.zeros((300, 1000, 3), np.uint8)
+    frame[:, 500:] = 255           # right half white, left half black
+    spec = text_reader.Field(name="part_number", policy="must_be_present",
+                             pattern="X", region=list(BARCODE))
+
+    upright = text_reader.crop_field(frame, QUAD, spec, flipped=False)
+    turned = text_reader.crop_field(frame, QUAD, spec, flipped=True)
+    assert upright.mean() > 200 and turned.mean() < 55
+
+    # Settled first, then handed through the settling path again: the flip is
+    # gone and the crop is the upright one.
+    already = geo.oriented(QUAD, True)
+    assert text_reader.crop_field(frame, already, spec).mean() > 200
+
+
+def test_the_low_level_read_takes_the_corners_exactly_as_given():
+    """Which is why it exists. A caller working out WHICH way up a label is has
+    to be able to ask for one reading and get that reading."""
+    cv2 = pytest.importorskip("cv2")
+    np = pytest.importorskip("numpy")
+
+    from label_detections.core import text_reader
+
+    frame = np.zeros((300, 1000, 3), np.uint8)
+    frame[:, 500:] = 255
+    spec = text_reader.Field(name="part_number", policy="must_be_present",
+                             pattern="X", region=list(BARCODE))
+
+    assert text_reader.crop_oriented(frame, geo.oriented(QUAD, False), spec).mean() > 200
+    assert text_reader.crop_oriented(frame, geo.oriented(QUAD, True), spec).mean() < 55

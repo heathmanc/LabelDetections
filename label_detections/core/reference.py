@@ -49,6 +49,43 @@ def has_reference(label) -> bool:
     return bool(reference_path(label))
 
 
+def image_size(path: str | Path) -> tuple[int, int]:
+    """``(width, height)`` of a PNG, read from its header. ``(0, 0)`` if not.
+
+    Eight bytes of IHDR rather than an image stack: this module is the rule
+    about references and it is imported by the pure geometry side of the
+    codebase, which runs in tests with no OpenCV and no display. Artwork is
+    always written as PNG (``imageio.save_reference``), so the header is all
+    there is to read.
+    """
+    try:
+        with open(str(path), "rb") as handle:
+            head = handle.read(24)
+    except OSError:
+        return (0, 0)
+    if len(head) < 24 or head[:8] != b"\x89PNG\r\n\x1a\n" or head[12:16] != b"IHDR":
+        return (0, 0)
+    return (int.from_bytes(head[16:20], "big"), int.from_bytes(head[20:24], "big"))
+
+
+def aspect_of(label) -> float:
+    """The artwork's width over its height, or 0.0 when there is none.
+
+    Prefers what the label recorded when the reference was captured, and falls
+    back to measuring the file. The fallback is what carries labels defined
+    before the figure was stored: their regions were placed against artwork
+    with a shape, and that shape is still on disk.
+    """
+    stored = float(getattr(label, "reference_aspect", 0.0) or 0.0)
+    if stored > 0:
+        return stored
+    path = reference_path(label)
+    if not path:
+        return 0.0
+    width, height = image_size(path)
+    return (width / height) if width > 0 and height > 0 else 0.0
+
+
 def missing(labels) -> list[str]:
     """Every label id with no artwork, in the order they were given."""
     return [str(getattr(label, "label_id", "")) for label in labels or []

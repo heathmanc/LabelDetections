@@ -22,6 +22,8 @@ unchanged against live detections.
 """
 from __future__ import annotations
 
+import json
+
 from typing import Any
 
 from . import geometry as geo
@@ -220,8 +222,15 @@ def place_label_regions(box: dict, label_def, flipped: bool = False) -> list[dic
     It needs no measurement and no calibration -- the mapping is proportional,
     so it holds at any distance and any angle. A label with no regions drawn on
     its artwork simply gets none placed.
+
+    Proportional is not the same as orientation-free, though, and that is what
+    the artwork's aspect is for: fractions of a landscape label laid onto a
+    quad read as portrait come out rotated a quarter turn. See
+    ``geometry.align_quad``.
     """
-    quad = geo.oriented(box_polygon(box), flipped)
+    from . import reference as reference_logic
+
+    quad = geo.oriented(box_polygon(box), flipped, reference_logic.aspect_of(label_def))
 
     out: list[dict] = []
     for code in getattr(label_def, "codes", []) or []:
@@ -271,3 +280,32 @@ def apply_reference_regions(box: dict, label_def, *, overwrite: bool = False,
             have.add(key)
     box["regions"] = kept
     return box
+
+
+def refresh_reference_regions(data: dict | None, label_def, *,
+                              flipped: bool = False) -> int:
+    """Re-place a label's regions on every box of it in one sidecar.
+
+    Regions are attached when a box is auto-labelled, out of whatever the
+    library held at that moment. So an image labelled before a text field was
+    added keeps a sidecar with no text field in it, and one labelled afterwards
+    gets one -- the same dataset, some images showing the region and some not,
+    for a reason no one can see from the outside. The library is meant to be
+    the single statement of where a label's regions are; this is what makes the
+    images already on disk agree with it.
+
+    Placed regions are replaced rather than merged, because a region that moved
+    on the artwork has to move on the images too -- ``overwrite`` keeps
+    anything not placed from the reference. Returns how many boxes changed, so
+    a caller can say what it did.
+    """
+    label_id = str(getattr(label_def, "label_id", "") or "")
+    if not data or not label_id:
+        return 0
+    changed = 0
+    for box in boxes_for(data, label_id):
+        before = json.dumps(regions(box), sort_keys=True)
+        apply_reference_regions(box, label_def, overwrite=True, flipped=flipped)
+        if json.dumps(regions(box), sort_keys=True) != before:
+            changed += 1
+    return changed
