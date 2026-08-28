@@ -1862,6 +1862,32 @@ class MainWindow(QMainWindow):
         }
 
     @staticmethod
+    def _crop_dataset_shape(data) -> tuple[list[str], dict[str, int]]:
+        """``(classes, crops per class)`` for a classification dataset.
+
+        Counted off disk rather than taken from the run, because the run
+        reports what it scored and the question here is what it was given.
+        Silent when the folder has been moved or deleted: the caveats it feeds
+        degrade to the ones that need no counts.
+        """
+        try:
+            base = Path(data)
+            if not base.is_dir():
+                return [], {}
+            counts: dict[str, int] = {}
+            for split in ("train", "val"):
+                if not (base / split).is_dir():
+                    continue
+                for folder in (base / split).iterdir():
+                    if folder.is_dir():
+                        counts[folder.name] = counts.get(folder.name, 0) + sum(
+                            1 for f in folder.iterdir()
+                            if f.suffix.lower() in (".jpg", ".jpeg", ".png"))
+            return sorted(counts), counts
+        except Exception:
+            return [], {}
+
+    @staticmethod
     def _stage_metric_text(result: dict) -> str:
         """One stage's numbers, in the words its own task uses.
 
@@ -1895,6 +1921,15 @@ class MainWindow(QMainWindow):
         else:
             lines.append("")
             lines.append("No validation metrics in results.csv for this run.")
+
+        if result.get("stage") == "classifier":
+            caveats = training_logic.classifier_caveats(
+                *MainWindow._crop_dataset_shape((result.get("params") or {}).get("data")),
+                summary=summary)
+            if caveats:
+                lines.append("")
+                lines.append("What these numbers cover:")
+                lines.extend(f"   {line}" for line in caveats)
 
         weights = result.get("weights")
         lines.append("")

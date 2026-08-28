@@ -420,3 +420,89 @@ def test_in_process_training_gets_the_same_settings_as_the_cli():
     for key, value in t.augment_kwargs(params).items():
         assert kwargs[key] == value
         assert f"{key}={value}" in cmd
+
+
+# --- reading a classifier's headline numbers back honestly ------------------
+#
+# Stage 2 reached top-1 1.0000 in four epochs and 26 seconds, and the same
+# build was calling a battery it had never seen a PC680 at 0.99. Both of those
+# were true at once, and the summary showed only the first.
+
+def _classify_summary(top1=1.0, top5=1.0):
+    return {"final": {"accuracy_top1": top1, "accuracy_top5": top5}}
+
+
+def test_top_five_over_a_handful_of_classes_is_named_as_meaningless():
+    """It is 1.0 by construction -- the true class cannot fall out of a ranking
+    of every class there is -- so it reads as a second passing grade when it is
+    not a measurement at all."""
+    lines = t.classifier_caveats(["a", "b", "c"], {"a": 40, "b": 40, "c": 40},
+                                  _classify_summary())
+    assert any("by construction" in line for line in lines)
+    assert any("Read top-1 only" in line for line in lines)
+
+
+def test_top_five_is_left_alone_once_there_are_enough_classes():
+    classes = [f"c{i}" for i in range(9)]
+    lines = t.classifier_caveats(classes, {c: 40 for c in classes},
+                                  _classify_summary())
+    assert not any("by construction" in line for line in lines)
+
+
+def test_a_perfect_score_is_told_what_it_did_not_score():
+    """The split holds out photographs, not labels. Every crop scored belongs
+    to a class that was trained on, so the failure seen on the line is not in
+    the number -- it is not being scored badly, it is absent."""
+    lines = t.classifier_caveats(["a", "b"], {"a": 40, "b": 40},
+                                  _classify_summary())
+    text = " ".join(lines)
+    assert "holds out photographs, not labels" in text
+    assert "not in the score" in text
+
+
+def test_a_perfect_score_on_few_classes_is_tied_to_why_unknown_is_hard():
+    """The same fact explains both: a network learns what it needs to separate
+    the classes it was given, and with this few it needs very little."""
+    lines = t.classifier_caveats(["a", "b"], {"a": 40, "b": 40},
+                                  _classify_summary())
+    text = " ".join(lines)
+    assert "novelty profile" in text
+    assert "more crops widen it" in text
+
+
+def test_a_model_that_has_not_saturated_is_not_lectured():
+    """The note is about what a perfect score hides. A run still learning has
+    nothing hidden, and a caveat on every screen is a caveat nobody reads."""
+    lines = t.classifier_caveats(["a", "b"], {"a": 40, "b": 40},
+                                  _classify_summary(top1=0.82, top5=1.0))
+    text = " ".join(lines)
+    assert "not in the score" not in text
+    # The degenerate top-5 is still worth saying: that one is arithmetic, and
+    # true whatever the model is doing.
+    assert "by construction" in text
+
+
+def test_classes_with_too_few_crops_are_named():
+    lines = t.classifier_caveats(["thick", "thin"], {"thick": 90, "thin": 4},
+                                  _classify_summary())
+    text = " ".join(lines)
+    assert "thin" in text and "thick" not in text.split("Thin:")[1]
+
+
+def test_the_crop_total_is_reported_so_the_run_time_makes_sense():
+    """Ten epochs in 26 seconds is either a fast GPU or a small dataset, and
+    the count is what tells them apart."""
+    lines = t.classifier_caveats(["a", "b"], {"a": 40, "b": 60},
+                                  _classify_summary())
+    assert "2 class(es), 100 crop(s)" in lines[0]
+
+
+def test_nothing_is_claimed_when_the_dataset_could_not_be_read():
+    """The folder gets moved. The caveats that need no counts still apply."""
+    lines = t.classifier_caveats([], {}, _classify_summary())
+    assert lines and all("class(es)" not in line for line in lines)
+    assert any("not in the score" in line for line in lines)
+
+
+def test_an_empty_result_produces_no_note_at_all():
+    assert t.classifier_caveats([], {}, {}) == []

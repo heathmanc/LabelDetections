@@ -414,3 +414,73 @@ def format_duration(seconds: float) -> str:
     if m:
         return f"{m}m {s}s"
     return f"{s}s"
+
+
+# --- what a classifier's headline metrics do not measure --------------------
+#
+# A stage 2 run reaching top-1 1.0000 in four epochs is not a good model
+# reported honestly. It is an easy question answered on a set that contains
+# only the answers it was taught, and both halves of that are worth saying at
+# the moment the number is read -- because "100%" is the least likely number to
+# be questioned, and on this pipeline it was 100% while the line was being told
+# a battery it had never seen was a PC680.
+
+# Top-5 accuracy over five or fewer classes is 1.0 by construction: the true
+# class cannot fall out of a ranking of everything there is.
+TRIVIAL_TOP5_CLASSES = 5
+
+# Past this, the split is not measuring much. Saturation is expected on a task
+# this small and says nothing either way about the model.
+SATURATED = 0.999
+
+# Under this many crops of a class, its accuracy is a handful of images
+# agreeing, and one of them changing its mind moves the number visibly.
+THIN_CLASS = 20
+
+
+def classifier_caveats(classes, counts=None, summary=None) -> list[str]:
+    """Read the classifier's own numbers back with what they cannot cover.
+
+    Nothing here is a complaint about the run. It is the difference between
+    what was measured -- can it separate the labels it was taught, on held-out
+    photographs of those same labels -- and what the line asks of it, which
+    includes labels nobody has taught it yet.
+    """
+    classes = [str(c) for c in (classes or [])]
+    counts = dict(counts or {})
+    summary = dict(summary or {})
+    final = dict(summary.get("final") or {})
+    top1 = float(final.get("accuracy_top1", 0.0) or 0.0)
+    lines: list[str] = []
+
+    if classes:
+        thin = sorted(n for n in classes if counts.get(n, 0) < THIN_CLASS)
+        total = sum(counts.values()) or 0
+        lines.append(f"{len(classes)} class(es)"
+                     + (f", {total} crop(s)" if total else ""))
+        if len(classes) <= TRIVIAL_TOP5_CLASSES and "accuracy_top5" in final:
+            lines.append(
+                f"top-5 is 1.0000 by construction with {len(classes)} classes "
+                f"-- the true class cannot fall out of a ranking of every class "
+                f"there is. Read top-1 only.")
+        if thin:
+            lines.append(f"Thin: {', '.join(thin)} -- under {THIN_CLASS} crops "
+                         f"each, so their accuracy is a few images agreeing.")
+
+    if top1 >= SATURATED:
+        lines.append(
+            "top-1 1.0000 means the enrolled labels are easy to tell apart at "
+            "this crop size, which is worth knowing and is all it means. The "
+            "split holds out photographs, not labels: every crop it was scored "
+            "on belongs to a class it trained on, so nothing here measures what "
+            "happens when a label that was never enrolled goes past. That case "
+            "does not score badly -- it is not in the score.")
+        if len(classes) <= TRIVIAL_TOP5_CLASSES:
+            lines.append(
+                "It also bears on how well 'unknown' can work. A network learns "
+                "what it needs to separate the classes it is given, and with "
+                "this few it needs very little -- so unenrolled labels tend to "
+                "land close to enrolled ones in feature space, where no radius "
+                "will refuse them. Build the novelty profile and read its "
+                "separation line; more classes and more crops widen it.")
+    return lines
