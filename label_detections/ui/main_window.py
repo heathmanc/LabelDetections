@@ -5564,25 +5564,28 @@ class MainWindow(QMainWindow):
             if not self._ask_replace_reference(label):
                 return
 
+        # The dialog shows its own preview, so the camera has to be running
+        # for it rather than for whatever tab somebody was last on. Reaching
+        # into the main window's preview meant a reference could only be shot
+        # from a state you had to get into first, elsewhere.
+        opened_here = False
+        if not self._camera_is_live():
+            try:
+                self.open_camera()
+                opened_here = True
+            except Exception:
+                pass
+
         dialog = ReferenceSetupDialog(
-            label, capture=self._reference_frame,
+            label, frames=lambda: self.last_raw,
             images=list_images(self.label_id), parent=self)
-        if not dialog.exec() or not dialog.result:
-            return
-        self._save_reference(label, dialog.result)
-
-    def _reference_frame(self):
-        """A freshly captured frame for the reference dialog, or None.
-
-        Saved into the dataset like any other capture -- a photograph of the
-        label is training data whatever else it is also used for.
-        """
-        if self.last_raw is None:
-            return None
-        self.capture_frame(save_adjusted=bool(
-            getattr(self, "capture_adjusted_default", False)))
-        last = getattr(self, "_last_capture_path", None)
-        return Path(last) if last and Path(last).exists() else None
+        try:
+            accepted = bool(dialog.exec()) and dialog.result is not None
+        finally:
+            if opened_here:
+                self.close_camera()
+        if accepted:
+            self._save_reference(label, dialog.result)
 
     def _save_reference(self, label, result: dict) -> None:
         """Write the artwork and the regions the dialog came back with.
@@ -5592,22 +5595,14 @@ class MainWindow(QMainWindow):
         would leave a label whose regions refer to a picture that does not
         exist.
         """
-        frame = cv2.imread(str(result.get("frame", "")))
-        if frame is None:
+        artwork = result.get("artwork")
+        if artwork is None or getattr(artwork, "size", 0) == 0:
             QMessageBox.warning(
                 self, "Capture Reference",
-                f"Could not re-read the photograph:\n{result.get('frame')}")
-            return
-        x, y, w, h = (int(round(v)) for v in result.get("outline") or [0, 0, 0, 0])
-        x, y = max(0, x), max(0, y)
-        crop = frame[y:y + h, x:x + w]
-        if crop.size == 0:
-            QMessageBox.warning(
-                self, "Capture Reference",
-                "The outline did not enclose any of the photograph.")
+                "There was no flattened artwork to save.")
             return
 
-        path = imageio.save_reference(self.label_id, crop)
+        path = imageio.save_reference(self.label_id, artwork)
         updated = labels_mod.LabelDef.from_dict({
             **label.to_dict(),
             "codes": result["codes"],
@@ -5617,7 +5612,6 @@ class MainWindow(QMainWindow):
             # coordinate system and keeping the old paths around invites
             # something to pick the wrong one.
             "reference_images": [str(path)],
-            "reference_source": str(result.get("frame", "")),
             "variable_data": bool(label.variable_data or result["anchor_region"]),
         })
         self.library.add(updated, replace=True)

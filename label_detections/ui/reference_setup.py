@@ -3,55 +3,71 @@
 Before this, defining a label meant Capture Reference, then drawing a box on
 the annotation canvas, then Define Regions, then Place Regions -- four controls
 across two panes, in an order nothing enforced, each doing part of one job. The
-parts were also separately reachable, so a label could sit half-defined
+parts were separately reachable, so a label could sit half-defined
 indefinitely and look finished.
 
-It is one job: photograph the label, say where it is in the photograph, say
-what to read on it. So it is one window, and the buttons that used to do the
-pieces are gone.
+It is one job in three steps, and the window owns all three:
 
-The reference is written only when the whole thing is finished. Cancelling at
-any point leaves the label exactly as it was, which is what makes the artwork
-safe to treat as immutable -- there is no half-completed state that could have
-moved it.
+  1. **Frame.** Its own live preview and its own shutter. Reaching into the
+     main window's preview meant the reference could only be shot from another
+     tab that happened to be running, which is a dependency on where somebody
+     had been rather than on what they are doing.
+  2. **Outline.** Four corners, not a rectangle. A label at an angle inside an
+     axis-aligned box brings a wedge of background in with it, and the outline
+     is the coordinate system every region is a fraction of -- so that wedge
+     shifts every region by its own size.
+  3. **Regions.** Drawn on the artwork, which is the outline RECTIFIED: warped
+     straight-on. That is what makes the regions simple. On a de-skewed
+     artwork an axis-aligned region is the right shape, and it is exactly what
+     the runtime maps back onto whatever oriented box the detector produces.
+
+Nothing is written until the last step finishes. Cancelling at any point leaves
+the label exactly as it was, which is what makes the artwork safe to treat as
+immutable -- there is no half-completed state that could have moved it.
 """
 from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import (
     QComboBox, QDialog, QDialogButtonBox, QHBoxLayout, QLabel, QMessageBox,
     QPushButton, QRadioButton, QStackedWidget, QVBoxLayout, QWidget,
 )
 
 from ..core import reference as ref_logic
+from .quad_canvas import QuadCanvas
 from .region_editor import RegionEditorBody
 
-SOURCE_PAGE, DRAW_PAGE = 0, 1
+FRAME_PAGE, OUTLINE_PAGE, REGION_PAGE = 0, 1, 2
+
+# How often the built-in preview pulls a frame. The camera runs at its own rate
+# and this only has to look live to a person holding a battery still.
+PREVIEW_MS = 66
 
 
 class ReferenceSetupDialog(QDialog):
     """Photograph a label, outline it, and mark what to read on it."""
 
-    def __init__(self, label, *, capture, images, parent=None):
-        """``capture`` returns a freshly grabbed BGR frame or None.
+    def __init__(self, label, *, frames, images, parent=None):
+        """``frames`` returns the newest BGR frame from the camera, or None.
 
         ``images`` are this label's existing captures, so a reference can be
-        set up without the camera connected -- on a rig where the camera is on
-        the line and the labelling is done at a desk, insisting on a live frame
-        would mean the work can only happen in one room.
+        set up without the camera -- on a rig where the camera is on the line
+        and the labelling happens at a desk, insisting on a live frame would
+        mean the work can only be done in one room.
         """
         super().__init__(parent)
         self.label = label
-        self._capture = capture
+        self._frames = frames
         self._images = [Path(p) for p in images or []]
         self.result: dict | None = None
-        self._frame_path: Path | None = None
+        self.frame = None                # the raw photograph, BGR
+        self.artwork = None              # the rectified label, BGR
 
         label_id = str(getattr(label, "label_id", "") or "label")
         self.setWindowTitle(f"Reference image for {label_id}")
-        self.resize(1150, 760)
+        self.resize(1180, 820)
 
         root = QVBoxLayout(self)
         self.heading = QLabel()
@@ -64,8 +80,9 @@ class ReferenceSetupDialog(QDialog):
 
         self.stack = QStackedWidget()
         root.addWidget(self.stack, 1)
-        self.stack.addWidget(self._build_source_page())
-        self.stack.addWidget(QWidget())          # replaced when a frame exists
+        self.stack.addWidget(self._build_frame_page())
+        self.stack.addWidget(self._build_outline_page())
+        self.stack.addWidget(QWidget())        # built once artwork exists
 
         self.problem = QLabel()
         self.problem.setWordWrap(True)
@@ -83,133 +100,212 @@ class ReferenceSetupDialog(QDialog):
         self._finish.clicked.connect(self._finish_clicked)
         self.buttons.rejected.connect(self.reject)
         root.addWidget(self.buttons)
+
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._tick_preview)
+        self._timer.start(PREVIEW_MS)
         self._show_page()
 
-    # -- page 1: where the photograph comes from --------------------------
+    # -- step 1: the photograph -------------------------------------------
 
-    def _build_source_page(self) -> QWidget:
+    def _build_frame_page(self) -> QWidget:
         page = QWidget()
         column = QVBoxLayout(page)
 
-        self.shoot_radio = QRadioButton("Capture a new frame")
-        self.shoot_radio.setChecked(True)
-        column.addWidget(self.shoot_radio)
-        hint = QLabel(
-            "    Frame the label square-on and filling as much of the view as "
-            "the part allows. This one photograph is the label's artwork for "
-            "good, and every region is measured on it.")
-        hint.setWordWrap(True)
-        hint.setStyleSheet("color: #9aa4b2;")
-        column.addWidget(hint)
+        self.preview = QuadCanvas()          # same widget, no outline drawn here
+        column.addWidget(self.preview, 1)
 
-        self.existing_radio = QRadioButton("Use one of this label's images")
-        column.addWidget(self.existing_radio)
         row = QHBoxLayout()
-        row.addSpacing(24)
+        self.shoot_btn = QPushButton("Capture this frame")
+        self.shoot_btn.setStyleSheet("font-weight: 700;")
+        self.shoot_btn.clicked.connect(self._shoot)
+        row.addWidget(self.shoot_btn, 1)
+        column.addLayout(row)
+
+        pick = QHBoxLayout()
+        self.existing_radio = QRadioButton("or use a captured image:")
+        pick.addWidget(self.existing_radio)
         self.image_combo = QComboBox()
         for path in self._images:
             self.image_combo.addItem(path.name, str(path))
         if not self._images:
-            self.image_combo.addItem("no captured images yet", "")
+            self.image_combo.addItem("none yet", "")
             self.existing_radio.setEnabled(False)
         self.image_combo.currentIndexChanged.connect(
             lambda _i: self.existing_radio.setChecked(True))
-        row.addWidget(self.image_combo, 1)
-        column.addLayout(row)
+        pick.addWidget(self.image_combo, 1)
+        column.addLayout(pick)
 
-        column.addStretch(1)
         existing = ref_logic.reference_path(self.label)
         if existing:
             note = QLabel(
-                f"This label already has artwork:\n{existing}\n\n"
-                "Saving here replaces it, and every region measured against "
-                "the old one has to be drawn again.")
+                f"Replacing the artwork at {existing} — every region measured "
+                f"against the old one has to be drawn again.")
             note.setWordWrap(True)
             note.setStyleSheet("color: #fbbf24;")
             column.addWidget(note)
         return page
 
-    # -- page 2: the outline and the regions ------------------------------
+    def _tick_preview(self) -> None:
+        """Show the live camera until a frame has been taken."""
+        if self.stack.currentIndex() != FRAME_PAGE or self.frame is not None:
+            return
+        try:
+            live = self._frames()
+        except Exception:
+            live = None
+        if live is not None:
+            self.preview.set_frame(live)
 
-    def _build_draw_page(self, frame_path: Path) -> QWidget:
+    def _shoot(self) -> None:
+        self.problem.clear()
+        try:
+            taken = self._frames()
+        except Exception as exc:
+            self.problem.setText(f"Could not read the camera: {exc}")
+            return
+        if taken is None:
+            self.problem.setText(
+                "No camera frame. Connect and start the camera, or pick one of "
+                "this label's captured images below.")
+            return
+        self.frame = taken.copy()
+        self.preview.set_frame(self.frame)
+        self._go_next()
+
+    # -- step 2: the outline ----------------------------------------------
+
+    def _build_outline_page(self) -> QWidget:
+        page = QWidget()
+        column = QVBoxLayout(page)
+        self.outline_canvas = QuadCanvas()
+        self.outline_canvas.changed.connect(self._show_page)
+        column.addWidget(self.outline_canvas, 1)
+        row = QHBoxLayout()
+        clear = QPushButton("Clear outline")
+        clear.clicked.connect(self.outline_canvas.clear)
+        row.addWidget(clear)
+        row.addStretch(1)
+        column.addLayout(row)
+        return page
+
+    # -- step 3: the regions ----------------------------------------------
+
+    def _build_region_page(self, artwork_path: Path) -> QWidget:
         codes = [c.to_dict() if hasattr(c, "to_dict") else dict(c.__dict__)
                  for c in getattr(self.label, "codes", None) or []]
         texts = [dict(t.__dict__)
                  for t in getattr(self.label, "text_fields", None) or []]
         self.body = RegionEditorBody(
-            str(frame_path), codes, texts,
+            str(artwork_path), codes, texts,
             list(getattr(self.label, "anchor_region", None) or []), self)
         return self.body
 
     # -- moving between them -----------------------------------------------
 
-    def _frame(self) -> Path | None:
-        """The photograph to work on, captured or chosen."""
-        if self.existing_radio.isChecked():
-            chosen = self.image_combo.currentData()
-            return Path(chosen) if chosen else None
-        return self._capture()
-
     def _go_next(self) -> None:
         self.problem.clear()
-        if self.stack.currentIndex() != SOURCE_PAGE:
-            return
-        try:
-            frame_path = self._frame()
-        except Exception as exc:
-            self.problem.setText(f"Could not get a frame: {exc}")
-            return
-        if frame_path is None or not Path(frame_path).is_file():
+        page = self.stack.currentIndex()
+        if page == FRAME_PAGE:
+            if self.frame is None and self.existing_radio.isChecked():
+                import cv2
+
+                chosen = self.image_combo.currentData()
+                self.frame = cv2.imread(str(chosen)) if chosen else None
+            if self.frame is None:
+                self.problem.setText(
+                    "Capture a frame, or pick one of this label's images.")
+                return
+            self.outline_canvas.set_frame(self.frame)
+            self.stack.setCurrentIndex(OUTLINE_PAGE)
+        elif page == OUTLINE_PAGE:
+            if not self.outline_canvas.has_quad():
+                self.problem.setText(
+                    "Draw the outline first: drag around the label, then drag "
+                    "its corners onto the label's own corners.")
+                return
+            if not self._rectify():
+                return
+            self.stack.setCurrentIndex(REGION_PAGE)
+        self._show_page()
+
+    def _rectify(self) -> bool:
+        """Warp the outlined quad straight-on and open the regions on it."""
+        import cv2
+
+        from ..core.imageio import rectify_quad
+        from ..core.storage import DATA_DIR
+
+        artwork = rectify_quad(self.frame, self.outline_canvas.quad,
+                               out_width=900)
+        if artwork is None or artwork.size == 0:
             self.problem.setText(
-                "No frame. Open the live preview and try again, or pick one of "
-                "this label's captured images.")
-            return
-        self._frame_path = Path(frame_path)
-        page = self._build_draw_page(self._frame_path)
-        old = self.stack.widget(DRAW_PAGE)
+                "That outline could not be flattened -- its corners are in a "
+                "line, or it is too small. Redraw it around the whole label.")
+            return False
+        self.artwork = artwork
+        scratch = DATA_DIR / "library" / "references"
+        scratch.mkdir(parents=True, exist_ok=True)
+        # Written to a scratch name, not the label's: nothing claims to be this
+        # label's artwork until the whole thing is finished.
+        preview = scratch / "_pending_reference.png"
+        cv2.imwrite(str(preview), artwork)
+        old = self.stack.widget(REGION_PAGE)
         self.stack.removeWidget(old)
         old.deleteLater()
-        self.stack.insertWidget(DRAW_PAGE, page)
-        self.stack.setCurrentIndex(DRAW_PAGE)
-        self._show_page()
+        self.stack.insertWidget(REGION_PAGE, self._build_region_page(preview))
+        return True
 
     def _go_back(self) -> None:
         self.problem.clear()
-        self.stack.setCurrentIndex(SOURCE_PAGE)
+        page = self.stack.currentIndex()
+        if page == REGION_PAGE:
+            self.stack.setCurrentIndex(OUTLINE_PAGE)
+        elif page == OUTLINE_PAGE:
+            # Back to the camera means taking another photograph, so the frame
+            # goes: keeping it would show a still while the shutter is offered.
+            self.frame = None
+            self.stack.setCurrentIndex(FRAME_PAGE)
         self._show_page()
 
     def _show_page(self) -> None:
-        drawing = self.stack.currentIndex() == DRAW_PAGE
+        page = self.stack.currentIndex()
         label_id = str(getattr(self.label, "label_id", "") or "label")
-        if drawing:
-            self.heading.setText(f"2 of 2 — Outline {label_id}, then its regions")
-            self.blurb.setText(
-                "Draw the label outline first: everything else is measured as a "
-                "fraction of it, so it has to exist before a region means "
-                "anything. Then draw the code and text areas inside it.")
-        else:
-            self.heading.setText(f"1 of 2 — A photograph of {label_id}")
-            self.blurb.setText(
-                "The reference image is this label's coordinate system. It is "
-                "never edited afterwards, only replaced -- because every region "
-                "on every image already reviewed is positioned against it.")
-        self._back.setEnabled(drawing)
-        self._next.setEnabled(not drawing)
-        self._finish.setEnabled(drawing)
+        headings = {
+            FRAME_PAGE: (
+                f"1 of 3 — Photograph {label_id}",
+                "Hold the label square-on and filling as much of the view as "
+                "the part allows. This photograph becomes the label's "
+                "coordinate system, and it is never edited afterwards."),
+            OUTLINE_PAGE: (
+                f"2 of 3 — Outline {label_id}",
+                "Drag around the label, then drag each corner onto the label's "
+                "own corner. Four corners rather than a rectangle: a label at "
+                "an angle inside a straight box brings a wedge of background "
+                "with it, and every region is a fraction of this outline."),
+            REGION_PAGE: (
+                f"3 of 3 — What to read on {label_id}",
+                "The artwork is your outline flattened straight-on. Draw the "
+                "code and text areas on it -- they are stored as fractions of "
+                "it, so they follow the label onto any frame at any angle."),
+        }
+        heading, blurb = headings.get(page, ("", ""))
+        self.heading.setText(heading)
+        self.blurb.setText(blurb)
+        self._back.setEnabled(page != FRAME_PAGE)
+        self._next.setEnabled(
+            page == FRAME_PAGE
+            or (page == OUTLINE_PAGE and self.outline_canvas.has_quad()))
+        self._finish.setEnabled(page == REGION_PAGE)
+        self.shoot_btn.setEnabled(page == FRAME_PAGE)
 
     # -- finishing ---------------------------------------------------------
 
     def _finish_clicked(self) -> None:
         self.problem.clear()
         body = getattr(self, "body", None)
-        if body is None or not body.has_image():
-            self.problem.setText("There is no photograph to work on yet.")
-            return
-        if not body.has_outline():
-            self.problem.setText(
-                "Draw the label outline first — pick 'Label outline' and drag "
-                "around the whole label. Regions are fractions of it, so "
-                "without one they have nothing to be a fraction of.")
+        if body is None or self.artwork is None:
+            self.problem.setText("There is no artwork to save yet.")
             return
         drawn = body.result_regions()
         if not (drawn["codes"] or drawn["text_fields"]):
@@ -223,21 +319,10 @@ class ReferenceSetupDialog(QDialog):
                 QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
             if answer != QMessageBox.Yes:
                 return
-        self.result = {
-            "frame": str(self._frame_path),
-            "outline": self._outline_rect(body),
-            **drawn,
-        }
+        self.result = {"artwork": self.artwork,
+                       "quad": list(self.outline_canvas.quad), **drawn}
         self.accept()
 
-    @staticmethod
-    def _outline_rect(body) -> list[float]:
-        """The outline in image pixels: ``[x, y, w, h]``.
-
-        The caller crops the artwork out of the photograph with it. Kept in
-        pixels rather than fractions because the photograph is the only thing
-        it has ever been relative to.
-        """
-        rect = body.canvas.outline
-        return [float(rect.x()), float(rect.y()),
-                float(rect.width()), float(rect.height())]
+    def done(self, code: int) -> None:
+        self._timer.stop()
+        super().done(code)
