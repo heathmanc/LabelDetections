@@ -1,0 +1,424 @@
+"""What a decoded code says about which label it is.
+
+The line cannot pass a wrong id, and every other check in this pipeline is a
+guess about appearance that can be confidently wrong about a label nobody has
+ever enrolled. A decoded code is the part number printed on the part, so it can
+refuse a label it has never seen -- which is the whole reason for building it
+over another model.
+
+That makes the failure modes matter more than the happy path here. A verifier
+that quietly passes everything is worse than no verifier, because the readout
+says a check is running.
+"""
+from __future__ import annotations
+
+import os
+import sys
+
+import pytest
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from label_detections.core import codes as cd
+from label_detections.core.live_detect import UNKNOWN
+
+
+class _Spec:
+    def __init__(self, policy="must_decode", pattern="", region=(0.1, 0.1, 0.2, 0.2)):
+        self.policy = policy
+        self.pattern = pattern
+        self.region = list(region)
+        self.role = "part_number"
+        self.symbology = "qr"
+
+
+class _Label:
+    def __init__(self, label_id, codes=()):
+        self.label_id = label_id
+        self.codes = list(codes)
+
+
+def _read(text):
+    return [cd.Read(text=text, symbology="QRCode")]
+
+
+PC680 = _Spec(pattern=r"^ODS-AGM16L")
+G31 = _Spec(pattern=r"^NP16-12B")
+PATTERNS = {"PC680": [r"^ODS-AGM16L"], "sp_g31": [r"^NP16-12B"]}
+
+
+# --- the failure this was built for -----------------------------------------
+
+def test_a_code_matching_no_enrolled_label_refuses_the_detection():
+    """The Genesys label: never trained on, die cut matches PC680, and the
+    classifier says PC680 at 0.99. Its printing says something else entirely,
+    and nothing had to have seen it before for that to be decisive."""
+    v = cd.verdict("PC680", [PC680], _read("NP16-99Z-UNSEEN"), PATTERNS)
+    assert v.state == cd.CONTRADICTED
+    assert v.label_id == ""
+    assert cd.resolve("PC680", v) == UNKNOWN
+    assert "matches no enrolled label" in v.detail
+
+
+def test_a_code_belonging_to_another_enrolled_label_relabels_it():
+    """The printing outranks the classifier. It is not a tiebreak -- one is
+    guessing from appearance and the other is printed on the part."""
+    v = cd.verdict("PC680", [PC680], _read("NP16-12B-0798"), PATTERNS)
+    assert v.state == cd.CONTRADICTED
+    assert cd.resolve("PC680", v) == "sp_g31"
+    assert "belongs to sp_g31" in v.detail
+
+
+def test_the_right_label_is_confirmed_rather_than_merely_not_refused():
+    v = cd.verdict("PC680", [PC680], _read("ODS-AGM16L-16AH"), PATTERNS)
+    assert v.state == cd.CONFIRMED and v.verified
+    assert cd.resolve("PC680", v) == "PC680"
+
+
+def test_a_demanded_code_that_does_not_decode_does_not_pass():
+    """"Could not verify" is not "verified". The library said this label
+    carries a code that inspection must read; not reading it is a failure to
+    establish the identity, not a reason to take the classifier's word."""
+    v = cd.verdict("PC680", [PC680], [], PATTERNS)
+    assert v.state == cd.UNREADABLE and v.blocks
+    assert cd.resolve("PC680", v) == UNKNOWN
+
+
+# --- refusing to claim more than it knows -----------------------------------
+
+def test_a_label_with_no_code_marked_for_inspection_is_left_alone():
+    """Not every label carries a code. Reporting those as failures would make
+    the check unusable on a mixed library, and the classifier is what stands
+    behind them -- which the readiness report says out loud."""
+    v = cd.verdict("PC680", [_Spec(policy="ignore")], [], PATTERNS)
+    assert v.state == cd.NOT_CHECKED
+    assert cd.resolve("PC680", v) == "PC680"
+    assert not v.blocks
+
+
+def test_a_code_with_no_pattern_reports_presence_not_confirmation():
+    """Any code that decodes would satisfy it, so calling that CONFIRMED would
+    be the strongest state on the weakest evidence there is."""
+    v = cd.verdict("PC680", [_Spec(pattern="")], _read("anything at all"),
+                   {})
+    assert v.state == cd.PRESENT
+    assert not v.verified
+    assert cd.resolve("PC680", v) == "PC680"
+    assert "no pattern to check it against" in v.detail
+
+
+def test_an_empty_pattern_matches_nothing_rather_than_everything():
+    """The direction of this default decides whether a mis-entered label
+    silently passes every code on earth."""
+    assert cd.matches("", "ODS-AGM16L") is False
+    assert cd.matches(r"^ODS", "") is False
+
+
+def test_a_pattern_that_does_not_compile_fails_shut():
+    """A typo in a regex is a data-entry mistake. Matching everything would
+    turn one typo into a label that accepts any code silently."""
+    assert cd.matches(r"^ODS-[AGM", "ODS-AGM16L") is False
+
+
+def test_two_labels_claiming_one_code_is_confirmed_but_named():
+    """A library problem rather than a line problem, and picking either
+    silently would be arbitrary."""
+    patterns = {"PC680": [r"^ODS"], "other": [r"^ODS"]}
+    v = cd.verdict("PC680", [PC680], _read("ODS-AGM16L"), patterns)
+    assert v.state == cd.CONFIRMED
+    assert "two labels claim this printing" in v.detail
+
+
+def test_a_blank_read_is_not_a_read():
+    v = cd.verdict("PC680", [PC680], [cd.Read(text="")], PATTERNS)
+    assert v.state == cd.UNREADABLE
+
+
+# --- what the operator sees -------------------------------------------------
+
+def test_every_state_says_something_on_the_plate_except_the_ones_that_should_not():
+    """A refusal with nothing on it cannot be told from a bug, and a confirmed
+    read is the thing a quality gate exists to show."""
+    def note(state, label_id=""):
+        return cd.plate_note(cd.Verdict(state, label_id))
+
+    assert note(cd.CONFIRMED) == "code ok"
+    assert note(cd.CONTRADICTED, "sp_g31") == "WRONG CODE"
+    assert note(cd.CONTRADICTED) == "NO MATCH"
+    assert note(cd.UNREADABLE) == "no code"
+    assert note(cd.PRESENT) == "code unchecked"
+    # Nothing was asked of this label, so nothing is claimed about it.
+    assert note(cd.NOT_CHECKED) == ""
+
+
+# --- what it actually protects ----------------------------------------------
+
+def test_readiness_names_the_labels_resting_on_the_classifier_alone():
+    """"Code verification is on" is not useful when half the library declares
+    no code, and that half is exactly where an unenrolled label still gets in."""
+    text = cd.readiness([
+        _Label("PC680", [PC680]),
+        _Label("weak", [_Spec(pattern="")]),
+        _Label("bare"),
+    ])
+    assert "1 of 3 label(s) can be verified" in text
+    assert "Verified: PC680" in text
+    assert "Presence only: weak" in text
+    assert "Unchecked: bare" in text
+    assert "rests on the classifier alone" in text
+
+
+def test_readiness_is_blunt_when_it_can_protect_nothing():
+    """The state where the checkbox is ticked and the check is decorative."""
+    text = cd.readiness([_Label("bare"), _Label("also_bare")])
+    assert "Nothing is verifiable yet" in text
+    assert "cannot stop an unenrolled label" in text
+
+
+def test_readiness_on_an_empty_library_does_not_claim_coverage():
+    assert "nothing to verify against" in cd.readiness([])
+
+
+def test_coverage_grades_one_label():
+    assert cd.coverage(_Label("a", [PC680])) == cd.FULL
+    assert cd.coverage(_Label("a", [_Spec(pattern="")])) == cd.WEAK
+    assert cd.coverage(_Label("a", [_Spec(policy="ignore", pattern="x")])) == cd.NONE
+    assert cd.coverage(_Label("a")) == cd.NONE
+
+
+def test_patterns_are_collected_only_from_codes_that_demand_something():
+    """An ignored code's pattern must not be used to identify anything: the
+    library says nobody checks it, so it may well be stale."""
+    labels = [_Label("a", [PC680]), _Label("b", [_Spec(policy="ignore", pattern="^X")])]
+    assert cd.patterns_for(labels) == {"a": [r"^ODS-AGM16L"]}
+
+
+# --- getting the pixels -----------------------------------------------------
+
+def test_the_code_region_is_taken_from_the_full_resolution_frame():
+    """The one crop in this pipeline that must not be shrunk. Stage 2's crop is
+    320 px of a whole label, so a barcode occupying a tenth of it arrives as
+    32 px -- below what any decoder can resolve. Reusing that crop would make
+    this feature look broken rather than be it."""
+    import inspect
+
+    from label_detections.core import code_reader
+
+    source = inspect.getsource(code_reader.read_label)
+    assert "rectify_quad(frame, placed)" in source, (
+        "the region crop must come off the frame with no size cap")
+
+
+def test_the_region_is_grown_so_the_quiet_zone_is_included():
+    """A region drawn tight to the printed bars has no quiet zone, and
+    decoders need one."""
+    from label_detections.core import code_reader
+
+    x, y, w, h = code_reader._expand([0.4, 0.4, 0.2, 0.1], 0.25)
+    assert w > 0.2 and h > 0.1
+    assert x < 0.4 and y < 0.4
+
+
+def test_growing_a_region_at_the_edge_stays_inside_the_label():
+    """place_unit_rect maps fractions of the label; over 1.0 would walk the
+    crop off the artwork."""
+    from label_detections.core import code_reader
+
+    x, y, w, h = code_reader._expand([0.0, 0.9, 1.0, 0.1], 0.5)
+    assert x >= 0.0 and y >= 0.0
+    assert x + w <= 1.001 and y + h <= 1.001
+
+
+def test_no_decoder_installed_reads_as_nothing_decoded_not_a_crash(monkeypatch):
+    """The dependency is optional at runtime. A missing one has to leave the
+    rest of live detect working, and the load message names it."""
+    from label_detections.core import code_reader
+
+    monkeypatch.setattr(code_reader, "_BACKEND", None)
+    monkeypatch.setattr(code_reader, "_REASON", "not installed")
+    assert code_reader.decode(object()) == []
+    assert code_reader.read_label(object(), [[0, 0], [1, 0], [1, 1], [0, 1]],
+                                  [PC680]) == []
+    ok, why = code_reader.available()
+    assert ok is False and why
+
+
+def test_a_snapshot_is_taken_rather_than_the_live_library(monkeypatch):
+    """The worker runs off the GUI thread and the library is edited on it."""
+    from label_detections.core import code_reader
+
+    label = _Label("PC680", [PC680])
+
+    class _Lib:
+        def all(self):
+            return [label]
+
+    specs, patterns = code_reader.library_snapshot(_Lib())
+    assert patterns == {"PC680": [r"^ODS-AGM16L"]}
+    # Editing the library afterwards must not change what the worker holds.
+    label.codes[0].pattern = "^CHANGED"
+    assert specs["PC680"][0].pattern == r"^ODS-AGM16L"
+
+
+# --- the wiring, where a bookkeeping slip becomes a wrong id ----------------
+
+class _Boxes:
+    def __init__(self, xyxy, ids=None):
+        self.xyxy = xyxy
+        self.conf = [0.9] * len(xyxy)
+        self.id = ids
+
+
+class _Res:
+    def __init__(self, xyxy, ids=None):
+        self.obb = None
+        self.boxes = _Boxes(xyxy, ids)
+
+
+def _worker(**kwargs):
+    from label_detections.ui.live_detect import InferenceWorker
+
+    worker = InferenceWorker("det.pt", 640, 0.5, None, classifier_path="cls.pt",
+                             read_codes=True, code_specs={"PC680": [PC680]},
+                             code_patterns=PATTERNS, **kwargs)
+    worker._codes_on = True
+    return worker
+
+
+def test_track_ids_come_out_in_the_same_order_as_the_quads():
+    """These two lists are zipped. Any divergence caches one label's verdict
+    against another label's track -- the wrong-id failure this feature exists
+    to prevent, reintroduced as a bookkeeping mistake."""
+    worker = _worker()
+    results = [_Res([[0, 0, 10, 10], [20, 20, 30, 30]], ids=[7, 9]),
+               _Res([[40, 40, 50, 50]], ids=[11])]
+    assert len(worker._detection_track_ids(results)) == len(
+        worker._detection_quads(results)) == 3
+    assert worker._detection_track_ids(results) == [7, 9, 11]
+
+
+def test_an_untracked_run_yields_no_ids_rather_than_a_short_list():
+    """A plain predict has boxes.id None, and a short list would slide every
+    later detection onto the wrong verdict."""
+    worker = _worker()
+    results = [_Res([[0, 0, 10, 10], [20, 20, 30, 30]])]
+    assert worker._detection_track_ids(results) == [None, None]
+
+
+def test_a_verdict_is_cached_per_track_rather_than_decoded_every_frame(monkeypatch):
+    """A part sits in front of the camera for a whole takt and its printing
+    does not change. Decoding on all ~340 of those frames is 339 warps for an
+    answer already in hand."""
+    from label_detections.core import code_reader
+
+    calls = []
+    monkeypatch.setattr(code_reader, "read_label",
+                        lambda *a, **k: calls.append(1) or _read("ODS-AGM16L"))
+    worker = _worker()
+    results = [_Res([[0, 0, 10, 10]], ids=[7])]
+    for _ in range(5):
+        out = worker._verify_codes(object(), results, [("PC680", 0.99, "")])
+    assert len(calls) == 1, "decoded the same track more than once"
+    assert out[0][0] == "PC680" and "code ok" in out[0][2]
+
+
+def test_an_unreadable_frame_is_not_cached(monkeypatch):
+    """Usually a pose or a blur. Caching it would hold a failure over a part
+    whose very next frame reads perfectly."""
+    from label_detections.core import code_reader
+
+    monkeypatch.setattr(code_reader, "read_label", lambda *a, **k: [])
+    worker = _worker()
+    results = [_Res([[0, 0, 10, 10]], ids=[7])]
+    out = worker._verify_codes(object(), results, [("PC680", 0.99, "")])
+    assert out[0][0] == UNKNOWN and "no code" in out[0][2]
+    assert worker._code_cache == {}
+
+
+def test_the_worker_relabels_from_the_code_not_the_classifier(monkeypatch):
+    from label_detections.core import code_reader
+
+    monkeypatch.setattr(code_reader, "read_label",
+                        lambda *a, **k: _read("NP16-12B-0798"))
+    worker = _worker()
+    results = [_Res([[0, 0, 10, 10]], ids=[7])]
+    out = worker._verify_codes(object(), results, [("PC680", 0.99, "")])
+    assert out[0][0] == "sp_g31"
+    assert "WRONG CODE" in out[0][2]
+
+
+def test_the_novelty_note_and_the_code_note_both_survive(monkeypatch):
+    """Two checks ran and the plate has room to say what each concluded."""
+    from label_detections.core import code_reader
+
+    monkeypatch.setattr(code_reader, "read_label",
+                        lambda *a, **k: _read("ODS-AGM16L"))
+    worker = _worker()
+    results = [_Res([[0, 0, 10, 10]], ids=[7])]
+    out = worker._verify_codes(object(), results, [("PC680", 0.99, "nov 0.31x")])
+    assert out[0][2] == "nov 0.31x code ok"
+
+
+def test_a_label_with_nothing_demanded_is_not_decoded_at_all(monkeypatch):
+    """Warping and decoding for a label the library asks nothing of is pure
+    cost on a frame that has to keep up with the camera."""
+    from label_detections.core import code_reader
+
+    calls = []
+    monkeypatch.setattr(code_reader, "read_label",
+                        lambda *a, **k: calls.append(1) or [])
+    worker = _worker()
+    worker._code_specs = {"PC680": [_Spec(policy="ignore")]}
+    results = [_Res([[0, 0, 10, 10]], ids=[7])]
+    out = worker._verify_codes(object(), results, [("PC680", 0.99, "")])
+    assert not calls
+    assert out[0] == ("PC680", 0.99, "")
+
+
+def test_an_already_unknown_detection_is_not_decoded(monkeypatch):
+    """There is no label to look up a code region on."""
+    from label_detections.core import code_reader
+
+    calls = []
+    monkeypatch.setattr(code_reader, "read_label",
+                        lambda *a, **k: calls.append(1) or [])
+    worker = _worker()
+    results = [_Res([[0, 0, 10, 10]], ids=[7])]
+    worker._verify_codes(object(), results, [(UNKNOWN, 0.2, "")])
+    assert not calls
+
+
+def test_the_check_turns_itself_off_when_no_label_can_be_verified(monkeypatch):
+    """Ticked and decorative is the worst state: the readout would say a check
+    is running while nothing could ever fail."""
+    from label_detections.core import code_reader
+
+    monkeypatch.setattr(code_reader, "available", lambda: (True, ""))
+    worker = _worker()
+    worker._code_patterns = {}
+    worker._load_codes()
+    assert worker._codes_on is False
+    assert "no label has both" in worker._code_note
+
+
+def test_a_missing_decoder_is_reported_before_anything_else():
+    """It is the more fundamental problem, and a note about patterns would
+    send somebody to edit the library when the fix is a pip install."""
+    worker = _worker()
+    worker._load_codes()
+    assert worker._codes_on is False
+    assert "zxing" in worker._code_note and "pip install" in worker._code_note
+
+
+def test_the_load_message_names_the_labels_it_cannot_verify(monkeypatch):
+    """On reads as 'all of them' unless it says otherwise."""
+    from label_detections.core import code_reader
+
+    monkeypatch.setattr(code_reader, "available", lambda: (True, ""))
+    worker = _worker()
+    worker._code_specs = {"PC680": [PC680], "bare": [_Spec(policy="ignore")]}
+    worker._code_patterns = {"PC680": [r"^ODS-AGM16L"]}
+    worker._load_codes()
+    assert worker._codes_on is True
+    assert "1 label(s) verifiable" in worker._code_note
+    assert "NOT verifiable: bare" in worker._code_note

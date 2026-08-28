@@ -128,7 +128,8 @@ class InferenceWorker(QObject):
                  classifier_path: str = "",
                  crop_px: int = 224, margin: float = 0.06,
                  identity_floor: float = 0.55, warm_shape=None,
-                 novelty_debug: bool = False):
+                 novelty_debug: bool = False, read_codes: bool = False,
+                 code_specs=None, code_patterns=None):
         super().__init__()
         self._path = str(model_path)
         self._imgsz = int(imgsz)
@@ -163,6 +164,18 @@ class InferenceWorker(QObject):
         self._embedder = None
         self._novelty_failed = False
         self._novelty_debug = bool(novelty_debug)
+        # Code verification: the only check here that identifies rather than
+        # rejects. Snapshots, not the live library -- this runs off the GUI
+        # thread and the library is edited on it.
+        self._code_specs = dict(code_specs or {})
+        self._code_patterns = dict(code_patterns or {})
+        self._codes_on = bool(read_codes)
+        self._code_note = ""
+        # One verdict per track, kept while the track lives. A part sits in
+        # front of the camera for a whole takt and its printing does not change
+        # in that time, so decoding it on every one of ~340 frames is 339
+        # warps and decodes for an answer already in hand.
+        self._code_cache: dict[int, object] = {}
         # Where Ultralytics actually ran, asked once after the first inference.
         self._device_checked = False
 
@@ -235,6 +248,7 @@ class InferenceWorker(QObject):
                 self._classifier = None
         if self._classifier is not None:
             self._load_novelty()
+        self._load_codes()
         # Build Ultralytics' predictor HERE, on this thread, before any frame
         # arrives. It is created lazily on the first predict/track call, and
         # setting it up runs select_device -> torch.cuda.set_device.
@@ -262,7 +276,8 @@ class InferenceWorker(QObject):
         # settings dialog. "Off" and "on" look identical while every part in
         # front of the camera happens to be enrolled, and the run where they
         # stop being is the run where nobody remembers which it was.
-        note = f"\n{self._novelty_note}" if self._novelty_note else ""
+        note = "".join(f"\n{line}" for line in
+                       (self._novelty_note, self._code_note) if line)
         self.loaded.emit(
             f"Loaded {which}: {self._path}\n{self._device_report()}{note}")
 
@@ -679,6 +694,141 @@ class InferenceWorker(QObject):
                     "was never taught will land inside one of them. More "
                     "classes and more crops per class are what widen this.")
 
+    def _load_codes(self) -> None:
+        """Bring up code verification, and say plainly whether it can run."""
+        if not self._codes_on:
+            self._code_note = ""
+            return
+        from ..core import code_reader
+
+        ok, reason = code_reader.available()
+        if not ok:
+            self._codes_on = False
+            self._code_note = f"code check OFF: {reason}"
+            return
+        verifiable = sorted(self._code_patterns)
+        if not verifiable:
+            self._codes_on = False
+            self._code_note = (
+                "code check OFF: no label has both a code marked for "
+                "inspection and a pattern to check the read against, so "
+                "reading one could not tell right from wrong")
+            return
+        self._code_note = (f"codes: {len(verifiable)} label(s) verifiable "
+                           f"({', '.join(verifiable[:4])}"
+                           f"{', ...' if len(verifiable) > 4 else ''})")
+        # Named rather than counted: a check that covers some labels and not
+        # others is worth nothing until somebody knows which, and "on" reads
+        # as "all of them".
+        unchecked = [i for i in sorted(self._code_specs)
+                     if i not in self._code_patterns]
+        if unchecked:
+            self._code_note += (f"; NOT verifiable: {', '.join(unchecked)} -- "
+                                f"a detection called one of those rests on the "
+                                f"classifier alone")
+
+    def _verify_codes(self, frame, results, named):
+        """Read each detection's printed code and let it outrank the classifier.
+
+        The one check here that is not a guess about appearance. It does not
+        need to have seen the wrong label before, because the refusal comes
+        from the label's own printing.
+        """
+        if not self._codes_on:
+            return named
+        from ..core import code_reader
+        from ..core import codes as code_logic
+        from ..core import live_detect as live_logic
+
+        quads = self._detection_quads(results)
+        track_ids = self._detection_track_ids(results)
+        out = []
+        for index, entry in enumerate(named):
+            name, conf = entry[0], entry[1]
+            note = entry[2] if len(entry) > 2 else ""
+            specs = self._code_specs.get(name) or []
+            if (not name or name == live_logic.UNKNOWN
+                    or not code_logic.demanded(specs)):
+                out.append((name, conf, note))
+                continue
+
+            track_id = track_ids[index] if index < len(track_ids) else None
+            cached = self._code_cache.get(track_id) if track_id is not None else None
+            if cached is not None and cached.label_id == name:
+                verdict = cached
+            else:
+                quad = quads[index] if index < len(quads) else None
+                reads = code_reader.read_label(frame, quad, specs)
+                verdict = code_logic.verdict(name, specs, reads,
+                                             self._code_patterns)
+                # Only a settled answer is worth keeping. An unreadable frame
+                # is usually a pose or a blur, and caching it would hold a
+                # failure over a part whose next frame reads perfectly.
+                if track_id is not None and verdict.state != code_logic.UNREADABLE:
+                    self._code_cache[track_id] = verdict
+
+            resolved = code_logic.resolve(name, verdict)
+            mark = code_logic.plate_note(verdict)
+            out.append((resolved, conf,
+                        " ".join(x for x in (note, mark) if x)))
+        # Tracks that have left take their verdicts with them; ids get reused.
+        if len(self._code_cache) > 256:
+            self._code_cache.clear()
+        return out
+
+    def _detection_track_ids(self, results) -> list:
+        """One track id per detection, in the SAME order _detection_quads uses.
+
+        Mirrors it branch for branch -- oriented results when they carry
+        polygons, axis-aligned otherwise -- because these two lists are zipped.
+        Any divergence would cache one label's code verdict against another
+        label's track, which is the wrong-id failure this whole feature exists
+        to prevent, reintroduced by a bookkeeping mistake.
+        """
+        import numpy as np
+
+        def ids_of(box_set, count):
+            raw = getattr(box_set, "id", None)
+            if raw is None:
+                return [None] * count
+            try:
+                values = raw.cpu().numpy()
+            except AttributeError:
+                values = np.asarray(raw)
+            except Exception:
+                return [None] * count
+            out = [None] * count
+            for i in range(min(count, len(values))):
+                try:
+                    out[i] = int(values[i])
+                except Exception:
+                    pass
+            return out
+
+        found = []
+        for r in results or []:
+            obb = getattr(r, "obb", None)
+            if obb is not None:
+                polys = getattr(obb, "xyxyxyxy", None)
+                length = 0
+                try:
+                    length = len(polys) if polys is not None else 0
+                except Exception:
+                    length = 0
+                if length:
+                    found.extend(ids_of(obb, length))
+                    continue
+            boxes = getattr(r, "boxes", None)
+            if boxes is None:
+                continue
+            xyxy = getattr(boxes, "xyxy", None)
+            try:
+                length = len(xyxy) if xyxy is not None else 0
+            except Exception:
+                length = 0
+            found.extend(ids_of(boxes, length))
+        return found
+
     def _reject_unknown(self, named, crops_used):
         """Replace any identity whose crop does not sit where its class sits.
 
@@ -789,16 +939,20 @@ class InferenceWorker(QObject):
         # whether the crop sits where that class actually sits.
         named = self._reject_unknown(named, len(usable))
 
-        # Put them back against the original detections, including the ones
-        # whose crop failed -- position is what ties identity to box.
+        # Put them back against the original detections BEFORE reading codes.
+        # A code's region is a fraction of its label's quad, so verification
+        # needs each identity sitting on the detection it belongs to -- and
+        # the crops that failed have no identity to verify.
         out, i = [], 0
         for crop in crops:
             if crop is None:
-                out.append((logic.UNKNOWN, 0.0))
+                out.append((logic.UNKNOWN, 0.0, ""))
             else:
-                out.append(named[i] if i < len(named) else (logic.UNKNOWN, 0.0))
+                out.append(named[i] if i < len(named)
+                           else (logic.UNKNOWN, 0.0, ""))
                 i += 1
-        return out
+        return self._verify_codes(frame, results, out)
+
 
     @Slot()
     def stop(self) -> None:

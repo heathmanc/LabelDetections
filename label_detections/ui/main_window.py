@@ -98,6 +98,7 @@ from label_detections.core import evaluation as evaluation_logic
 from label_detections.core import dataset_health
 from label_detections.core import storage as storage_mod
 from label_detections.ui import novelty as novelty_ui
+from label_detections.core import code_reader
 from label_detections.core import class_stats
 from label_detections.core import persistence
 from label_detections.core import imageio
@@ -2405,6 +2406,34 @@ class MainWindow(QMainWindow):
             "A refusal always shows its distance whether this is on or not.")
         cv_.addWidget(self.live_novelty_debug_check)
 
+        code_row = QHBoxLayout()
+        self.live_read_codes_check = QCheckBox("Verify the printed code")
+        self.live_read_codes_check.setChecked(bool(
+            (load_test_settings() or {}).get("read_codes", False)))
+        self.live_read_codes_check.stateChanged.connect(
+            lambda _s: self._save_test_settings())
+        self.live_read_codes_check.setToolTip(
+            "Decode the barcode or 2D code on each detected label and check it "
+            "against the label library, out of the full-resolution frame.\n\n"
+            "This is the only check here that identifies rather than guesses. "
+            "The detector, the classifier and the novelty profile all answer "
+            "'what does this look like', and all three can be confidently "
+            "wrong about a label nobody has ever enrolled. A decoded code is "
+            "the part number printed on the part: it does not need to have "
+            "seen the wrong label before in order to refuse it.\n\n"
+            "A code that decodes to another enrolled label's pattern relabels "
+            "the detection -- the printing outranks the classifier. One that "
+            "matches no enrolled pattern, or does not decode where the library "
+            "says there is one, reads 'unknown'.\n\n"
+            "Needs a code region drawn on the artwork and a pattern set for it "
+            "(Define Regions). 'What can be verified' lists which labels are "
+            "covered and which are still resting on the classifier alone.")
+        code_row.addWidget(self.live_read_codes_check, 1)
+        self.code_readiness_btn = QPushButton("What can be verified")
+        self.code_readiness_btn.clicked.connect(self._show_code_readiness)
+        code_row.addWidget(self.code_readiness_btn)
+        cv_.addLayout(code_row)
+
         rate_row = QHBoxLayout()
         self.live_rate_spin = QDoubleSpinBox()
         self.live_rate_spin.setRange(0.5, 60.0)
@@ -2578,6 +2607,9 @@ class MainWindow(QMainWindow):
             crop_px=int(self.live_crop_spin.value()),
             identity_floor=float(self.live_floor_spin.value()),
             novelty_debug=bool(self.live_novelty_debug_check.isChecked()),
+            read_codes=bool(self.live_read_codes_check.isChecked()),
+            **dict(zip(("code_specs", "code_patterns"),
+                       code_reader.library_snapshot(self.library))),
             # The camera is already open by this point, so the warm-up can use
             # the size the live path will actually hand over.
             warm_shape=(self.last_raw.shape if self.last_raw is not None else None))
@@ -5554,6 +5586,9 @@ class MainWindow(QMainWindow):
                 "novelty_debug": (bool(self.live_novelty_debug_check.isChecked())
                                   if hasattr(self, "live_novelty_debug_check")
                                   else False),
+                "read_codes": (bool(self.live_read_codes_check.isChecked())
+                               if hasattr(self, "live_read_codes_check")
+                               else False),
                 "max_infer_rate": (float(self.live_rate_spin.value())
                                    if hasattr(self, "live_rate_spin") else 6.7),
                 "hide_saved_labels": bool(self.test_hide_saved_labels_check.isChecked()),
@@ -7631,6 +7666,23 @@ class MainWindow(QMainWindow):
             self, "Classification crops (the folder containing train/)",
             str(EXPORT_DIR))
         return Path(picked) if picked else None
+
+    def _show_code_readiness(self) -> None:
+        """Which labels code reading can vouch for, and which it cannot.
+
+        The same rule the novelty report follows. "Code verification is on" is
+        not a useful sentence when half the library declares no code, and the
+        half it does not cover is exactly where an unenrolled label still gets
+        through -- so the answer has to name names.
+        """
+        from label_detections.core import code_reader
+        from label_detections.core import codes as code_logic
+
+        ok, reason = code_reader.available()
+        lines = [] if ok else [f"NOT INSTALLED: {reason}", ""]
+        lines.append(code_logic.readiness(
+            self.library.all() if self.library is not None else []))
+        QMessageBox.information(self, "What can be verified", "\n".join(lines))
 
     def _build_novelty_profile(self) -> None:
         """Measure where each enrolled label sits, so the rest can be refused."""
