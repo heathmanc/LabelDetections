@@ -215,9 +215,68 @@ class InferenceWorker(QObject):
                     f"{self._classifier_path}\n\n{exc}\n\n"
                     f"Running stage 1 only -- boxes will have no identity.")
                 self._classifier = None
+        # Build Ultralytics' predictor HERE, on this thread, before any frame
+        # arrives. It is created lazily on the first predict/track call, and
+        # setting it up runs select_device -> torch.cuda.set_device.
+        #
+        # That is not a detail. With inference called directly it happened on
+        # the GUI thread and was merely a slow first frame. Moved to this
+        # thread it deadlocked: a py-spy dump of a frozen session showed this
+        # worker stopped inside torch.cuda.set_device, reached through
+        # setup_model on the first track() call, and never coming back --
+        # detections never started and Stop then blocked on a thread that could
+        # not finish.
+        #
+        # Doing it during load costs nothing that was not already going to be
+        # paid, removes the first-frame latency spike, and moves the risky call
+        # into the one place already expected to take time, where the status
+        # reads "Loading the model..." and the window stays live.
+        self._warm_up()
+
         which = ("detector + classifier" if self._classifier is not None
                  else f"{task or 'detector'} only, no stage 2")
         self.loaded.emit(f"Loaded {which}: {self._path}\n{self._device_report()}")
+
+    def _warm_up(self) -> None:
+        """One inference on a blank frame, to build the predictor.
+
+        Through the same call the live path uses, so the code being warmed is
+        the code that will run -- with persist off, so no track state from a
+        blank frame carries into the first real one.
+
+        Failure here is reported, not raised: a warmup that cannot run is worth
+        saying out loud, and the first real frame may still work.
+        """
+        if self._model is None:
+            return
+        import numpy as np
+
+        size = max(32, int(self._imgsz))
+        blank = np.zeros((size, size, 3), dtype=np.uint8)
+        args = {"imgsz": self._imgsz, "conf": self._conf, "verbose": False}
+        if self._device is not None:
+            args["device"] = self._device
+        try:
+            if self._track:
+                self._model.track(blank, persist=False, tracker=self._tracker,
+                                  **args)
+            else:
+                self._model.predict(blank, **args)
+        except Exception as exc:
+            self.failed.emit(
+                f"The model loaded but its first run failed: "
+                f"{type(exc).__name__}: {exc}")
+            return
+        if self._classifier is not None:
+            try:
+                crop = np.zeros((self._crop_px, self._crop_px, 3), dtype=np.uint8)
+                self._classifier.predict(
+                    [crop], imgsz=self._crop_px, verbose=False,
+                    **({"device": self._device} if self._device is not None else {}))
+            except Exception as exc:
+                self.failed.emit(
+                    f"The classifier loaded but its first run failed: "
+                    f"{type(exc).__name__}: {exc}")
 
     def _torch_device(self) -> str:
         """The device string torch wants, from what the UI collected.

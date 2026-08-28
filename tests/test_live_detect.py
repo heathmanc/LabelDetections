@@ -1844,3 +1844,60 @@ def test_stopping_unwires_the_worker_so_a_restart_does_not_double_up():
     finally:
         win._live_worker = None
         win._live_thread = None
+
+
+# --- the predictor is built at load, not on the first frame -----------------
+
+@ui
+def test_loading_builds_the_predictor_rather_than_leaving_it_to_frame_one():
+    """A py-spy dump of a frozen session showed the worker stopped inside
+    torch.cuda.set_device, reached through Ultralytics' setup_model on the
+    first track() call. Called directly that ran on the GUI thread and was
+    merely a slow first frame; moved to the worker thread it deadlocked."""
+    from label_detections.ui.live_detect import InferenceWorker
+
+    calls = []
+
+    class FakeModel:
+        task = "obb"
+
+        def to(self, target):
+            calls.append(("to", target))
+            return self
+
+        def track(self, frame, **kw):
+            calls.append(("track", frame.shape, kw.get("persist")))
+            return []
+
+        def predict(self, frame, **kw):
+            calls.append(("predict", getattr(frame, "shape", None)))
+            return []
+
+    worker = InferenceWorker("d.pt", 640, 0.4, None, track=True)
+    worker._model = FakeModel()
+    worker._warm_up()
+
+    assert calls, "load left the predictor to be built by the first real frame"
+    kind, shape, persist = calls[0]
+    assert kind == "track", "warmed through a different call than the live path uses"
+    assert shape == (640, 640, 3)
+    assert persist is False, "a blank frame started a track that would persist"
+
+
+@ui
+def test_a_warmup_failure_is_reported_and_does_not_take_the_load_down():
+    from label_detections.ui.live_detect import InferenceWorker
+
+    class Broken:
+        task = "obb"
+
+        def predict(self, *a, **k):
+            raise RuntimeError("no CUDA kernels for this card")
+
+    worker = InferenceWorker("d.pt", 640, 0.4, None, track=False)
+    worker._model = Broken()
+    said = []
+    worker.failed.connect(said.append)
+    worker._warm_up()                     # must not raise
+    assert said and "first run failed" in said[0]
+    assert "no CUDA kernels" in said[0]

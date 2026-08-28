@@ -2513,7 +2513,14 @@ class MainWindow(QMainWindow):
             # Bounded: a stuck inference must not hang the window on close.
             # A long first inference plus CUDA teardown can exceed a few
             # seconds, so this is generous rather than snappy.
-            finished = bool(thread.wait(10000))
+            # Short, because a worker that has not finished by now is not
+            # going to. This is the other half of what a stuck worker felt
+            # like: Stop froze the window for ten seconds and looked as dead as
+            # the thing it was trying to stop. The orphan path below already
+            # handles a thread that outlives the request, safely -- it keeps
+            # the references so nothing frees a model under a live forward
+            # pass -- so waiting longer buys nothing but a frozen window.
+            finished = bool(thread.wait(2000))
         if finished:
             self._live_thread = None
             self._live_worker = None
