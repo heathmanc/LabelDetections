@@ -7850,7 +7850,7 @@ class MainWindow(QMainWindow):
         self._show_code_diagnosis(
             report,
             f"Testing {label_id} — {source}\n\n"
-            + code_reader.diagnosis_text(report))
+            + code_reader.diagnosis_text(report), label_id)
 
     def _code_test_subject(self):
         """``(source, label_id, frame, quad)`` for the thing to test.
@@ -7901,7 +7901,8 @@ class MainWindow(QMainWindow):
         return ("the box drawn on this image", self.label_id, frame,
                 box.to_dict().get("points") or [])
 
-    def _show_code_diagnosis(self, report: dict, text: str) -> None:
+    def _show_code_diagnosis(self, report: dict, text: str,
+                             tested: str = "") -> None:
         """The crops, at real pixels, above the reading of them."""
         from PySide6.QtGui import QImage, QPixmap
         from PySide6.QtWidgets import QDialog, QDialogButtonBox, QScrollArea
@@ -7955,13 +7956,13 @@ class MainWindow(QMainWindow):
             "A barcode that will not read is a question about pixels, and a "
             "screenshot of a scaled preview is not those pixels. This saves "
             "what the decoder was actually handed.")
-        save.clicked.connect(lambda: self._save_code_crops(report))
+        save.clicked.connect(lambda: self._save_code_crops(report, tested))
         buttons.rejected.connect(dialog.reject)
         buttons.accepted.connect(dialog.accept)
         outer.addWidget(buttons)
         dialog.exec()
 
-    def _save_code_crops(self, report: dict) -> None:
+    def _save_code_crops(self, report: dict, tested: str = "") -> None:
         """Write the diagnostic's crops out, losslessly.
 
         PNG, deliberately: the question is what the bars look like, and JPEG
@@ -7976,12 +7977,12 @@ class MainWindow(QMainWindow):
             crop = entry.get("crop")
             if crop is not None and getattr(crop, "size", 0):
                 role = str(getattr(entry["spec"], "role", "") or index)
-                path = folder / f"{stamp}_{safe_token(self.label_id)}_{safe_token(role)}.png"
+                path = folder / f"{stamp}_{safe_token(tested or self.label_id)}_{safe_token(role)}.png"
                 cv2.imwrite(str(path), crop)
                 written.append(path)
         whole = (report.get("whole") or {}).get("crop")
         if whole is not None and getattr(whole, "size", 0):
-            path = folder / f"{stamp}_{safe_token(self.label_id)}_whole.png"
+            path = folder / f"{stamp}_{safe_token(tested or self.label_id)}_whole.png"
             cv2.imwrite(str(path), whole)
             written.append(path)
         if not written:

@@ -100,6 +100,49 @@ class Verdict:
         return self.state in (CONTRADICTED, UNREADABLE)
 
 
+# How many modules wide the fixed-width symbologies are. A module is the
+# narrowest bar, and it is the unit that decides whether a camera can read a
+# code at all -- everything else about resolution is downstream of it.
+MODULES = {"upca": 95, "upce": 51, "ean13": 95, "ean8": 67}
+
+# Pixels per module a PHOTOGRAPHED code needs, as opposed to a rendered one.
+# The textbook figure is 2, and that is true of a clean scan. Measured here on
+# rendered symbols put through this pipeline -- seen at an angle, rectified,
+# and carrying the blur that resampling leaves -- 2 failed with any blur at
+# all, 3 failed once the blur was heavy, and 4 read in every condition tried.
+# Below this a code reads on a good frame and not on the next one, which is
+# worse on a line than not reading at all: it looks like an intermittent fault
+# rather than a camera that is too far away.
+MIN_PX_PER_MODULE = 4.0
+
+
+def px_per_module(symbology: str, symbol_px: float) -> float:
+    """Pixels per narrowest bar, or 0 when the symbology has no fixed width.
+
+    Code 128 and friends vary with how much data they carry, so there is no
+    honest number for them without decoding first.
+    """
+    modules = MODULES.get(str(symbology or "").lower())
+    if not modules or symbol_px <= 0:
+        return 0.0
+    return float(symbol_px) / float(modules)
+
+
+def resolution_note(symbology: str, symbol_px: float) -> str:
+    """Whether this code has the pixels to be read reliably, in one sentence."""
+    per = px_per_module(symbology, symbol_px)
+    if not per:
+        return ""
+    verdict = ("comfortable" if per >= MIN_PX_PER_MODULE * 1.5
+               else "workable" if per >= MIN_PX_PER_MODULE
+               else "MARGINAL -- reads on a good frame and not on the next one")
+    return (f"{symbol_px:.0f} px across the symbol, "
+            f"{per:.2f} px per module: {verdict}. "
+            f"A photographed and rectified code wants "
+            f"{MIN_PX_PER_MODULE:.0f}+ per module; the textbook 2 is for a "
+            f"clean scan, not for one that has been through a lens and a warp.")
+
+
 def matches(pattern: str, text: str) -> bool:
     """Does the decoded text satisfy a label's pattern?
 

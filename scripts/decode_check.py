@@ -108,9 +108,19 @@ def main(argv: list[str]) -> int:
         if found:
             status = 0
         else:
-            print("\n  Nothing read on any attempt. If the bars look clean at "
-                  "full size, measure them: a UPC-A needs about 190 px across "
-                  "the symbol, and more once a warp has softened it.")
+            print("\n  Nothing read on any attempt.")
+            # Without the label definition this cannot know the region, so it
+            # offers the arithmetic for the two plausible readings of the crop
+            # rather than pretending to one answer.
+            from label_detections.core import codes as cd
+            print(f"     If this crop is the code alone, that is "
+                  f"{cd.px_per_module('upca', width):.2f} px per module for a "
+                  f"UPC-A.")
+            print(f"     If the code is about 80% of it, "
+                  f"{cd.px_per_module('upca', width * 0.8):.2f}.")
+            print(f"     Under {cd.MIN_PX_PER_MODULE:.0f} is marginal for a "
+                  f"photographed, rectified code -- it reads on a good frame "
+                  f"and not on the next one, and no decoder setting fixes it.")
     return status
 
 

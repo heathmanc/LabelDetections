@@ -372,6 +372,17 @@ def diagnosis_text(report: dict) -> str:
         else:
             lines.append(f"Region '{role}' ({size}): nothing decoded"
                          + (f" -- {entry['note']}" if entry["note"] else ""))
+        # The one number that says whether this could ever have worked. The
+        # crop carries the region plus its margin, so the symbol itself is the
+        # declared width as a share of that.
+        declared = list(getattr(entry["spec"], "region", None) or [])
+        if crop is not None and len(declared) >= 4 and declared[2] > 0:
+            grown = declared[2] * (1.0 + region_margin(entry["spec"]))
+            note = logic.resolution_note(
+                getattr(entry["spec"], "symbology", ""),
+                crop.shape[1] * declared[2] / grown)
+            if note:
+                lines.append(f"   {note}")
 
     if whole.get("crop") is not None:
         crop = whole["crop"]
@@ -479,13 +490,12 @@ def diagnosis_text(report: dict) -> str:
             "from the whole label. That makes it a picture problem rather than "
             "a placement one, so redrawing the region will not help.\n\n"
             "Every fallback was tried: greyscale, a fixed threshold, upscaling, "
-            "and a single colour channel. What is left is the symbol itself. "
-            "Too few pixels across the bars (a UPC-A wants about 190 across the "
-            "symbol, and more once a warp has softened it), out of focus, glare, "
-            "a steep angle closing the bars up, or print quality. Compare the "
-            "crop above against those -- if the bars look clean to you at this "
-            "size, the next thing to check is whether they are clean at full "
-            "resolution rather than after the warp.")
+            "downscaling, and a single colour channel. What is left is the "
+            "picture. Read the pixels-per-module line above first -- if it says "
+            "MARGINAL, that is the answer and no decoder setting fixes it. The "
+            "label needs to fill more of the frame, through a longer lens or a "
+            "closer camera. Otherwise: focus, glare across the symbol, or an "
+            "angle steep enough to close the bars up.")
     return "\n".join(lines)
 
 

@@ -556,12 +556,43 @@ def test_a_whole_label_read_with_an_empty_region_blames_the_placement():
 
 
 def test_both_empty_blames_the_picture_rather_than_the_placement():
-    """No placement change fixes a code the optics never resolved."""
+    """No placement change fixes a code the optics never resolved, so the reply
+    has to point at the camera rather than at the region."""
     report, cr = _report()
     text = cr.diagnosis_text(report)
-    assert "picture problem" in text
-    assert "190" in text, "should give the number to compare the crop against"
+    assert "NOT DECODING ANYWHERE" in text
+    assert "fill more of the frame" in text
     assert "LANDING IN THE WRONG PLACE" not in text
+
+
+def test_the_pixels_per_module_is_reported_for_a_fixed_width_symbology():
+    """The one number that says whether the crop could ever have worked, and
+    the thing that turns "it is intermittent" into "it is too far away"."""
+    assert "MARGINAL" in _resolution_line(398)
+
+
+def _resolution_line(crop_width: int) -> str:
+    """Just the measured verdict, not the surrounding advice -- which mentions
+    MARGINAL too, and would make this pass whatever the number said."""
+    report, cr = _report(region_px=(crop_width, 211))
+    report["regions"][0]["spec"].symbology = "upca"
+    report["regions"][0]["spec"].region = [0.842, 0.239, 0.151, 0.197]
+    return next(line for line in cr.diagnosis_text(report).split("\n")
+                if "px per module" in line)
+
+
+def test_a_roomy_crop_is_not_called_marginal():
+    line = _resolution_line(1200)
+    assert "MARGINAL" not in line and "comfortable" in line
+
+
+def test_a_variable_width_symbology_gets_no_invented_number():
+    """Code 128 varies with how much data it carries, so there is no honest
+    pixels-per-module without decoding it first."""
+    report, cr = _report(region_px=(398, 211))
+    report["regions"][0]["spec"].symbology = "code128"
+    report["regions"][0]["spec"].region = [0.842, 0.239, 0.151, 0.197]
+    assert "px per module" not in cr.diagnosis_text(report)
 
 
 def test_the_crop_size_is_always_reported():
