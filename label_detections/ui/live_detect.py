@@ -749,7 +749,7 @@ class InferenceWorker(QObject):
             specs = self._code_specs.get(name) or []
             if (not name or name == live_logic.UNKNOWN
                     or not code_logic.demanded(specs)):
-                out.append((name, conf, note))
+                out.append((name, conf, note, name))
                 continue
 
             track_id = track_ids[index] if index < len(track_ids) else None
@@ -768,9 +768,9 @@ class InferenceWorker(QObject):
                     self._code_cache[track_id] = verdict
 
             resolved = code_logic.resolve(name, verdict)
-            mark = code_logic.plate_note(verdict)
+            mark = code_logic.plate_note(verdict, name)
             out.append((resolved, conf,
-                        " ".join(x for x in (note, mark) if x)))
+                        " ".join(x for x in (note, mark) if x), name))
         # Tracks that have left take their verdicts with them; ids get reused.
         if len(self._code_cache) > 256:
             self._code_cache.clear()

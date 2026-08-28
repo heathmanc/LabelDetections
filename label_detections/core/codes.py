@@ -202,12 +202,20 @@ def resolve(proposed: str, verdict_: Verdict) -> str:
     return UNKNOWN
 
 
-def plate_note(verdict_: Verdict) -> str:
-    """The short form for the drawn plate, read off a moving part."""
+def plate_note(verdict_: Verdict, proposed: str = "") -> str:
+    """The short form for the drawn plate, read off a moving part.
+
+    A refusal names the label whose code it wanted. "unknown ... no code" says
+    a code is missing without saying whose, and the box has just been stripped
+    of the only clue -- the identity it was refused for. A relabel is the one
+    case that needs no name, because the box already reads as the label the
+    code claimed.
+    """
+    whose = f" ({proposed})" if proposed else ""
     return {
         CONFIRMED: "code ok",
-        CONTRADICTED: "WRONG CODE" if verdict_.label_id else "NO MATCH",
-        UNREADABLE: "no code",
+        CONTRADICTED: "WRONG CODE" if verdict_.label_id else f"NO MATCH{whose}",
+        UNREADABLE: f"no code{whose}",
         PRESENT: "code unchecked",
     }.get(verdict_.state, "")
 

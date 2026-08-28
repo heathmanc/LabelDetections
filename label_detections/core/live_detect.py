@@ -558,6 +558,11 @@ def apply_identities(items: list[dict], identities) -> list[dict]:
         # that should have happened and did not.
         note = identity[2] if len(identity) > 2 else ""
         merged = dict(item)
+        # What stage 2 called it before the code had its say. A code refusal
+        # rewrites the name to "unknown", and this is then the only place that
+        # answer survives -- which matters because a code region is stored per
+        # label, so it is also the only way to look one up afterwards.
+        merged["proposed"] = (identity[3] if len(identity) > 3 else "") or name
         merged["detector_name"] = item.get("name", "")
         merged["name"] = name
         merged["identity_conf"] = float(conf)

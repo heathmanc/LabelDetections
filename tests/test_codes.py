@@ -372,7 +372,7 @@ def test_a_label_with_nothing_demanded_is_not_decoded_at_all(monkeypatch):
     results = [_Res([[0, 0, 10, 10]], ids=[7])]
     out = worker._verify_codes(object(), results, [("PC680", 0.99, "")])
     assert not calls
-    assert out[0] == ("PC680", 0.99, "")
+    assert out[0] == ("PC680", 0.99, "", "PC680")
 
 
 def test_an_already_unknown_detection_is_not_decoded(monkeypatch):
@@ -575,3 +575,122 @@ def test_diagnose_is_safe_with_nothing_to_work_on():
 
     report = cr.diagnose(None, None, [])
     assert report["regions"] == [] and report["whole"] is None
+
+
+# --- naming the label a refusal was about -----------------------------------
+#
+# A code refusal rewrites the name to "unknown", which strips the box of the
+# one clue anybody investigating it needs: which label's code was expected.
+
+def test_a_refusal_names_the_label_whose_code_was_wanted():
+    """"unknown ... no code" says a code is missing without saying whose."""
+    assert cd.plate_note(cd.Verdict(cd.UNREADABLE), "PC680") == "no code (PC680)"
+    assert cd.plate_note(cd.Verdict(cd.CONTRADICTED), "PC680") == "NO MATCH (PC680)"
+
+
+def test_a_relabel_does_not_repeat_the_name_it_moved_to():
+    """The box already reads as the label the code claimed."""
+    assert cd.plate_note(cd.Verdict(cd.CONTRADICTED, "sp_g31"), "PC680") \
+        == "WRONG CODE"
+
+
+def test_a_confirmed_read_stays_short():
+    assert cd.plate_note(cd.Verdict(cd.CONFIRMED), "PC680") == "code ok"
+
+
+def test_the_proposal_survives_onto_the_item():
+    """Once the name is rewritten to unknown, this is the only place stage 2's
+    answer still exists -- and it is what a code region is looked up by."""
+    from label_detections.core import live_detect as ld
+
+    items = ld.apply_identities(
+        [{"name": "label", "conf": 0.97}],
+        [("unknown", 0.99, "no code (PC680)", "PC680")])
+    assert items[0]["proposed"] == "PC680"
+    assert items[0]["name"] == "unknown"
+
+
+def test_an_identity_with_no_proposal_falls_back_to_its_own_name():
+    from label_detections.core import live_detect as ld
+
+    items = ld.apply_identities([{"name": "label", "conf": 0.9}],
+                                [("PC680", 0.99)])
+    assert items[0]["proposed"] == "PC680"
+
+
+# --- testing the thing on screen, not the thing in a dropdown ---------------
+#
+# An operator holding a PC680 under the camera, asking why its box said "no
+# code", was told that '2220-9199' declares no code for inspection -- an answer
+# about a label nobody was presenting. The Class dropdown and the detection in
+# front of the lens are different things, and the interesting case is exactly
+# when they differ.
+
+@pytest.fixture
+def win():
+    import os
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    pytest.importorskip("PySide6.QtWidgets")
+    from PySide6.QtWidgets import QApplication
+    QApplication.instance() or QApplication([])
+    from label_detections.ui.main_window import MainWindow
+    return MainWindow()
+
+
+def _quad():
+    return [[10.0, 10.0], [110.0, 10.0], [110.0, 70.0], [10.0, 70.0]]
+
+
+def test_a_live_detection_is_preferred_over_the_open_label(win):
+    import numpy as np
+
+    win.label_id = "2220-9199"
+    win._live_result_frame = np.zeros((200, 400, 3), dtype=np.uint8)
+    win._live_result_items = [
+        {"name": "unknown", "proposed": "PC680", "points": _quad()}]
+    source, label_id, frame, quad = win._code_test_subject()
+    assert label_id == "PC680", "answered about the dropdown, not the camera"
+    assert "live detection" in source
+    assert quad == _quad() and frame is not None
+
+
+def test_the_identity_comes_from_before_the_code_refused_it(win):
+    """A refusal rewrites the name to unknown, so `name` alone would leave
+    nothing to look a code region up by -- which is the state every box in the
+    failing screenshot was in."""
+    import numpy as np
+
+    win.label_id = ""
+    win._live_result_frame = np.zeros((200, 400, 3), dtype=np.uint8)
+    win._live_result_items = [
+        {"name": "unknown", "proposed": "PC680", "points": _quad()}]
+    assert win._code_test_subject()[1] == "PC680"
+
+
+def test_detections_with_no_identity_at_all_say_so_rather_than_guessing(win, monkeypatch):
+    import numpy as np
+
+    import label_detections.ui.main_window as mw
+
+    said = []
+    monkeypatch.setattr(mw.QMessageBox, "information",
+                        staticmethod(lambda *a, **k: said.append(a[2])))
+    win._live_result_frame = np.zeros((200, 400, 3), dtype=np.uint8)
+    win._live_result_items = [{"name": "unknown", "points": _quad()}]
+    assert win._code_test_subject()[1] is None
+    assert "none of them carries a label identity" in said[0].replace("\n", " ")
+
+
+def test_with_no_live_result_it_falls_back_to_the_drawn_box(win, monkeypatch):
+    """Testing a label without the camera running is still worth doing."""
+    import numpy as np
+
+    import label_detections.ui.main_window as mw
+
+    monkeypatch.setattr(mw.QMessageBox, "information",
+                        staticmethod(lambda *a, **k: None))
+    win._live_result_items = []
+    win._live_result_frame = None
+    win.label_id = "not_a_real_label"
+    assert win._code_test_subject()[1] is None      # no such label, no crash

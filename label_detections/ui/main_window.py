@@ -7818,36 +7818,87 @@ class MainWindow(QMainWindow):
         """
         from label_detections.core import code_reader
 
-        label = self.library.get(self.label_id) if self.label_id else None
+        from label_detections.core import codes as code_logic
+
+        # The detection on screen, not the label in the Class dropdown. Those
+        # are different things and the interesting case is exactly when they
+        # differ: an operator holding a PC680 under the camera, asking why its
+        # box says "no code", got told that 2220-9199 declares no code -- an
+        # answer about a label nobody was presenting.
+        source, label_id, frame, quad = self._code_test_subject()
+        if label_id is None:
+            return
+        label = self.library.get(label_id)
         if label is None:
-            QMessageBox.information(self, "Test Code Read", "Open a label first.")
+            QMessageBox.information(
+                self, "Test Code Read",
+                f"'{label_id}' is not in the label library, so there is nothing "
+                f"to read against.")
             return
         specs = code_reader.specs_from(label)
-        from label_detections.core import codes as code_logic
         if not code_logic.demanded(specs):
             QMessageBox.information(
                 self, "Test Code Read",
-                f"'{self.label_id}' declares no code for inspection, so there is "
-                f"nothing to read. Draw its code region and set the policy to "
+                f"'{label_id}' declares no code for inspection, so there is "
+                f"nothing to read.\n\nSource: {source}\n\n"
+                f"Open that label, draw its code region and set the policy to "
                 f"must_decode first.")
             return
 
+        report = code_reader.diagnose(frame, quad, specs)
+        self._show_code_diagnosis(
+            report,
+            f"Testing {label_id} — {source}\n\n"
+            + code_reader.diagnosis_text(report))
+
+    def _code_test_subject(self):
+        """``(source, label_id, frame, quad)`` for the thing to test.
+
+        A live detection first, because that is what somebody is looking at
+        when they ask why a box said "no code". Its identity comes from
+        ``proposed`` -- the name stage 2 gave it before a code refusal rewrote
+        it to unknown, which is the only place that name survives.
+
+        Falls back to the box drawn on the current image, for testing a label
+        without the camera running.
+        """
+        items = getattr(self, "_live_result_items", None) or []
+        frame = getattr(self, "_live_result_frame", None)
+        if items and frame is not None:
+            for item in items:
+                name = str(item.get("proposed") or item.get("name") or "")
+                points = item.get("points") or []
+                if not name or name == live_logic.UNKNOWN or len(points) < 4:
+                    continue
+                return (f"live detection of {name}", name, frame, points)
+            QMessageBox.information(
+                self, "Test Code Read",
+                "The live view has detections, but none of them carries a label "
+                "identity to look a code region up on.\n\n"
+                "Stage 2 either did not run or refused them all, and a code "
+                "region is stored per label -- so there is nothing to crop.")
+            return ("", None, None, None)
+
+        label = self.library.get(self.label_id) if self.label_id else None
+        if label is None:
+            QMessageBox.information(
+                self, "Test Code Read",
+                "Open a label, or start live detect and point the camera at one.")
+            return ("", None, None, None)
         frame = self.last_raw
         if frame is None and self.current_image_path:
             frame = cv2.imread(str(self.current_image_path))
         if frame is None:
             QMessageBox.information(
                 self, "Test Code Read",
-                "No frame. Open one of this label's images, or start the live "
-                "preview, and draw the label's box.")
-            return
+                "No frame. Open one of this label's images, or start live "
+                "detect and point the camera at the label.")
+            return ("", None, None, None)
         box = self._label_box_for_regions(label)
         if box is None:
-            return
-
-        report = code_reader.diagnose(
-            frame, box.to_dict().get("points") or [], specs)
-        self._show_code_diagnosis(report, code_reader.diagnosis_text(report))
+            return ("", None, None, None)
+        return ("the box drawn on this image", self.label_id, frame,
+                box.to_dict().get("points") or [])
 
     def _show_code_diagnosis(self, report: dict, text: str) -> None:
         """The crops, at real pixels, above the reading of them."""
