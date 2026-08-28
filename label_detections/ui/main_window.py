@@ -2752,8 +2752,13 @@ class MainWindow(QMainWindow):
                 self._scaled_overlay_items(items, result_scale))
 
         if getattr(self, "_live_tracking", False):
+            # Both confidences, so the readout and the drawn plate report the
+            # same object the same way. identity_conf is absent when stage 2
+            # did not run or its answers did not line up with the boxes, and
+            # the track then carries the detector's number alone.
             self._live_tracks.update(
-                [(i.get("track_id"), i.get("name"), i.get("conf", 0.0)) for i in items])
+                [(i.get("track_id"), i.get("name"), i.get("conf", 0.0),
+                  i.get("identity_conf")) for i in items])
             summary = live_logic.track_summary(self._live_tracks, self.label_id,
                                                self._live_rolling)
         else:

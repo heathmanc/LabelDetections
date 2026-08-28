@@ -289,8 +289,17 @@ class Track:
     max_conf: float = 0.0
     _sum: float = 0.0
     last_seen: float = 0.0
+    # Stage 2's own confidence, averaged over the frames that had one. Kept
+    # apart from the box confidence rather than replacing it: they answer
+    # different questions -- "is there a label here, and is this its outline"
+    # against "which label is it" -- and a converged classifier over a handful
+    # of classes reports the second one at 1.00 almost always, so collapsing
+    # the two would throw away the number that actually moves.
+    _id_sum: float = 0.0
+    _id_frames: int = 0
 
-    def record(self, conf: float, now: float) -> None:
+    def record(self, conf: float, now: float,
+               identity_conf: float | None = None) -> None:
         conf = float(conf)
         self.frames += 1
         self._sum += conf
@@ -298,10 +307,22 @@ class Track:
         self.min_conf = min(self.min_conf, conf)
         self.max_conf = max(self.max_conf, conf)
         self.last_seen = now
+        if identity_conf is not None:
+            self._id_sum += float(identity_conf)
+            self._id_frames += 1
 
     @property
     def mean_conf(self) -> float:
         return self._sum / self.frames if self.frames else 0.0
+
+    @property
+    def has_identity(self) -> bool:
+        """Did stage 2 name this track, on any frame?"""
+        return self._id_frames > 0
+
+    @property
+    def mean_identity(self) -> float:
+        return self._id_sum / self._id_frames if self._id_frames else 0.0
 
 
 class TrackBook:
@@ -316,9 +337,12 @@ class TrackBook:
         self.reacquired = 0
 
     def update(self, detections, now: float | None = None) -> None:
-        """``detections`` are ``(track_id, name, confidence)``; ids may be None."""
+        """``detections`` are ``(track_id, name, box_conf)``, optionally with a
+        fourth element for stage 2's confidence; ids may be None."""
         now = time.monotonic() if now is None else now
-        for track_id, name, conf in detections:
+        for detection in detections:
+            track_id, name, conf = detection[0], detection[1], detection[2]
+            identity_conf = detection[3] if len(detection) > 3 else None
             if track_id is None:
                 continue
             key = int(track_id)
@@ -333,7 +357,7 @@ class TrackBook:
                 self.reacquired += 1
                 track = Track(track_id=key, name=str(name))
                 self._tracks[key] = track
-            track.record(conf, now)
+            track.record(conf, now, identity_conf)
         self.prune(now)
 
     def prune(self, now: float | None = None) -> None:
@@ -363,9 +387,19 @@ class TrackBook:
 # still recorded -- rows() orders by them, and a mean is only worth reading
 # because it is held over frames -- just not printed.
 def track_line(track: Track) -> str:
-    # The id and the confidence, nothing else -- the same rule the drawn plate
-    # follows. The track number is still the key the book groups by; it just is
-    # not something anyone reads while parts are moving past.
+    # The id first and the same confidence the drawn plate carries, so the two
+    # readings of one object agree. The track number is still the key the book
+    # groups by; it just is not something anyone reads while parts move past.
+    #
+    # The box confidence follows it, named. Two bare numbers that disagree read
+    # as a bug -- the plate says 1.00 and the readout said 0.91 for the same
+    # battery -- when they are measuring different things: stage 2 is sure
+    # which label it is, stage 1 is less sure it drew the outline correctly.
+    # Naming the second one is what makes the pair legible, and the box number
+    # is the one that moves, so it is worth keeping in view.
+    if track.has_identity:
+        return (f"{track.name} {track.mean_identity:.2f}"
+                f"   box {track.mean_conf:.2f}")
     return f"{track.name} {track.mean_conf:.2f}"
 
 

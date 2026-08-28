@@ -524,6 +524,83 @@ def test_an_empty_book_reads_as_empty_rather_than_blank():
     assert ld.TrackBook().text() == "No tracked objects."
 
 
+# --- the two confidences ----------------------------------------------------
+#
+# The drawn plate carries stage 2's number and the readout used to carry stage
+# 1's, with nothing on screen saying so. The same battery read 1.00 on the box
+# and 0.91 in the pane, which looks exactly like a bug and is not one: a
+# converged classifier over a handful of classes reports its top-1 at 1.00
+# almost always, while the detector's box confidence is the one that moves.
+
+def test_a_track_keeps_the_classifier_confidence_apart_from_the_box_one():
+    """Averaged together they would be one number that answers neither
+    question -- is there a label here, and which label is it."""
+    book = ld.TrackBook()
+    for i, (box, ident) in enumerate(((0.90, 1.00), (0.94, 0.98), (0.86, 1.00))):
+        book.update([(1, "spec_plate", box, ident)], now=100 + i * 0.1)
+    track = book.rows()[0]
+    assert track.mean_conf == pytest.approx(0.90)
+    assert track.mean_identity == pytest.approx(0.9933, abs=1e-3)
+    assert track.has_identity
+
+
+def test_the_readout_names_the_box_number_so_the_pair_is_not_a_contradiction():
+    book = ld.TrackBook()
+    book.update([(1, "sp_g31", 0.91, 1.00)], now=100)
+    line = ld.track_line(book.rows()[0])
+    # The plate's number first -- the two readings of one object agree -- and
+    # the detector's alongside it, said out loud rather than left to be guessed.
+    assert line.startswith("sp_g31 1.00")
+    assert "box 0.91" in line
+
+
+def test_without_stage_two_the_line_stays_one_id_and_one_number():
+    """A detector-only run has nothing to disambiguate, and a bare `box`
+    prefix there would name a distinction that does not exist."""
+    book = ld.TrackBook()
+    book.update([(1, "label", 0.91)], now=100)
+    track = book.rows()[0]
+    assert not track.has_identity
+    assert ld.track_line(track) == "label 0.91"
+
+
+def test_frames_stage_two_missed_do_not_drag_its_average_down():
+    """A crop that failed contributes no identity rather than a zero: an
+    average pulled to 0.50 by two missing frames reads as an unsure classifier
+    when the classifier was never asked."""
+    book = ld.TrackBook()
+    book.update([(1, "sp_g31", 0.90, 1.00)], now=100)
+    book.update([(1, "sp_g31", 0.90, None)], now=100.1)
+    book.update([(1, "sp_g31", 0.90, None)], now=100.2)
+    track = book.rows()[0]
+    assert track.frames == 3
+    assert track.mean_identity == pytest.approx(1.00)
+
+
+@ui
+def test_the_readout_and_the_plate_report_the_same_battery_the_same_way():
+    """The end of the wire: stage 2's confidence has to reach the book, not
+    just the drawn label. It was being computed and dropped."""
+    win = _window()
+    _label(win, "live_agree")
+    win._live_thread = object()
+    win._live_tracking = True
+    win._live_tracks = ld.TrackBook()
+    win._live_overlay_scale = (1.0, 1.0)
+    try:
+        items = _items([_Results([[10, 10, 40, 40]], {0: "label"}, [0.91], [0],
+                                 ids=[7])])
+        items = ld.apply_identities(items, [(win.label_id, 1.0)])
+        win._on_live_result(items, 0.02)
+        text = win.live_readout.toPlainText()
+        assert f"{win.label_id} 1.00" in text, "the readout still shows stage 1"
+        assert "box 0.91" in text
+        # And the plate the operator reads on the frame says the same thing.
+        assert items[0]["label"] == f"{win.label_id} 1.00"
+    finally:
+        win._live_thread = None
+
+
 # --- proposals: keeping a frame with what the model found -------------------
 
 def _item(name, conf=0.9, track_id=None, xyxy=None, points=None):
