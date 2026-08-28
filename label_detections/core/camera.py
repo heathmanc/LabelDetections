@@ -578,7 +578,30 @@ class CameraSource:
         try:
             if grab is None or not grab.GrabSucceeded():
                 return False, None
-            frame = self.converter.Convert(grab).GetArray() if self.converter is not None else grab.Array
+            # Copied out of the SDK's memory before anything releases it.
+            #
+            # This used to read `self.converter.Convert(grab).GetArray()`. That
+            # converted image is a temporary -- nothing holds a reference, so it
+            # is collectable the moment the expression ends -- and grab.Release()
+            # runs in the finally below either way. GetArray() can hand back a
+            # view over that buffer rather than its own copy, which leaves the
+            # frame stored for the UI pointing at memory the SDK has taken back.
+            #
+            # Reading freed memory does not fail predictably. It is consistent
+            # with the 0xc0000374 heap corruption this application saw earlier,
+            # which was worked around by reverting this file rather than
+            # explained.
+            #
+            # The reference is held in a local across the copy, and the copy is
+            # explicit rather than assumed.
+            import numpy as np
+
+            if self.converter is not None:
+                converted = self.converter.Convert(grab)
+                frame = np.array(converted.GetArray(), copy=True)
+                del converted
+            else:
+                frame = np.array(grab.Array, copy=True)
             return True, frame
         finally:
             if grab is not None:

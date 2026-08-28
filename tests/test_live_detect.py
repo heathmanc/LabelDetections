@@ -1923,3 +1923,60 @@ def test_a_warmup_failure_is_reported_and_does_not_take_the_load_down():
     worker._warm_up()                     # must not raise
     assert said and "first run failed" in said[0]
     assert "no CUDA kernels" in said[0]
+
+
+# --- the frame handed on must not be SDK memory -----------------------------
+
+def test_a_basler_frame_is_copied_out_before_the_sdk_takes_it_back():
+    """pypylon's GetArray() can be a view over the converted image's buffer,
+    and that image was a temporary here -- released the moment the expression
+    ended, with grab.Release() right behind it. What the UI got was a window
+    onto memory the SDK had taken back, which is consistent with the 0xc0000374
+    heap corruption this application saw and never explained."""
+    import numpy as np
+
+    from label_detections.core.camera import CameraSource
+
+    sdk_buffer = np.zeros((4, 4, 3), dtype=np.uint8)
+    released = {"done": False}
+
+    class Converted:
+        def GetArray(self):
+            return sdk_buffer            # a VIEW, as pypylon may return
+
+    class Converter:
+        def Convert(self, _grab):
+            return Converted()
+
+    class Grab:
+        def GrabSucceeded(self):
+            return True
+
+        def Release(self):
+            released["done"] = True
+            sdk_buffer[:] = 0xEF         # the SDK reuses the buffer
+
+    class Cap:
+        def IsGrabbing(self):
+            return True
+
+        def RetrieveResult(self, *a, **k):
+            return Grab()
+
+    cam = CameraSource()
+    cam.cap = Cap()
+    cam.converter = Converter()
+
+    import label_detections.core.camera as camera_mod
+    real_pylon = camera_mod.pylon
+    camera_mod.pylon = type("P", (), {"TimeoutHandling_Return": 0})()
+    try:
+        ok, frame = cam._read_basler_frame(timeout_ms=10)
+    finally:
+        camera_mod.pylon = real_pylon
+
+    assert ok and frame is not None
+    assert released["done"], "the test did not exercise the release"
+    # The frame must be untouched by what happened to the SDK's buffer.
+    assert frame.max() == 0, "the frame is a view into memory the SDK reclaimed"
+    assert not np.shares_memory(frame, sdk_buffer)
