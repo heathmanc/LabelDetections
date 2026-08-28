@@ -73,6 +73,55 @@ def validate_train_params(params: dict) -> list[str]:
     return errors
 
 
+# Augmentation, set explicitly rather than left to Ultralytics.
+#
+# Ultralytics ships mosaic=1.0, scale=0.5, fliplr=0.5, and for classification
+# erasing=0.4. Those are tuned for COCO-like data: many object scales, objects
+# that can face either way, and far more images than a line ever produces.
+#
+# A bolted-down camera at a fixed working distance sees exactly one scene
+# geometry. Mosaic tiles four images into one, roughly halving each, and scale
+# jitters size on top of that -- so a detector whose image size was computed
+# from measured label pixels ("a label must arrive at 256 px or better") spends
+# most of training seeing labels at a fraction of that. The arithmetic and the
+# augmentation end up arguing. Mosaic also pushes labels onto tile boundaries,
+# teaching the model to fire on partial labels, which on this line is a reject.
+#
+# A mirrored label is a label that does not exist, so fliplr goes to zero. And
+# a classifier crop is identified by its printed text: erasing a patch of it
+# 40% of the time and still asking for the part number is teaching noise.
+#
+# Values, not policy: every one of these is a field on the Train tab.
+AUGMENT_DEFAULTS = {
+    "mosaic": 0.0,
+    "scale": 0.2,
+    "fliplr": 0.0,
+    "erasing": 0.0,
+}
+
+# Which of them the task actually honours. Classification builds a torchvision
+# pipeline (see ultralytics.data.augment.classify_augmentations) that has no
+# mosaic at all, and only classification has erasing -- passing a key a task
+# ignores is silent, which is exactly how a setting comes to look applied when
+# it is not.
+_DETECTION_AUGMENT = ("mosaic", "scale", "fliplr")
+_CLASSIFY_AUGMENT = ("fliplr", "erasing")
+
+
+def augment_kwargs(params: dict) -> dict:
+    """The augmentation settings that apply to this run's task."""
+    task = str(params.get("task", "obb")).strip().lower()
+    keys = _CLASSIFY_AUGMENT if task == "classify" else _DETECTION_AUGMENT
+    out: dict = {}
+    for key in keys:
+        value = params.get(key, AUGMENT_DEFAULTS[key])
+        try:
+            out[key] = float(value)
+        except (TypeError, ValueError):
+            out[key] = AUGMENT_DEFAULTS[key]
+    return out
+
+
 def train_kwargs(params: dict) -> dict:
     """Params as keyword arguments for ``YOLO.train()``.
 
@@ -95,6 +144,7 @@ def train_kwargs(params: dict) -> dict:
             kwargs[key] = value
     if params.get("resume"):
         kwargs["resume"] = True
+    kwargs.update(augment_kwargs(params))
     return kwargs
 
 
@@ -123,6 +173,9 @@ def build_worker_train_command(exe: str, params: dict) -> list[str]:
 # and device="0" would stop being the string Ultralytics documents.
 _WORKER_INT_KEYS = frozenset({"imgsz", "batch", "epochs", "patience", "workers"})
 _WORKER_BOOL_KEYS = frozenset({"resume"})
+# Augmentation values are floats. Without this they would reach train() as the
+# strings they travelled as, and "0.0" is not 0.0 to Ultralytics.
+_WORKER_FLOAT_KEYS = frozenset(AUGMENT_DEFAULTS)
 
 
 def parse_worker_args(argv: list[str]) -> dict:
@@ -142,6 +195,11 @@ def parse_worker_args(argv: list[str]) -> dict:
                 out[key] = int(raw)
             except ValueError:
                 continue  # drop rather than hand train() a bad type
+        elif key in _WORKER_FLOAT_KEYS:
+            try:
+                out[key] = float(raw)
+            except ValueError:
+                continue
         else:
             out[key] = raw
     return out
@@ -181,6 +239,12 @@ def build_train_command(yolo_exe: str, params: dict) -> list[str]:
 
     if params.get("resume"):
         add("resume", "True")
+
+    # Emitted always, not only when they differ from Ultralytics' defaults:
+    # these are the settings most likely to be questioned later, and a command
+    # line that states them is the record of what was actually trained.
+    for key, value in augment_kwargs(params).items():
+        add(key, value)
 
     return cmd
 

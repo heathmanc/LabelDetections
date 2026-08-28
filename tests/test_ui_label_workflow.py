@@ -1551,3 +1551,27 @@ def test_a_single_stage_run_still_summarizes(tmp_path, monkeypatch):
 
     dialog = built.get("dialog")
     assert len(dialog.findChildren(TrainingMetricsChart)) == 1
+
+
+def test_the_train_tab_carries_the_augmentation_into_the_run():
+    """The fields exist so the values are visible and changeable, not just
+    different -- a default nobody can see is the same trap as a library one."""
+    win = _window()
+    assert win.train_mosaic_spin.value() == pytest.approx(0.0)
+    assert win.train_scale_spin.value() == pytest.approx(0.2)
+    assert win.train_fliplr_spin.value() == pytest.approx(0.0)
+    assert win.cls_erasing_spin.value() == pytest.approx(0.0)
+
+    params = win._gather_train_params()
+    assert params["mosaic"] == pytest.approx(0.0)
+    assert params["scale"] == pytest.approx(0.2)
+
+    win.train_mosaic_spin.setValue(0.55)
+    try:
+        assert win._gather_train_params()["mosaic"] == pytest.approx(0.55)
+    finally:
+        win.train_mosaic_spin.setValue(0.0)
+
+    cls = win._gather_classifier_params()
+    assert cls["erasing"] == pytest.approx(0.0)
+    assert cls["fliplr"] == pytest.approx(0.0)

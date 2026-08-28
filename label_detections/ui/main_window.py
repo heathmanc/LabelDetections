@@ -1119,6 +1119,28 @@ class MainWindow(QMainWindow):
         self.train_workers_spin = QSpinBox(); self.train_workers_spin.setRange(0, 256)
         self.train_workers_spin.setValue(int(params["workers"]))
 
+        def _aug_spin(key: str, saved_key: str, tip: str) -> QDoubleSpinBox:
+            spin = QDoubleSpinBox()
+            spin.setRange(0.0, 1.0)
+            spin.setSingleStep(0.05)
+            spin.setDecimals(2)
+            spin.setValue(float(saved.get(
+                saved_key, training_logic.AUGMENT_DEFAULTS[key])))
+            spin.setToolTip(tip)
+            return spin
+
+        _aug_note = (
+            "Ultralytics ships mosaic 1.0, scale 0.5, fliplr 0.5. Those suit COCO-like data; a bolted-down camera at a fixed working distance sees one scene geometry.\n\nMosaic tiles four images into one, roughly halving each, and scale jitters size on top of that -- so a detector whose image size you computed from measured label pixels spends most of training seeing labels well below it. Mosaic also pushes labels onto tile edges, teaching the model to fire on partial ones.\n\nA mirrored label is a label that does not exist, so fliplr defaults to 0.\n\nRaise them if the model overfits and more captures are not an option; they are the first thing to try when a run memorises the training set.")
+        self.train_mosaic_spin = _aug_spin(
+            "mosaic", "mosaic",
+            "Probability of tiling four images into one.\n\n" + _aug_note)
+        self.train_scale_spin = _aug_spin(
+            "scale", "scale",
+            "Random resize gain, plus or minus.\n\n" + _aug_note)
+        self.train_fliplr_spin = _aug_spin(
+            "fliplr", "fliplr",
+            "Probability of mirroring the image left-to-right.\n\n" + _aug_note)
+
         self.train_yolo_exe_edit = QLineEdit(str(saved.get("yolo_exe", "yolo")))
         self.train_yolo_exe_edit.setToolTip("Ultralytics CLI entrypoint. Use a full path if 'yolo' is not on PATH.")
 
@@ -1152,6 +1174,18 @@ class MainWindow(QMainWindow):
         self.train_resume_check.setChecked(bool(params.get("resume", False)))
         grid.addWidget(_lbl("Run name"), 5, 0); grid.addWidget(self.train_name_edit, 5, 1)
         grid.addWidget(_lbl("Resume"), 5, 2); grid.addWidget(self.train_resume_check, 5, 3)
+        # Row 6-7: augmentation. Set here rather than left to Ultralytics -- its
+        # defaults are tuned for COCO, and mosaic in particular argues with an
+        # image size computed from measured label pixels.
+        _mosaic_lbl = _lbl("Mosaic")
+        _mosaic_lbl.setToolTip(self.train_mosaic_spin.toolTip())
+        grid.addWidget(_mosaic_lbl, 6, 0); grid.addWidget(self.train_mosaic_spin, 6, 1)
+        _scale_lbl = _lbl("Scale ±")
+        _scale_lbl.setToolTip(self.train_scale_spin.toolTip())
+        grid.addWidget(_scale_lbl, 6, 2); grid.addWidget(self.train_scale_spin, 6, 3)
+        _flip_lbl = _lbl("Flip L/R")
+        _flip_lbl.setToolTip(self.train_fliplr_spin.toolTip())
+        grid.addWidget(_flip_lbl, 7, 0); grid.addWidget(self.train_fliplr_spin, 7, 1)
 
         # The four-column grid is the widest thing in the left pane. Without an
         # explicit small minimum, each field demands its content width and the
@@ -1161,7 +1195,9 @@ class MainWindow(QMainWindow):
                    self.train_imgsz_spin, self.train_batch_spin,
                    self.train_epochs_spin, self.train_patience_spin,
                    self.train_workers_spin, self.train_yolo_exe_edit,
-                   self.train_project_edit, self.train_name_edit):
+                   self.train_project_edit, self.train_name_edit,
+                   self.train_mosaic_spin, self.train_scale_spin,
+                   self.train_fliplr_spin):
             _w.setMinimumWidth(72)
             _w.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         # The checkbox label is long; let it elide rather than widen the grid.
@@ -1199,6 +1235,18 @@ class MainWindow(QMainWindow):
         self.cls_batch_spin = QSpinBox(); self.cls_batch_spin.setRange(-1, 1024)
         self.cls_batch_spin.setValue(int(saved.get("cls_batch", 32)))
         self.cls_name_edit = QLineEdit(str(saved.get("cls_name", "classifier")))
+        self.cls_fliplr_spin = _aug_spin(
+            "fliplr", "cls_fliplr",
+            "Probability of mirroring the crop left-to-right.\n\n"
+            "A mirrored label is a label that does not exist.")
+        self.cls_erasing_spin = _aug_spin(
+            "erasing", "cls_erasing",
+            "Probability of blanking a random patch of the crop.\n\n"
+            "Ultralytics ships 0.4 for classification. A crop is identified by "
+            "its printed text, so erasing part of it and still asking for the "
+            "part number is teaching noise -- it can blank the very characters "
+            "that separate two labels.\n\n"
+            "Raise it only if the classifier is memorising crops.")
 
         cls_grid.addWidget(_lbl("Base model"), 1, 0)
         cls_grid.addWidget(self.cls_model_edit, 1, 1, 1, 3)
@@ -1209,8 +1257,17 @@ class MainWindow(QMainWindow):
         cls_grid.addWidget(_lbl("Epochs"), 3, 2); cls_grid.addWidget(self.cls_epochs_spin, 3, 3)
         cls_grid.addWidget(_lbl("Batch"), 4, 0); cls_grid.addWidget(self.cls_batch_spin, 4, 1)
         cls_grid.addWidget(_lbl("Run name"), 4, 2); cls_grid.addWidget(self.cls_name_edit, 4, 3)
+        _cls_flip_lbl = _lbl("Flip L/R")
+        _cls_flip_lbl.setToolTip(self.cls_fliplr_spin.toolTip())
+        cls_grid.addWidget(_cls_flip_lbl, 5, 0)
+        cls_grid.addWidget(self.cls_fliplr_spin, 5, 1)
+        _erase_lbl = _lbl("Erasing")
+        _erase_lbl.setToolTip(self.cls_erasing_spin.toolTip())
+        cls_grid.addWidget(_erase_lbl, 5, 2)
+        cls_grid.addWidget(self.cls_erasing_spin, 5, 3)
         for _w in (self.cls_model_edit, self.cls_data_edit, self.cls_imgsz_spin,
-                   self.cls_epochs_spin, self.cls_batch_spin, self.cls_name_edit):
+                   self.cls_epochs_spin, self.cls_batch_spin, self.cls_name_edit,
+                   self.cls_fliplr_spin, self.cls_erasing_spin):
             _w.setMinimumWidth(72)
             _w.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         cls_grid.setColumnStretch(1, 1); cls_grid.setColumnStretch(3, 1)
@@ -1316,6 +1373,9 @@ class MainWindow(QMainWindow):
             "project": self.train_project_edit.text().strip(),
             "name": self.train_name_edit.text().strip(),
             "resume": bool(self.train_resume_check.isChecked()),
+            "mosaic": float(self.train_mosaic_spin.value()),
+            "scale": float(self.train_scale_spin.value()),
+            "fliplr": float(self.train_fliplr_spin.value()),
         }
 
     def browse_classifier_data(self) -> None:
@@ -1340,6 +1400,8 @@ class MainWindow(QMainWindow):
             "project": self.train_project_edit.text().strip(),
             "name": self.cls_name_edit.text().strip() or "classifier",
             "resume": False,
+            "fliplr": float(self.cls_fliplr_spin.value()),
+            "erasing": float(self.cls_erasing_spin.value()),
         }
 
     def fill_training_from_scale(self) -> None:
@@ -1536,6 +1598,7 @@ class MainWindow(QMainWindow):
                 "cls_model": params["model"], "cls_data": params["data"],
                 "cls_imgsz": params["imgsz"], "cls_epochs": params["epochs"],
                 "cls_batch": params["batch"], "cls_name": params["name"],
+                "cls_fliplr": params["fliplr"], "cls_erasing": params["erasing"],
             })
         else:
             settings.update(params)

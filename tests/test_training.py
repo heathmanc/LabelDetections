@@ -321,3 +321,67 @@ def test_a_detector_loss_column_is_not_mistaken_for_the_classifier_one():
     )
     series = t.chart_series(t.parse_results_csv(detector_csv))
     assert set(series) == {"box_loss", "cls_loss", "mAP50", "mAP50-95"}
+
+
+# --- augmentation: set here, not left to Ultralytics ------------------------
+
+def test_the_command_states_the_augmentation_it_trained_with():
+    """Emitted always, not only when they differ from the library default:
+    these are the settings most likely to be questioned later, and the command
+    line is the record of what was actually trained."""
+    cmd = t.build_train_command("yolo", {
+        "task": "obb", "model": "yolo11s-obb.pt", "data": "d.yaml",
+        "imgsz": 736, "batch": 16, "epochs": 100, "patience": 50, "workers": 8,
+    })
+    assert "mosaic=0.0" in cmd
+    assert "scale=0.2" in cmd
+    assert "fliplr=0.0" in cmd
+
+
+def test_a_classification_run_gets_only_the_keys_it_honours():
+    """Ultralytics' classification pipeline has no mosaic. Passing a key a task
+    ignores is silent, which is how a setting comes to look applied when it is
+    not."""
+    kwargs = t.augment_kwargs({"task": "classify"})
+    assert set(kwargs) == {"fliplr", "erasing"}
+    assert kwargs["erasing"] == 0.0
+
+    detect = t.augment_kwargs({"task": "obb"})
+    assert set(detect) == {"mosaic", "scale", "fliplr"}
+
+
+def test_what_the_operator_typed_wins_over_the_default():
+    kwargs = t.augment_kwargs({"task": "detect", "mosaic": 0.6, "scale": 0.45,
+                               "fliplr": 0.5})
+    assert kwargs == {"mosaic": 0.6, "scale": 0.45, "fliplr": 0.5}
+
+
+def test_a_bad_value_falls_back_rather_than_reaching_the_trainer():
+    assert t.augment_kwargs({"task": "obb", "mosaic": ""})["mosaic"] == 0.0
+
+
+def test_the_frozen_worker_gets_floats_not_strings():
+    """Params travel to the packaged build as key=value text. Untyped, "0.0"
+    would arrive as a string, and a string is not 0.0 to Ultralytics."""
+    argv = t.build_worker_train_command("app.exe", {
+        "task": "obb", "model": "m.pt", "data": "d.yaml", "imgsz": 736,
+        "batch": 16, "epochs": 10, "patience": 5, "workers": 4,
+    })
+    parsed = t.parse_worker_args([a for a in argv if "=" in a])
+    assert parsed["mosaic"] == 0.0 and isinstance(parsed["mosaic"], float)
+    assert parsed["scale"] == 0.2 and isinstance(parsed["scale"], float)
+    # And the ints stayed ints.
+    assert parsed["imgsz"] == 736 and isinstance(parsed["imgsz"], int)
+
+
+def test_in_process_training_gets_the_same_settings_as_the_cli():
+    """Two paths to the same run -- the CLI when yolo is on PATH, train() when
+    it is not. They must not train different models."""
+    params = {"task": "obb", "model": "m.pt", "data": "d.yaml", "imgsz": 736,
+              "batch": 16, "epochs": 10, "patience": 5, "workers": 4,
+              "mosaic": 0.3, "scale": 0.1, "fliplr": 0.0}
+    kwargs = t.train_kwargs(params)
+    cmd = t.build_train_command("yolo", params)
+    for key, value in t.augment_kwargs(params).items():
+        assert kwargs[key] == value
+        assert f"{key}={value}" in cmd
