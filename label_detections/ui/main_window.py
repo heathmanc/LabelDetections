@@ -3205,6 +3205,9 @@ class MainWindow(QMainWindow):
         query = (self.label_search_edit.text()
                  if hasattr(self, "label_search_edit") else "")
         matched = self.library.search(query)
+        # Any edit to a label ends here, so this is where a running inference
+        # worker gets told about it.
+        self._push_library_to_worker()
         self.label_list.clear()
         for label in matched:
             statuses = list(persistence.dataset_statuses(label.label_id).values())
@@ -7034,6 +7037,27 @@ class MainWindow(QMainWindow):
             return "retainer"
         return str(label)
 
+    def _push_library_to_worker(self) -> None:
+        """Hand a running inference worker the current label library.
+
+        The worker snapshots the library at Start, because it runs on another
+        thread and the library is edited on this one. Left at that, editing a
+        pattern -- or adding the text field meant to catch a wrong part --
+        changes nothing until live detect is stopped and started, which reads
+        as the check being broken rather than as a stale copy.
+        """
+        worker = getattr(self, "_live_worker", None)
+        if worker is None or not hasattr(worker, "update_library"):
+            return
+        try:
+            code_specs, code_patterns = code_reader.library_snapshot(self.library)
+            text_fields, text_expected = text_reader.library_snapshot(self.library)
+            worker.update_library(code_specs, code_patterns,
+                                  text_fields, text_expected)
+        except Exception:
+            # A live view must not die because a label was edited.
+            pass
+
     def place_regions_on_canvas(self) -> None:
         """Fill in the active label's read-regions on every matching box.
 
@@ -7048,10 +7072,15 @@ class MainWindow(QMainWindow):
         if hasattr(self.canvas, "push_undo_snapshot"):
             self.canvas.push_undo_snapshot()
         for box in self.canvas.boxes:
-            if str(getattr(box, "label", "")) != self.label_id:
+            if not self._box_is_active_label(box):
                 continue
             payload = box.to_dict()
-            ann_logic.apply_reference_regions(payload, label)
+            # overwrite: this is the act of saying "make this box match the
+            # library". Without it every region already on the box is kept, so
+            # a region deleted from the label stays on screen and in the
+            # sidecar for good -- there is no other way to get rid of one.
+            # Hand-nudged regions are not reference-placed and survive.
+            ann_logic.apply_reference_regions(payload, label, overwrite=True)
             box.label_id = self.label_id
             box.regions = payload.get("regions", [])
             placed += len(box.regions)

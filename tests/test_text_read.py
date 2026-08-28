@@ -143,3 +143,74 @@ def test_a_field_nobody_inspects_contributes_no_expectation():
         text_fields = [_Field(policy="ignore", pattern="ODS-AGM16L")]
 
     assert tr.expected_for([Label()]) == {}
+
+
+# --- edits have to reach the running worker ---------------------------------
+#
+# The worker snapshots the library at Start, because it runs on another thread
+# and the library is edited on this one. Left at that, adding the text field
+# meant to catch a wrong part changes nothing until live detect is stopped and
+# started -- which reads as the check being broken rather than as a stale copy,
+# and is how this was found.
+
+class _Field2:
+    name, policy = "part_number", "must_match_pattern"
+    region = [0.68, 0.05, 0.30, 0.10]
+
+    def __init__(self, pattern):
+        self.pattern = pattern
+
+
+def _worker():
+    import os
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    pytest.importorskip("PySide6.QtWidgets")
+    from label_detections.ui.live_detect import InferenceWorker
+
+    return InferenceWorker("det.pt", 640, 0.5, None, classifier_path="cls.pt")
+
+
+def test_a_new_expectation_reaches_a_worker_that_is_already_running():
+    worker = _worker()
+    assert worker._text_expected == {}
+    worker.update_library({}, {}, {"PC680": [_Field2("ODS-AGM16L")]},
+                          {"PC680": ["ODS-AGM16L"]})
+    assert worker._text_expected == {"PC680": ["ODS-AGM16L"]}
+
+
+def test_an_edit_clears_verdicts_cached_against_the_old_expectation():
+    """A cached "text ok" would outlive the very change that was just made,
+    and go on saying the label is fine for as long as the track lives."""
+    worker = _worker()
+    worker._text_cache = {7: object()}
+    worker._code_cache = {7: object()}
+    worker.update_library({}, {}, {"PC680": [_Field2("NEW")]}, {"PC680": ["NEW"]})
+    assert worker._text_cache == {} and worker._code_cache == {}
+
+
+def test_a_label_gaining_its_first_pattern_turns_the_check_on():
+    """Starting with nothing verifiable switches it off, and it has to come
+    back when there finally is something to verify against."""
+    from label_detections.core import text_reader
+
+    worker = _worker()
+    worker._text_on = True
+    worker._load_text()          # nothing enrolled yet
+    assert worker._text_on is False
+
+    ok, _why = text_reader.available()
+    worker.update_library({}, {}, {"PC680": [_Field2("ODS-AGM16L")]},
+                          {"PC680": ["ODS-AGM16L"]})
+    assert worker._text_on is ok, "did not come back on once a pattern existed"
+
+
+def test_the_state_is_announced_only_when_it_actually_changed():
+    """Pushed on every label-list refresh, so an unchanged library must not
+    put a line in the log each time."""
+    worker = _worker()
+    said = []
+    worker.loaded.connect(said.append)
+    worker.update_library({}, {}, {}, {})
+    worker.update_library({}, {}, {}, {})
+    assert said == []

@@ -1768,3 +1768,64 @@ def test_the_reference_capture_sees_a_generic_family_box(monkeypatch):
 
     assert win._reference_box_drawn() is True
     assert win.reference_confirm_btn.isEnabled() is True
+
+
+# --- a deleted region has to leave the canvas too ----------------------------
+#
+# A code was deleted from the label and its box stayed on the reference image,
+# because Place Regions kept every region already on the box and only ever
+# added. There was no way to get rid of one at all.
+
+def test_place_regions_clears_a_region_the_label_no_longer_has():
+    """The reported symptom: 'I deleted the serial box and it is still there.'"""
+    from label_detections.core import annotations as ann
+
+    win = _window()
+    _define(win, "wf_stale")
+    win.set_active_label("wf_stale")
+    label = win.library.get("wf_stale")
+    label.text_fields = [type("F", (), {"name": "field_1", "policy": "must_be_present",
+                                        "pattern": "X", "region": [0.1, 0.1, 0.2, 0.2]})()]
+    win.canvas.boxes.clear()
+    box = _draw_as_the_app_does(win, "wf_stale")
+    # A region placed from a code that has since been deleted.
+    box.regions = [{"role": "code", "code_role": "serial", "placed_from": "reference",
+                    "points": [[0, 0], [1, 0], [1, 1], [0, 1]]}]
+
+    win.place_regions_on_canvas()
+    roles = {r.get("code_role") or r.get("field") for r in ann.regions(box.to_dict())}
+    assert "serial" not in roles, "the deleted region survived a re-place"
+
+
+def test_place_regions_keeps_a_region_somebody_nudged_by_hand():
+    """An operator who moved a region because the artwork drifted has produced
+    better data than the library holds; refreshing must not throw that away."""
+    from label_detections.core import annotations as ann
+
+    win = _window()
+    _define(win, "wf_nudged")
+    win.set_active_label("wf_nudged")
+    win.library.get("wf_nudged").text_fields = []
+    win.canvas.boxes.clear()
+    box = _draw_as_the_app_does(win, "wf_nudged")
+    box.regions = [{"role": "text", "field": "by_hand", "placed_from": "operator",
+                    "points": [[0, 0], [1, 0], [1, 1], [0, 1]]}]
+
+    win.place_regions_on_canvas()
+    fields = {r.get("field") for r in ann.regions(box.to_dict())}
+    assert "by_hand" in fields
+
+
+def test_place_regions_finds_the_box_at_all():
+    """It compared the detector family against the library id, so it matched
+    nothing the app draws and silently placed zero regions."""
+    win = _window()
+    _define(win, "wf_placefind")
+    win.set_active_label("wf_placefind")
+    win.library.get("wf_placefind").text_fields = [
+        type("F", (), {"name": "f", "policy": "must_be_present", "pattern": "X",
+                       "region": [0.1, 0.1, 0.2, 0.2]})()]
+    win.canvas.boxes.clear()
+    box = _draw_as_the_app_does(win, "wf_placefind")
+    win.place_regions_on_canvas()
+    assert box.regions, "no region was placed on a box the app itself drew"

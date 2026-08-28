@@ -706,6 +706,41 @@ class InferenceWorker(QObject):
                     "was never taught will land inside one of them. More "
                     "classes and more crops per class are what widen this.")
 
+    def update_library(self, code_specs, code_patterns,
+                       text_fields, text_expected) -> None:
+        """Take a fresh snapshot of the label library, mid-run.
+
+        Called from the GUI thread while this worker runs on another. Every
+        write here is a single attribute rebind, which is atomic under the GIL:
+        a frame in flight sees either the old dict or the new one, never a
+        half-updated one. That is enough, because a verdict from either is
+        self-consistent.
+
+        Without this, the snapshot taken at Start is the only one there ever
+        is -- so editing a label's pattern, or adding the text field that is
+        supposed to catch a wrong part, changes nothing until live detect is
+        stopped and started. That reads exactly like the check being broken,
+        which is how it was found.
+        """
+        self._code_specs = dict(code_specs or {})
+        self._code_patterns = dict(code_patterns or {})
+        self._text_fields = dict(text_fields or {})
+        self._text_expected = dict(text_expected or {})
+        # Verdicts held against the old expectations are worthless now, and
+        # keeping them would hide the very edit that was just made.
+        self._code_cache = {}
+        self._text_cache = {}
+        # Whether either check can run may have changed with them: a label
+        # gaining its first pattern is exactly what turns one on.
+        self._codes_on = self._codes_on or bool(self._code_patterns)
+        self._text_on = self._text_on or bool(self._text_expected)
+        was = (self._code_note, self._text_note)
+        self._load_codes()
+        self._load_text()
+        if (self._code_note, self._text_note) != was:
+            self.loaded.emit("\n".join(
+                x for x in (self._code_note, self._text_note) if x))
+
     def _load_codes(self) -> None:
         """Bring up code verification, and say plainly whether it can run."""
         if not self._codes_on:
