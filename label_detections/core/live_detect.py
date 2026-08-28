@@ -387,19 +387,15 @@ class TrackBook:
 # still recorded -- rows() orders by them, and a mean is only worth reading
 # because it is held over frames -- just not printed.
 def track_line(track: Track) -> str:
-    # The id first and the same confidence the drawn plate carries, so the two
-    # readings of one object agree. The track number is still the key the book
-    # groups by; it just is not something anyone reads while parts move past.
+    # The id and one number. The pair belongs on the plate, where an operator
+    # reads it off the moving part; repeating it here would spend a line on
+    # something already in view.
     #
-    # The box confidence follows it, named. Two bare numbers that disagree read
-    # as a bug -- the plate says 1.00 and the readout said 0.91 for the same
-    # battery -- when they are measuring different things: stage 2 is sure
-    # which label it is, stage 1 is less sure it drew the outline correctly.
-    # Naming the second one is what makes the pair legible, and the box number
-    # is the one that moves, so it is worth keeping in view.
-    if track.has_identity:
-        return (f"{track.name} {track.mean_identity:.2f}"
-                f"   box {track.mean_conf:.2f}")
+    # The one kept is the held average of the box confidence -- the number that
+    # actually moves, and the reason this book exists at all: a single frame
+    # flickers, sixty frames at 0.91 say the model has the object. The track
+    # number is still the key the book groups by, just not something anyone
+    # reads while parts move past.
     return f"{track.name} {track.mean_conf:.2f}"
 
 
@@ -559,10 +555,23 @@ def apply_identities(items: list[dict], identities) -> list[dict]:
         merged["detector_name"] = item.get("name", "")
         merged["name"] = name
         merged["identity_conf"] = float(conf)
-        # Stage 2's name and stage 2's confidence, and nothing else. The track
-        # id stays on the item for the readout to group by; on the box it only
-        # competes with the two things worth reading as parts move past.
-        merged["label"] = f"{name} {conf:.2f}"
+        # Both numbers, on the plate, because the plate is what gets read while
+        # parts move past. Stage 2 first -- it is the one that names the label
+        # -- and stage 1's box confidence after it, said out loud.
+        #
+        # Naming the second one is the whole point. Two bare numbers that
+        # disagree read as a bug: the same battery said 1.00 on the box and
+        # 0.91 in the readout. They measure different things. Stage 2 answers
+        # "which label is this", and a converged classifier over a handful of
+        # classes says 1.00 to that almost always. Stage 1 answers "is there a
+        # label here, and is this its outline", and that is the number that
+        # moves -- so it is worth the width it costs.
+        box = float(item.get("conf", 0.0))
+        # An unknown carries no identity confidence worth printing. The number
+        # the classifier produced belongs to a class the crop was just refused
+        # for, and "unknown 1.00" reads as certainty about the wrong thing.
+        merged["label"] = (f"unknown  box {box:.2f}" if name == UNKNOWN
+                           else f"{name} {conf:.2f}  box {box:.2f}")
         out.append(merged)
     return out
 

@@ -152,6 +152,15 @@ class InferenceWorker(QObject):
         # Reported once, not once per frame: a failure that repeats at the
         # camera's rate buries every other message in the log.
         self._stage2_failed = False
+        # Novelty rejection: where each enrolled class sits in feature space,
+        # so a label that was never enrolled can be refused instead of being
+        # named as whichever one it least differs from. Absent is a supported
+        # state -- it is what every model built before this is in -- and the
+        # readout says so rather than the check silently not running.
+        self._novelty = None
+        self._novelty_note = ""
+        self._embedder = None
+        self._novelty_failed = False
         # Where Ultralytics actually ran, asked once after the first inference.
         self._device_checked = False
 
@@ -222,6 +231,8 @@ class InferenceWorker(QObject):
                     f"{self._classifier_path}\n\n{exc}\n\n"
                     f"Running stage 1 only -- boxes will have no identity.")
                 self._classifier = None
+        if self._classifier is not None:
+            self._load_novelty()
         # Build Ultralytics' predictor HERE, on this thread, before any frame
         # arrives. It is created lazily on the first predict/track call, and
         # setting it up runs select_device -> torch.cuda.set_device.
@@ -245,7 +256,13 @@ class InferenceWorker(QObject):
 
         which = ("detector + classifier" if self._classifier is not None
                  else f"{task or 'detector'} only, no stage 2")
-        self.loaded.emit(f"Loaded {which}: {self._path}\n{self._device_report()}")
+        # The novelty state goes in the load message rather than only in a
+        # settings dialog. "Off" and "on" look identical while every part in
+        # front of the camera happens to be enrolled, and the run where they
+        # stop being is the run where nobody remembers which it was.
+        note = f"\n{self._novelty_note}" if self._novelty_note else ""
+        self.loaded.emit(
+            f"Loaded {which}: {self._path}\n{self._device_report()}{note}")
 
     @staticmethod
     def unsynchronised_timing() -> str:
@@ -615,6 +632,68 @@ class InferenceWorker(QObject):
                 quads.append([[x1, y1], [x2, y1], [x2, y2], [x1, y2]])
         return quads
 
+    def _load_novelty(self) -> None:
+        """Bring up the novelty profile for this classifier, if it has one.
+
+        Never fatal. Running without one is exactly what every model built
+        before this feature does, and the readout names the state so it is a
+        visible gap rather than a check that looks on and is not.
+        """
+        from ..core import novelty as nv
+
+        self._novelty = nv.Profile.load(nv.profile_path(self._classifier_path))
+        if self._novelty is None or not len(self._novelty):
+            self._novelty = None
+            self._novelty_note = "no novelty profile"
+            return
+        from .novelty import Embedder
+
+        embedder = Embedder()
+        if not embedder.attach(self._classifier):
+            self._novelty = None
+            self._novelty_note = f"novelty off: {embedder.reason}"
+            return
+        self._embedder = embedder
+        enforced = self._novelty.enforced_classes
+        if not enforced:
+            self._novelty_note = ("novelty profile covers no class with enough "
+                                  "crops to enforce")
+        else:
+            self._novelty_note = f"novelty: {len(enforced)} class(es) enforced"
+
+    def _reject_unknown(self, named, crops_used):
+        """Replace any identity whose crop does not sit where its class sits.
+
+        Fails open, loudly. A mismatch between vectors and predictions means
+        the pairing is not trustworthy, and rejecting on an untrustworthy
+        pairing would mark good parts unknown for a reason nobody can see. The
+        message says the check is not running, which is the visible half of the
+        same failure.
+        """
+        if self._novelty is None or self._embedder is None:
+            return named
+        vectors = self._embedder.take()
+        if len(vectors) != crops_used:
+            if not self._novelty_failed:
+                self._novelty_failed = True
+                self.failed.emit(
+                    f"Novelty checking is NOT running: read {len(vectors)} "
+                    f"feature vector(s) for {crops_used} crop(s).\n\n"
+                    f"Identities are the classifier's own answers, so a label "
+                    f"that was never enrolled will be named as the closest one "
+                    f"that was.")
+            return named
+        from ..core import live_detect as logic
+
+        out = []
+        for (name, conf), vec in zip(named, vectors):
+            if name == logic.UNKNOWN:
+                out.append((name, conf))
+                continue
+            verdict = self._novelty.verdict(name, vec)
+            out.append((name, conf) if verdict.known else (logic.UNKNOWN, conf))
+        return out
+
     def _identify(self, frame, results):
         """Stage 2: crop each detection out of the FULL-RESOLUTION frame and name it.
 
@@ -648,6 +727,10 @@ class InferenceWorker(QObject):
         usable = [c for c in crops if c is not None]
         if not usable:
             return []
+        # Anything left from a previous frame would pair with this frame's
+        # crops and put one label's identity on another's box.
+        if self._embedder is not None:
+            self._embedder.clear()
         try:
             preds = self._classifier.predict(
                 usable, imgsz=self._crop_px, verbose=False,
@@ -670,6 +753,12 @@ class InferenceWorker(QObject):
                 continue
             named.append(logic.identify(str(names.get(top, "")), conf,
                                         self._identity_floor))
+
+        # Second opinion, from the layer under the softmax. The head can only
+        # elect one of the classes it was given, so a label that was never
+        # enrolled comes back as the nearest enrolled one at ~1.00; this asks
+        # whether the crop sits where that class actually sits.
+        named = self._reject_unknown(named, len(usable))
 
         # Put them back against the original detections, including the ones
         # whose crop failed -- position is what ties identity to box.

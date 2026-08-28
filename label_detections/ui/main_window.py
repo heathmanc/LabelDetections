@@ -97,6 +97,7 @@ from label_detections.core import training as training_logic
 from label_detections.core import evaluation as evaluation_logic
 from label_detections.core import dataset_health
 from label_detections.core import storage as storage_mod
+from label_detections.ui import novelty as novelty_ui
 from label_detections.core import class_stats
 from label_detections.core import persistence
 from label_detections.core import imageio
@@ -2279,6 +2280,23 @@ class MainWindow(QMainWindow):
         cls_browse.clicked.connect(self._browse_live_classifier)
         cls_row.addWidget(self.live_classifier_edit, 1)
         cls_row.addWidget(cls_browse)
+        self.novelty_btn = QPushButton("Novelty profile")
+        self.novelty_btn.clicked.connect(self._build_novelty_profile)
+        self.novelty_btn.setToolTip(
+            "Teach the classifier to say 'unknown'.\n\n"
+            "A classifier can only answer with the labels it was trained on. "
+            "Show it a label that was never enrolled and it reports the closest "
+            "one that was -- at 1.00, because that is what a softmax over a few "
+            "classes does. No confidence threshold catches that: a correct read "
+            "and that failure produce the same number.\n\n"
+            "This measures where each enrolled label sits in the classifier's "
+            "own feature space, using the crops already in the two-stage "
+            "export. At runtime a crop that does not sit near the class it was "
+            "named as is reported 'unknown' instead.\n\n"
+            "Run it after every stage 2 training run -- the feature space moves "
+            "with the weights, so a profile belongs to the model it was measured "
+            "through. It is saved beside the weights.")
+        cls_row.addWidget(self.novelty_btn)
         cv_.addWidget(QLabel("Stage 2 classifier"))
         cv_.addLayout(cls_row)
 
@@ -7504,6 +7522,64 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "export_augment_spin"):
             return 0
         return int(self.export_augment_spin.value())
+
+    def _novelty_dataset(self) -> Path | None:
+        """The classification crops to measure from.
+
+        The two-stage export's own folder when it is there, because that is
+        what the crops are and asking for a path already known is a step that
+        only exists to be got wrong.
+        """
+        from PySide6.QtWidgets import QFileDialog
+
+        default = EXPORT_DIR / "two_stage_classify"
+        if (default / "train").is_dir():
+            return default
+        picked = QFileDialog.getExistingDirectory(
+            self, "Classification crops (the folder containing train/)",
+            str(EXPORT_DIR))
+        return Path(picked) if picked else None
+
+    def _build_novelty_profile(self) -> None:
+        """Measure where each enrolled label sits, so the rest can be refused."""
+        from label_detections.core import novelty as nv
+
+        weights = self.live_classifier_edit.text().strip()
+        if not weights or not Path(weights).is_file():
+            QMessageBox.information(
+                self, "Novelty profile",
+                "Set the Stage 2 classifier first.\n\n"
+                "The profile is measured through a specific set of weights and "
+                "saved beside them: the feature space it describes belongs to "
+                "that model and moves every time it is retrained.")
+            return
+        dataset = self._novelty_dataset()
+        if dataset is None:
+            return
+
+        try:
+            profile = self._run_with_progress(
+                "Profiling enrolled labels",
+                lambda progress: novelty_ui.build_profile(
+                    weights, dataset, crop_px=int(self.live_crop_spin.value()),
+                    device=self._model_test_device_arg(), progress=progress))
+        except (FileNotFoundError, RuntimeError) as exc:
+            QMessageBox.information(self, "Novelty profile", str(exc))
+            return
+        except Exception as exc:
+            QMessageBox.critical(self, "Novelty profile",
+                                 f"Could not build the profile:\n{exc}")
+            return
+
+        QMessageBox.information(
+            self, "Novelty profile",
+            f"{nv.report(profile)}\n\nSaved to:\n"
+            f"{nv.profile_path(weights)}\n\n"
+            f"It is picked up the next time live detect starts. A crop named as "
+            f"a label but sitting outside that label's radius is reported "
+            f"'unknown' rather than named.")
+        self.status.showMessage(
+            f"Novelty profile: {len(profile)} class(es)", 6000)
 
     def _browse_live_classifier(self) -> None:
         path, _ = QFileDialog.getOpenFileName(

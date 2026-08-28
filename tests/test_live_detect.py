@@ -544,24 +544,25 @@ def test_a_track_keeps_the_classifier_confidence_apart_from_the_box_one():
     assert track.has_identity
 
 
-def test_the_readout_names_the_box_number_so_the_pair_is_not_a_contradiction():
+def test_the_plate_names_the_box_number_so_the_pair_is_not_a_contradiction():
+    """On the plate, not in the readout: the plate is what an operator reads
+    off a moving part, and that is where the two numbers have to agree."""
+    items = ld.apply_identities([{"name": "label", "conf": 0.91}],
+                                [("sp_g31", 1.00)])
+    plate = items[0]["label"]
+    assert plate.startswith("sp_g31 1.00")
+    assert "box 0.91" in plate
+
+
+def test_the_readout_stays_one_id_and_one_held_average():
+    """The pair is on the plate; repeating it here spends a line on something
+    already in view. What stays is the number that moves."""
     book = ld.TrackBook()
     book.update([(1, "sp_g31", 0.91, 1.00)], now=100)
-    line = ld.track_line(book.rows()[0])
-    # The plate's number first -- the two readings of one object agree -- and
-    # the detector's alongside it, said out loud rather than left to be guessed.
-    assert line.startswith("sp_g31 1.00")
-    assert "box 0.91" in line
-
-
-def test_without_stage_two_the_line_stays_one_id_and_one_number():
-    """A detector-only run has nothing to disambiguate, and a bare `box`
-    prefix there would name a distinction that does not exist."""
-    book = ld.TrackBook()
-    book.update([(1, "label", 0.91)], now=100)
-    track = book.rows()[0]
-    assert not track.has_identity
-    assert ld.track_line(track) == "label 0.91"
+    assert ld.track_line(book.rows()[0]) == "sp_g31 0.91"
+    book2 = ld.TrackBook()
+    book2.update([(1, "label", 0.91)], now=100)
+    assert ld.track_line(book2.rows()[0]) == "label 0.91"
 
 
 def test_frames_stage_two_missed_do_not_drag_its_average_down():
@@ -592,11 +593,13 @@ def test_the_readout_and_the_plate_report_the_same_battery_the_same_way():
                                  ids=[7])])
         items = ld.apply_identities(items, [(win.label_id, 1.0)])
         win._on_live_result(items, 0.02)
-        text = win.live_readout.toPlainText()
-        assert f"{win.label_id} 1.00" in text, "the readout still shows stage 1"
-        assert "box 0.91" in text
-        # And the plate the operator reads on the frame says the same thing.
-        assert items[0]["label"] == f"{win.label_id} 1.00"
+        # The plate the operator reads carries both, so the pair is legible
+        # where it is actually read.
+        assert items[0]["label"] == f"{win.label_id} 1.00  box 0.91"
+        # And stage 2's confidence still reaches the book, which is what makes
+        # a held identity average possible at all.
+        assert win._live_tracks.rows()[0].mean_identity == pytest.approx(1.0)
+        assert f"{win.label_id} 0.91" in win.live_readout.toPlainText()
     finally:
         win._live_thread = None
 
@@ -847,9 +850,9 @@ def test_identities_land_on_the_boxes_they_belong_to():
              {"name": "label", "track_id": 7, "conf": 0.8}]
     out = ld.apply_identities(items, [("2220-9199", 0.97), ("warn-g31-en", 0.88)])
     assert out[0]["name"] == "2220-9199" and out[1]["name"] == "warn-g31-en"
-    # The plate is the id and the confidence, nothing else -- the track id is
-    # still on the item for the readout to group by, just not drawn on the box.
-    assert out[0]["label"] == "2220-9199 0.97"
+    # The plate is the id and the two confidences, nothing else -- the track id
+    # is still on the item for the readout to group by, just not drawn on it.
+    assert out[0]["label"] == "2220-9199 0.97  box 0.90"
     assert out[0]["track_id"] == 3
     # The detector's own answer is kept, so a disagreement stays visible.
     assert out[0]["detector_name"] == "label"
@@ -1574,18 +1577,21 @@ def test_starting_a_run_clears_the_previous_run_s_boxes(monkeypatch):
     assert win.canvas.model_test_overlays == []
 
 
-def test_the_plate_carries_the_id_and_the_confidence_and_nothing_else():
+def test_the_plate_carries_the_id_and_the_confidences_and_nothing_else():
     """Read at a glance while parts move past: every extra character on the box
-    competes with the two that matter. The track id stays on the item, because
-    the readout groups by it."""
+    competes with the ones that matter. The track id stays on the item, because
+    the readout groups by it -- it is not drawn."""
     results = [_Results([[10, 10, 40, 40]], {0: "2220-9199"}, [0.91], [0], ids=[5])]
     items = _items(results)
+    # Detector-only: one number, and no `box` prefix naming a distinction that
+    # does not exist yet.
     assert items[0]["label"] == "2220-9199 0.91"
     assert items[0]["track_id"] == 5
 
     identified = ld.apply_identities(items, [("ODX-Long", 0.87)])
-    assert identified[0]["label"] == "ODX-Long 0.87"
+    assert identified[0]["label"] == "ODX-Long 0.87  box 0.91"
     assert identified[0]["track_id"] == 5
+    assert "#" not in identified[0]["label"] and "5" not in identified[0]["label"]
 
 
 # --- the readout is readable while it updates -------------------------------
