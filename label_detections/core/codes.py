@@ -143,6 +143,41 @@ def resolution_note(symbology: str, symbol_px: float) -> str:
             f"clean scan, not for one that has been through a lens and a warp.")
 
 
+def framing_note(symbology: str, region_w: float, label_px: float,
+                 frame_px: float) -> str:
+    """How much tighter the framing has to be, in the units of the problem.
+
+    "Get closer" is not an instruction anybody can act on. The share of the
+    frame the label occupies is measurable with a tape and a test shot, and it
+    is the thing that actually has to change -- so that is what this reports,
+    along with whether the sensor was ever the limit. Usually it is not: a
+    label sitting in the middle of a wide field is spending most of its pixels
+    on the table around it.
+    """
+    modules = MODULES.get(str(symbology or "").lower())
+    if not modules or region_w <= 0 or label_px <= 0 or frame_px <= 0:
+        return ""
+    now = label_px / frame_px
+    have = px_per_module(symbology, label_px * region_w)
+    if have >= MIN_PX_PER_MODULE:
+        return (f"The label fills {now:.0%} of the frame width, which is "
+                f"enough for this code.")
+    needed_px = MIN_PX_PER_MODULE * modules / region_w
+    share = needed_px / frame_px
+    if share <= 1.0:
+        return (f"The label fills {now:.0%} of the frame width. It needs to "
+                f"fill {share:.0%} -- {needed_px / label_px:.2f}x tighter -- "
+                f"for {MIN_PX_PER_MODULE:.0f} px per module. The sensor is not "
+                f"the limit here; most of its pixels are on whatever surrounds "
+                f"the label.")
+    return (f"The label fills {now:.0%} of the frame width, and even filling "
+            f"it completely gives only "
+            f"{px_per_module(symbology, frame_px * region_w):.2f} px per "
+            f"module. This code is too small a share of this label to read at "
+            f"this sensor size -- it needs a camera with more pixels across, "
+            f"or its own closer view.")
+
+
 def matches(pattern: str, text: str) -> bool:
     """Does the decoded text satisfy a label's pattern?
 

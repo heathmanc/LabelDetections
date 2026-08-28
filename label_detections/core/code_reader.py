@@ -345,6 +345,15 @@ def diagnose(frame, quad, specs) -> dict:
     whole = rectify_quad(frame, quad, max_side=FALLBACK_MAX_SIDE)
     whole_reads, whole_how = decode(whole, detail=True)
     out["whole"] = {"crop": whole, "reads": whole_reads, "how": whole_how}
+    # How wide the label and the frame are in the ORIGINAL pixels, which is
+    # what any advice about the camera has to be measured in. The whole-label
+    # crop is capped, so its own width says nothing about either.
+    try:
+        xs = [float(p[0]) for p in quad[:4]]
+        out["label_px"] = max(xs) - min(xs)
+        out["frame_px"] = float(frame.shape[1])
+    except Exception:
+        pass
     return out
 
 
@@ -378,11 +387,16 @@ def diagnosis_text(report: dict) -> str:
         declared = list(getattr(entry["spec"], "region", None) or [])
         if crop is not None and len(declared) >= 4 and declared[2] > 0:
             grown = declared[2] * (1.0 + region_margin(entry["spec"]))
+            symbology = getattr(entry["spec"], "symbology", "")
             note = logic.resolution_note(
-                getattr(entry["spec"], "symbology", ""),
-                crop.shape[1] * declared[2] / grown)
+                symbology, crop.shape[1] * declared[2] / grown)
             if note:
                 lines.append(f"   {note}")
+            framing = logic.framing_note(symbology, declared[2],
+                                         report.get("label_px", 0.0),
+                                         report.get("frame_px", 0.0))
+            if framing:
+                lines.append(f"   {framing}")
 
     if whole.get("crop") is not None:
         crop = whole["crop"]

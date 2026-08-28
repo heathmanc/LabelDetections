@@ -734,3 +734,44 @@ def test_with_no_live_result_it_falls_back_to_the_drawn_box(win, monkeypatch):
     win._live_result_frame = None
     win.label_id = "not_a_real_label"
     assert win._code_test_subject()[1] is None      # no such label, no crash
+
+
+# --- is it the camera or the framing ----------------------------------------
+#
+# "Get closer" is not an instruction anybody can act on, and "you need a better
+# camera" is usually wrong: a label in the middle of a wide field is spending
+# most of its pixels on the table around it. The share of the frame the label
+# fills is measurable with a test shot, and it is the thing that has to change.
+
+def test_the_framing_is_blamed_before_the_sensor():
+    """The real case: 20 MP, and the label using 38% of the width of it."""
+    note = cd.framing_note("upca", 0.151, label_px=2109, frame_px=5496)
+    assert "fills 38%" in note
+    assert "needs to fill 46%" in note and "1.19x tighter" in note
+    assert "sensor is not the limit" in note
+
+
+def test_adequate_framing_is_confirmed_rather_than_nagged_at():
+    note = cd.framing_note("upca", 0.151, label_px=4400, frame_px=5496)
+    assert "enough for this code" in note
+    assert "tighter" not in note
+
+
+def test_a_code_too_small_for_the_sensor_says_so_honestly():
+    """Sometimes it really is the camera, and saying "frame it tighter" then
+    sends somebody to move a mount that cannot help."""
+    note = cd.framing_note("upca", 0.03, label_px=2109, frame_px=5496)
+    assert "even filling it completely" in note
+    assert "more pixels across" in note
+
+
+def test_no_framing_advice_without_the_numbers_to_base_it_on():
+    assert cd.framing_note("upca", 0.151, 0, 5496) == ""
+    assert cd.framing_note("code128", 0.151, 2109, 5496) == ""
+
+
+def test_the_pixels_per_module_thresholds_are_the_measured_ones():
+    """These came from running real symbols through the real pipeline, not
+    from a datasheet, and the note's credibility rests on them."""
+    assert cd.MIN_PX_PER_MODULE == 4.0
+    assert cd.MODULES["upca"] == 95 and cd.MODULES["ean13"] == 95
