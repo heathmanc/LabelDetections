@@ -16,7 +16,7 @@ question was answered once, on the artwork, by an operator drawing a box.
 from __future__ import annotations
 
 from . import text_read as logic
-from .geometry import place_unit_rect
+from .geometry import oriented, place_unit_rect
 from .imageio import rectify_quad
 
 # A little context around the drawn box. Recognisers are trained on crops with
@@ -102,40 +102,55 @@ def _expand(rect: list[float], margin: float) -> list[float]:
     return [x, y, min(w, 1.0 - x), min(h, 1.0 - y)]
 
 
-def crop_field(frame, quad, spec):
+def crop_field(frame, quad, spec, flipped: bool = False):
     """The pixels of one text field, out of the full-resolution frame."""
     region = list(getattr(spec, "region", None) or [])
     if frame is None or quad is None or len(quad) < 4 or len(region) < 4:
         return None
-    placed = place_unit_rect(quad, _expand(region, REGION_MARGIN))
+    placed = place_unit_rect(oriented(quad, flipped),
+                             _expand(region, REGION_MARGIN), orient=False)
     if not placed:
         return None
     return rectify_quad(frame, placed)
 
 
-def read_label(frame, quad, fields) -> list[logic.Read]:
-    """Read every text field this label demands, out of one frame."""
+def read_label(frame, quad, fields, rotation_policy: str = "") -> list[logic.Read]:
+    """Read every text field this label demands, out of one frame.
+
+    Both ways up where the library says the label may arrive turned over. Four
+    corners cannot say which way up printing is, so an upside-down label puts
+    every region at the diagonally opposite end -- and the only thing that
+    settles it is reading and seeing which reading says what it should.
+
+    The reads are pooled rather than the orientation being chosen here: it is
+    the pattern match that decides, and a crop of the wrong end of the label
+    almost never produces text that matches an enrolled part number.
+    """
+    from .code_reader import orientations
+
     engine, _reason = backend()
     if engine is None:
         return []
     out: list[logic.Read] = []
     for spec in logic.demanded(fields):
-        crop = crop_field(frame, quad, spec)
-        if crop is not None:
-            out.extend(recognise(crop))
+        for flipped in orientations(rotation_policy):
+            crop = crop_field(frame, quad, spec, flipped)
+            if crop is not None:
+                out.extend(recognise(crop))
     return out
 
 
 class Field:
     """A frozen copy of one TextField, safe to hand to the worker thread."""
 
-    __slots__ = ("name", "policy", "pattern", "region")
+    __slots__ = ("name", "policy", "pattern", "region", "rotation_policy")
 
     def __init__(self, name="", policy="", pattern="", region=()):
         self.name = name
         self.policy = policy
         self.pattern = pattern
         self.region = list(region)
+        self.rotation_policy = ""
 
 
 def fields_from(label) -> list[Field]:
@@ -154,6 +169,9 @@ def library_snapshot(library) -> tuple[dict, dict]:
     for label in (library.all() if library is not None else []):
         label_id = str(getattr(label, "label_id", ""))
         frozen = fields_from(label)
+        policy = str(getattr(label, "rotation_policy", "") or "")
+        for spec in frozen:
+            spec.rotation_policy = policy
         if frozen:
             fields[label_id] = frozen
         wanted = [f.pattern.lstrip("^").rstrip("$")

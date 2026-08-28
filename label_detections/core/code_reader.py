@@ -20,7 +20,7 @@ whole label, which works and costs more.
 from __future__ import annotations
 
 from . import codes as logic
-from .geometry import place_unit_rect
+from .geometry import oriented, place_unit_rect
 from .imageio import rectify_quad
 
 # The whole-label fallback, capped. Only used when no region was drawn: a
@@ -203,7 +203,7 @@ class Spec:
     """
 
     __slots__ = ("role", "symbology", "policy", "pattern", "region",
-                 "quiet_zone_mm", "code_width_mm")
+                 "quiet_zone_mm", "code_width_mm", "rotation_policy")
 
     def __init__(self, role="", symbology="", policy="", pattern="", region=(),
                  quiet_zone_mm=0.0, code_width_mm=0.0):
@@ -214,6 +214,7 @@ class Spec:
         self.region = list(region)
         self.quiet_zone_mm = float(quiet_zone_mm or 0.0)
         self.code_width_mm = float(code_width_mm or 0.0)
+        self.rotation_policy = ""
 
 
 def specs_from(label) -> list[Spec]:
@@ -266,7 +267,23 @@ def _expand(rect: list[float], margin: float) -> list[float]:
     return [x, y, min(w, 1.0 - x), min(h, 1.0 - y)]
 
 
-def read_label(frame, quad, specs) -> list[logic.Read]:
+# Which way up a label was presented cannot be read off four corners: an
+# upside-down label produces corners in the same slots as an upright one, so
+# every region measured from the top-left lands at the diagonally opposite end.
+# The only thing that settles it is reading the label and seeing which reading
+# produces the code that belongs there -- so where the library says a label may
+# arrive turned over, both are tried and the reads are pooled. A wrong-way-up
+# crop almost never decodes, and if it does it still has to satisfy a checksum
+# and match an enrolled pattern before it means anything.
+FLIPPABLE = ("flip_ok", "any")
+
+
+def orientations(rotation_policy: str) -> list[bool]:
+    """Which readings of a quad to try, in order. False is upright."""
+    return [False, True] if str(rotation_policy or "") in FLIPPABLE else [False]
+
+
+def read_label(frame, quad, specs, rotation_policy: str = "") -> list[logic.Read]:
     """Decode the codes of one detected label out of the full-resolution frame.
 
     Tries each declared region first and stops as soon as something decodes --
@@ -280,20 +297,23 @@ def read_label(frame, quad, specs) -> list[logic.Read]:
         return []
 
     wanted = logic.demanded(specs)
+    tries = [(flipped, oriented(quad, flipped))
+             for flipped in orientations(rotation_policy)]
     for spec in wanted:
         region = list(getattr(spec, "region", None) or [])
         if len(region) < 4:
             continue
-        placed = place_unit_rect(quad, _expand(region, region_margin(spec)))
-        if not placed:
-            continue
-        # No max_side: this is the one crop in the pipeline that must not be
-        # shrunk. Everything else here downsamples for a model; a decoder wants
-        # every printed module it can get.
-        patch = rectify_quad(frame, placed)
-        reads = decode(patch)
-        if reads:
-            return reads
+        for _flipped, settled in tries:
+            placed = place_unit_rect(settled, _expand(region, region_margin(spec)),
+                                     orient=False)
+            if not placed:
+                continue
+            # No max_side: this is the one crop in the pipeline that must not
+            # be shrunk. Everything else here downsamples for a model; a
+            # decoder wants every printed module it can get.
+            reads = decode(rectify_quad(frame, placed))
+            if reads:
+                return reads
 
     if any(len(list(getattr(s, "region", None) or [])) >= 4 for s in wanted):
         # Regions were drawn and none of them decoded. Searching the whole
@@ -519,6 +539,11 @@ def library_snapshot(library) -> tuple[dict, dict]:
     for label in (library.all() if library is not None else []):
         label_id = str(getattr(label, "label_id", ""))
         frozen = specs_from(label)
+        # Carried on the specs rather than in a parallel map: the policy
+        # belongs to the label and every spec on it is read the same way up.
+        policy = str(getattr(label, "rotation_policy", "") or "")
+        for spec in frozen:
+            spec.rotation_policy = policy
         if frozen:
             specs[label_id] = frozen
         found = [s.pattern for s in logic.demanded(frozen) if s.pattern]

@@ -101,6 +101,26 @@ def order_quad(quad: Quad) -> Quad:
     return [[x, y] for x, y in ordered]
 
 
+def flip_quad(quad: Quad) -> Quad:
+    """The same four corners read as a label turned 180 degrees.
+
+    ``order_quad`` normalises to the IMAGE's top-left, which is all geometry
+    can do -- nothing in four corners says which way up the printing is. A
+    label presented upside down therefore comes back with its corners in the
+    same slots as one the right way up, and every region measured from the
+    top-left lands at the diagonally opposite end of it.
+
+    Rotating the corner order by two is exactly that 180 degrees: the corner
+    that was the label's top-left becomes the top-left again once the label is
+    turned over. Which of the two readings is right cannot be decided here --
+    it is decided by reading the label and seeing which one produces the
+    expected code or text.
+    """
+    if len(quad) != 4:
+        return list(quad)
+    return [list(quad[2]), list(quad[3]), list(quad[0]), list(quad[1])]
+
+
 def quad_centroid(quad: Quad) -> tuple[float, float]:
     n = len(quad) or 1
     return (sum(p[0] for p in quad) / n, sum(p[1] for p in quad) / n)
@@ -214,7 +234,7 @@ def map_quad(h: Matrix, quad: Quad) -> Quad:
 UNIT_QUAD: Quad = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]
 
 
-def homography_to_unit(quad: Quad) -> Matrix | None:
+def homography_to_unit(quad: Quad, orient: bool = True) -> Matrix | None:
     """Image -> label space: flatten ``quad`` onto the unit square.
 
     Feed it a label's four corners and every coordinate inside it becomes a
@@ -228,20 +248,35 @@ def homography_to_unit(quad: Quad) -> Matrix | None:
     mismatch. Drawn boxes are already in this order; a detector's oriented box
     is not.
     """
-    return homography_from_points(order_quad(quad), UNIT_QUAD)
+    return homography_from_points(order_quad(quad) if orient else list(quad),
+                                  UNIT_QUAD)
 
 
-def homography_from_unit(quad: Quad) -> Matrix | None:
+def homography_from_unit(quad: Quad, orient: bool = True) -> Matrix | None:
     """Label space -> image. The inverse direction of the above.
 
     Ordered for the same reason, and it has to be the same rule: these two are
     inverses, and a pair of inverses that disagree about which corner is the
     top-left silently stops round-tripping.
     """
-    return homography_from_points(UNIT_QUAD, order_quad(quad))
+    return homography_from_points(UNIT_QUAD,
+                                  order_quad(quad) if orient else list(quad))
 
 
-def place_unit_rect(quad: Quad, rect: list[float]) -> Quad | None:
+def oriented(quad: Quad, flipped: bool = False) -> Quad:
+    """A quad in canonical order, optionally read as the label turned over.
+
+    The one place the two operations are combined, because the order matters:
+    flipping first and ordering afterwards normalises the flip straight back
+    out again. Everything downstream takes the result of this and is told not
+    to re-order it.
+    """
+    settled = order_quad(quad)
+    return flip_quad(settled) if flipped else settled
+
+
+def place_unit_rect(quad: Quad, rect: list[float],
+                    orient: bool = True) -> Quad | None:
     """Where a region defined on flat artwork lands on a drawn label.
 
     This is what puts a barcode box on screen without anyone drawing it. The
@@ -252,7 +287,7 @@ def place_unit_rect(quad: Quad, rect: list[float]) -> Quad | None:
     Nothing is measured and nothing is calibrated: the mapping is pure
     proportion, so it holds at any distance and any angle.
     """
-    h = homography_from_unit(quad)
+    h = homography_from_unit(quad, orient=orient)
     if h is None or len(rect) < 4:
         return None
     x, y, w, hh = (float(v) for v in rect[:4])

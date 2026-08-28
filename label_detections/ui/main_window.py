@@ -3674,8 +3674,63 @@ class MainWindow(QMainWindow):
                 # The read-regions follow from the four corners just drawn, so
                 # the operator confirms a barcode box rather than drawing one.
                 # Hand-adjusted regions are preserved.
-                ann_logic.apply_reference_regions(box, label)
+                #
+                # Which way up matters and four corners cannot say: an
+                # upside-down label puts every region at the diagonally
+                # opposite end, which is what a batch of auto-labelled images
+                # showed. Where the library allows the label to arrive turned
+                # over, the frame decides -- by reading it and seeing which
+                # reading says what it should.
+                ann_logic.apply_reference_regions(
+                    box, label, flipped=self._label_is_flipped(box, label))
         return boxes
+    def _label_is_flipped(self, box: dict, label) -> bool:
+        """Is this label presented upside down in this frame?
+
+        Only asked where the library says it can be. A label with a fixed
+        rotation is never turned over, and the read this would cost is a read
+        for an answer already known.
+
+        Decided by reading, because nothing else can decide it: four corners
+        are the same corners whichever way up the printing is. Whichever
+        orientation produces the code or text this label is supposed to carry
+        is the one it was presented in. Neither, and it stays upright -- the
+        regions then land where the geometry says, which is no worse than
+        before and visibly wrong rather than confidently wrong.
+        """
+        from label_detections.core import code_reader, codes as code_logic
+        from label_detections.core import geometry as geo
+        from label_detections.core import text_read as text_logic, text_reader
+
+        if str(getattr(label, "rotation_policy", "") or "") not in code_reader.FLIPPABLE:
+            return False
+        frame = self.last_raw
+        quad = ann_logic.box_polygon(box)
+        if frame is None or len(quad) < 4:
+            return False
+
+        specs = code_reader.specs_from(label)
+        wanted = [p.lstrip("^").rstrip("$")
+                  for p in (getattr(spec, "pattern", "")
+                            for spec in code_logic.demanded(specs)) if p]
+        fields = text_reader.fields_from(label)
+        expected = text_logic.expected_for([label])
+        for flipped in (False, True):
+            settled = geo.oriented(quad, flipped)
+            if wanted:
+                reads = code_reader.read_label(frame, settled, specs)
+                if any(code_logic.matches(pattern, text)
+                       for read in reads for text in read.candidates()
+                       for pattern in wanted):
+                    return flipped
+            if expected and text_logic.demanded(fields):
+                reads = text_reader.read_label(frame, settled, fields)
+                joined = " ".join(read.text for read in reads)
+                _who, score, _runner = text_logic.best_match(joined, expected)
+                if score >= text_logic.MIN_SIMILARITY:
+                    return flipped
+        return False
+
     def _refresh_library_label(self) -> None:
         """Show the active library path, how it was chosen, and any pending change."""
         if not hasattr(self, "library_path_label"):

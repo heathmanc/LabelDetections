@@ -209,7 +209,7 @@ def read_value(box: dict, role: str) -> str | None:
 
 # --- reference-anchored placement ------------------------------------------
 
-def place_label_regions(box: dict, label_def) -> list[dict]:
+def place_label_regions(box: dict, label_def, flipped: bool = False) -> list[dict]:
     """Sub-regions for a label, positioned from its library artwork.
 
     This is the shortcut that removes most hand drawing, at labeling time and at
@@ -221,11 +221,11 @@ def place_label_regions(box: dict, label_def) -> list[dict]:
     so it holds at any distance and any angle. A label with no regions drawn on
     its artwork simply gets none placed.
     """
-    quad = box_polygon(box)
+    quad = geo.oriented(box_polygon(box), flipped)
 
     out: list[dict] = []
     for code in getattr(label_def, "codes", []) or []:
-        placed = geo.place_unit_rect(quad, list(getattr(code, "region", []) or []))
+        placed = geo.place_unit_rect(quad, list(getattr(code, "region", []) or []), orient=False)
         if placed is None:
             continue
         out.append(make_region(
@@ -235,26 +235,27 @@ def place_label_regions(box: dict, label_def) -> list[dict]:
             placed_from="reference",
         ))
     for field in getattr(label_def, "text_fields", []) or []:
-        placed = geo.place_unit_rect(quad, list(getattr(field, "region", []) or []))
+        placed = geo.place_unit_rect(quad, list(getattr(field, "region", []) or []), orient=False)
         if placed is None:
             continue
         out.append(make_region(
             "text", placed, field=field.name, placed_from="reference",
         ))
     anchor = list(getattr(label_def, "anchor_region", []) or [])
-    placed = geo.place_unit_rect(quad, anchor)
+    placed = geo.place_unit_rect(quad, anchor, orient=False)
     if placed is not None:
         out.append(make_region("anchor", placed, placed_from="reference"))
     return out
 
 
-def apply_reference_regions(box: dict, label_def, *, overwrite: bool = False) -> dict:
+def apply_reference_regions(box: dict, label_def, *, overwrite: bool = False,
+                            flipped: bool = False) -> dict:
     """Attach reference-placed regions to a box, keeping hand-drawn ones.
 
     An operator who nudged a region because the artwork drifted has produced
     better data than the library has; only ``overwrite`` throws that away.
     """
-    placed = place_label_regions(box, label_def)
+    placed = place_label_regions(box, label_def, flipped)
     if not placed:
         return box
     existing = regions(box)
