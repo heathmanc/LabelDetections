@@ -176,6 +176,17 @@ def _window():
     return _win
 
 
+class _FakeOpenCamera:
+    """Open, threaded, and never asked for a frame -- enough for _live_running."""
+    threaded = True
+
+    def is_open(self):
+        return True
+
+    def read_fps(self):
+        return 17.0
+
+
 def _watch_infer(win, sink: list):
     """Collect the frames the pump submits.
 
@@ -2011,3 +2022,88 @@ def test_the_readout_says_the_numbers_are_not_gpu_time():
     synced = ld.phase_line({"preprocess": 3.0, "inference": 7.0,
                             "postprocess": 2.0}, total_ms=12.0)
     assert "issued, not GPU" not in synced
+
+
+# --- a result must not cost a whole camera frame ----------------------------
+
+@ui
+def test_a_finished_result_takes_the_newest_frame_immediately():
+    """The busy flag clears when the result lands on the GUI thread. If that
+    happens between two ticks -- which it usually does -- the tick's pump check
+    has already run and found the worker busy, so waiting for the next one
+    costs a whole camera interval. That is one inference per two frames: 10/s
+    behind a 17/s camera."""
+    win = _window()
+    _label(win, "beat")
+    handed = []
+    _watch_infer(win, handed)
+    win._live_thread = object()
+    win._live_loaded = True
+    win._live_tracking = False
+    win._live_busy = True
+    win._live_last_started = time.monotonic() - 1.0
+    submitted = np.zeros((8, 8, 3), np.uint8)
+    win._inflight_frame = submitted
+    win._inflight_scale = (1.0, 1.0)
+    win._live_overlay_scale = (1.0, 1.0)
+    # A newer frame has arrived while the result was in flight.
+    win.last_raw = np.ones((8, 8, 3), np.uint8)
+    real = win.camera
+    try:
+        win.camera = _FakeOpenCamera()
+        win._on_live_result([], 0.02, {})
+        assert len(handed) == 1, "the newest frame waited for the next tick"
+        assert handed[0] is win.last_raw
+    finally:
+        win.camera = real
+        win._live_thread = None
+        win._live_loaded = False
+        win._live_busy = False
+        win.last_raw = None
+
+
+@ui
+def test_it_does_not_re_run_the_frame_it_just_finished():
+    """No tick has happened, so there is nothing new to offer -- running it
+    again would burn a GPU pass to redraw the same boxes."""
+    win = _window()
+    handed = []
+    _watch_infer(win, handed)
+    win._live_thread = object()
+    win._live_loaded = True
+    win._live_tracking = False
+    win._live_busy = True
+    win._live_last_started = time.monotonic() - 1.0
+    frame = np.zeros((8, 8, 3), np.uint8)
+    win._inflight_frame = frame
+    win.last_raw = frame                    # the same object: no new tick
+    real = win.camera
+    try:
+        win.camera = _FakeOpenCamera()
+        win._on_live_result([], 0.02, {})
+        assert handed == []
+    finally:
+        win.camera = real
+        win._live_thread = None
+        win._live_loaded = False
+        win._live_busy = False
+        win.last_raw = None
+
+
+def test_the_note_does_not_blame_a_ceiling_the_rate_is_nowhere_near():
+    """Naming the camera while running at 10/s behind a 17/s camera was a
+    comfortable answer to a question nobody asked."""
+    rolling = ld.Rolling()
+    for i in range(6):
+        rolling.record(0.033, now=100 + i * 0.097)   # 33 ms of work, 10/s
+    note = ld.throughput_note(rolling, interval_s=1 / 30.0, camera_fps=17.0)
+    assert "below every ceiling" in note
+    assert "the limit is the camera" not in note
+
+
+def test_the_note_still_names_the_camera_when_the_rate_is_reaching_it():
+    rolling = ld.Rolling()
+    for i in range(6):
+        rolling.record(0.010, now=100 + i * (1 / 17.0))   # 10 ms of work, 17/s
+    note = ld.throughput_note(rolling, interval_s=1 / 30.0, camera_fps=17.0)
+    assert "the limit is the camera, at 17/s" in note

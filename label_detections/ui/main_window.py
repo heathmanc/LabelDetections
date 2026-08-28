@@ -2714,6 +2714,22 @@ class MainWindow(QMainWindow):
         now, and the conversion happens where the tensors live.
         """
         self._live_busy = False
+        # Taken before anything can start the next frame, because pumping
+        # below replaces them.
+        result_frame = getattr(self, "_inflight_frame", self._live_frame)
+        result_scale = getattr(self, "_inflight_scale", self._live_overlay_scale)
+        # The busy flag has just cleared, and this result arrived between two
+        # display ticks -- so the tick's pump check for the newest frame has
+        # already run and found the worker busy. Waiting for the next one costs
+        # a whole camera interval, which is what held inference to 10/s behind
+        # a 17/s camera: one inference per two frames. Offer it now instead.
+        #
+        # Only for a frame that is genuinely newer: identity, because every
+        # tick gets its own array out of read(), so the same object means no
+        # tick has happened and there is nothing new to run.
+        if self._live_running() and self.last_raw is not None \
+                and self.last_raw is not result_frame:
+            self._pump_live_detect(self.last_raw)
         self._live_rolling.record(latency)
         self._live_speed = dict(speed or {})
         items = list(items or [])
@@ -2729,13 +2745,11 @@ class MainWindow(QMainWindow):
         # own thread the two are routinely different, and either mismatch is
         # silent: a sidecar written against a newer image, or boxes scaled by a
         # factor that belonged to another frame.
-        self._live_result_frame = getattr(self, "_inflight_frame", self._live_frame)
+        self._live_result_frame = result_frame
         self._live_result_items = items
         if hasattr(self.canvas, "set_model_test_overlays"):
             self.canvas.set_model_test_overlays(
-                self._scaled_overlay_items(
-                    items, getattr(self, "_inflight_scale",
-                                   self._live_overlay_scale)))
+                self._scaled_overlay_items(items, result_scale))
 
         if getattr(self, "_live_tracking", False):
             self._live_tracks.update(

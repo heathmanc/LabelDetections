@@ -219,7 +219,16 @@ def throughput_note(rolling: "Rolling", interval_s: float = MIN_INTERVAL_S,
         return ""
 
     floor_fps = 1.0 / interval_s if interval_s > 0 else float("inf")
-    # Whichever ceiling is lowest is the one in force.
+    # Whichever ceiling is lowest is the one in force -- but only if the rate
+    # is actually reaching it. Naming the camera while running at 10/s behind a
+    # 17/s camera was a comfortable answer to a question nobody asked: the
+    # ceiling was not what was holding it back.
+    ceilings = [c for c in (camera_fps or 0.0, floor_fps) if c > 0]
+    lowest = min(ceilings) if ceilings else float("inf")
+    if rolling.rate < lowest * 0.8:
+        return (f"   (model could run ~{possible:.0f}/s and nothing above is "
+                f"asking for less; the rate is below every ceiling, so the "
+                f"frames are not being offered)")
     if camera_fps and camera_fps <= floor_fps and camera_fps < possible:
         cause = f"the camera, at {camera_fps:.0f}/s"
     elif floor_fps < possible:
