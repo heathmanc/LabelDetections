@@ -1,6 +1,8 @@
 """Decode a saved crop and say exactly what happened, rung by rung.
 
-    python scripts/decode_check.py data/code_reads/*.png
+    python scripts/decode_check.py                  # every saved crop
+    python scripts/decode_check.py data/code_reads   # a folder
+    python scripts/decode_check.py one_crop.png      # or just one
 
 The Test Read dialog reports which attempt succeeded, but only for the part
 currently under the camera. This runs the same ladder against a PNG that was
@@ -19,12 +21,56 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
-def main(argv: list[str]) -> int:
-    if not argv:
-        print(__doc__)
-        return 2
+IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff")
 
+
+def resolve(argv: list[str]) -> list[Path]:
+    """Every image the arguments name.
+
+    Globs are expanded here rather than left to the shell. cmd.exe does not
+    expand them, so ``*.png`` arrives as a literal filename and the whole thing
+    fails with "could not be read as an image" -- which reads as a broken file
+    rather than a shell difference.
+
+    With no arguments at all, the folder Save Crops writes to, since that is
+    where the interesting failures already are.
+    """
+    from label_detections.core.storage import DATA_DIR
+
+    if not argv:
+        argv = [str(DATA_DIR / "code_reads")]
+
+    found: list[Path] = []
+    for name in argv:
+        path = Path(name)
+        if path.is_dir():
+            found += sorted(p for p in path.iterdir()
+                            if p.suffix.lower() in IMAGE_SUFFIXES)
+        elif path.exists():
+            found.append(path)
+        else:
+            # A glob the shell left alone, relative to wherever it points.
+            parent = path.parent if str(path.parent) != "" else Path(".")
+            found += sorted(parent.glob(path.name))
+    # Same file named twice is a wasted run and a confusing report.
+    seen, unique = set(), []
+    for path in found:
+        key = path.resolve()
+        if key not in seen:
+            seen.add(key)
+            unique.append(path)
+    return unique
+
+
+def main(argv: list[str]) -> int:
     import cv2
+
+    paths = resolve(argv)
+    if not paths:
+        print(__doc__)
+        print(f"No images found in: {', '.join(argv) if argv else 'data/code_reads'}")
+        print("Run Test Read in the app and press Save crops to make some.")
+        return 2
 
     from label_detections.core import code_reader as cr
 
@@ -35,8 +81,7 @@ def main(argv: list[str]) -> int:
     module, _ = cr.backend()
 
     status = 1
-    for name in argv:
-        path = Path(name)
+    for path in paths:
         image = cv2.imread(str(path), cv2.IMREAD_COLOR)
         if image is None:
             print(f"{path}: could not be read as an image")

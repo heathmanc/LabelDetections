@@ -288,3 +288,53 @@ def test_a_correctly_placed_region_that_will_not_read_is_not_blamed_on_placement
     assert "IN THE RIGHT PLACE" in text
     assert "redrawing it is not the fix" in text
     assert "WRONG PLACE" not in text
+
+
+# --- the check script's arguments -------------------------------------------
+#
+# cmd.exe does not expand globs, so `*.png` arrives as a literal filename and
+# the run fails with "could not be read as an image" -- which reads as a broken
+# file rather than a shell difference, and sends somebody looking in the wrong
+# place entirely.
+
+def _crops(tmp_path):
+    for name in ("a.png", "b.png", "notes.txt"):
+        (tmp_path / name).write_bytes(b"x")
+    return tmp_path
+
+
+def test_a_glob_the_shell_left_alone_is_expanded(tmp_path):
+    from scripts.decode_check import resolve
+
+    found = resolve([str(_crops(tmp_path) / "*.png")])
+    assert sorted(p.name for p in found) == ["a.png", "b.png"]
+
+
+def test_a_folder_yields_its_images_and_nothing_else(tmp_path):
+    from scripts.decode_check import resolve
+
+    found = resolve([str(_crops(tmp_path))])
+    assert sorted(p.name for p in found) == ["a.png", "b.png"]
+
+
+def test_a_plain_filename_still_works(tmp_path):
+    from scripts.decode_check import resolve
+
+    one = _crops(tmp_path) / "a.png"
+    assert resolve([str(one)]) == [one]
+
+
+def test_the_same_file_named_twice_runs_once(tmp_path):
+    """A wasted run and a confusing report."""
+    from scripts.decode_check import resolve
+
+    folder = _crops(tmp_path)
+    found = resolve([str(folder), str(folder / "a.png")])
+    assert len(found) == 2
+
+
+def test_a_path_that_matches_nothing_yields_nothing_rather_than_itself(tmp_path):
+    """Handing the literal back is what produced the misleading error."""
+    from scripts.decode_check import resolve
+
+    assert resolve([str(tmp_path / "no_such_*.png")]) == []
