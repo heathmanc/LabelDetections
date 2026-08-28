@@ -246,6 +246,14 @@ CHART_SERIES = (
     ("cls_loss", "train/cls_loss"),
     ("mAP50", "metrics/mAP50("),
     ("mAP50-95", "metrics/mAP50-95("),
+    # A classification run writes none of the above. Its loss column is
+    # "train/loss" -- which is not a substring of "train/box_loss", so the two
+    # cannot cross-match -- and it reports top-1/top-5 accuracy instead of mAP.
+    # Listed together rather than split by task because a series that is not in
+    # the file is skipped, so one table serves both stages.
+    ("loss", "train/loss"),
+    ("top1", "metrics/accuracy_top1"),
+    ("top5", "metrics/accuracy_top5"),
 )
 
 
@@ -265,6 +273,8 @@ SUMMARY_METRICS = (
     ("recall", "metrics/recall"),
     ("mAP50", "metrics/mAP50("),
     ("mAP50-95", "metrics/mAP50-95("),
+    ("accuracy_top1", "metrics/accuracy_top1"),
+    ("accuracy_top5", "metrics/accuracy_top5"),
 )
 
 
@@ -292,8 +302,12 @@ def summarize_results(rows: list[dict]) -> dict:
         if series:
             final[label] = series[-1]
 
-    # Rank epochs by mAP50-95, then mAP50, to find the best checkpoint.
-    rank = metric_series(rows, "mAP50-95(") or metric_series(rows, "mAP50(")
+    # Rank epochs by mAP50-95, then mAP50, then top-1 accuracy, to find the
+    # best checkpoint. Without the last one a classification run ranked on an
+    # empty series and "best" silently meant "last".
+    rank = (metric_series(rows, "mAP50-95(")
+            or metric_series(rows, "mAP50(")
+            or metric_series(rows, "metrics/accuracy_top1"))
     best_idx = max(range(len(rank)), key=lambda i: rank[i]) if rank else len(rows) - 1
 
     best: dict[str, float] = {}

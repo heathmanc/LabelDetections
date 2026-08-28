@@ -770,3 +770,42 @@ def test_the_export_writes_the_crop_size_the_report_recommends():
     written = cv2.imread(str(next(classify_dir.rglob("*.jpg")))).shape[0]
     assert written == recommended, (
         f"export wrote {written} px, report recommends {recommended} px")
+
+
+# --- progress reporting -----------------------------------------------------
+
+def test_the_export_reports_progress_it_can_be_believed(tmp_path):
+    """A few thousand 20 MP frames take minutes, and a window that paints
+    nothing for minutes is indistinguishable from one that has hung."""
+    from label_detections.core import yolo_export
+
+    from label_detections.core import yolo_export as ye
+    _dataset("prog_export", images=6)
+    entries = ye.collect_entries("prog_export", True)
+    assert entries
+    seen = []
+    out = yolo_export.write_dataset(
+        tmp_path / "ds", entries, task="obb",
+        progress=lambda done, total, msg: seen.append((done, total, msg)))
+
+    assert out.exists()
+    assert seen, "nothing reported"
+    totals = {t for _d, t, _m in seen}
+    assert len(totals) == 1, f"the total moved during the run: {totals}"
+    assert totals.pop() == len(entries)
+    # Monotonic, starts at 0, ends at the total -- a bar that goes backwards or
+    # stops short is worse than no bar.
+    dones = [d for d, _t, _m in seen]
+    assert dones[0] == 0
+    assert dones == sorted(dones)
+    assert dones[-1] == len(entries)
+    # And the messages name the file, so a stall points at one image.
+    assert any(".jpg" in m or ".png" in m for _d, _t, m in seen)
+
+
+def test_progress_is_optional(tmp_path):
+    """Every non-interactive caller passes nothing."""
+    from label_detections.core import yolo_export
+    _dataset("prog_export_none", images=3)
+    entries = yolo_export.collect_entries("prog_export_none", True)
+    assert yolo_export.write_dataset(tmp_path / "ds2", entries, task="obb").exists()

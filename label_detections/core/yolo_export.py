@@ -209,13 +209,16 @@ def _write_label_file(out: Path, split: str, stem: str, data: dict,
 
 
 def _write_split(out: Path, entries: list[dataset_logic.Entry], class_index: dict[str, int],
-                 split: str, task: str, class_mode: str = "label_id") -> list[str]:
+                 split: str, task: str, class_mode: str = "label_id",
+                 tick=None) -> list[str]:
     """Copy images and write label files for one split; returns manifest rows."""
     (out / "images" / split).mkdir(parents=True, exist_ok=True)
     (out / "labels" / split).mkdir(parents=True, exist_ok=True)
 
     rows: list[str] = []
     for entry in entries:
+        if tick is not None:
+            tick(f"{split}: {Path(entry.image).name}")
         image = Path(entry.image)
         # Prefix with the label id: two datasets can hold identically named
         # frames, and a plain copy would have one silently overwrite the other.
@@ -294,7 +297,8 @@ def _write_augmented(out: Path, entries: list[dataset_logic.Entry],
 def write_dataset(out: Path, entries: list[dataset_logic.Entry], *, task: str = "obb",
                   split_train: float = DEFAULT_SPLIT_TRAIN, seed: int = DEFAULT_SEED,
                   reviewed_only: bool = True, library=None,
-                  augment: int = 0, class_mode: str = "label_id") -> Path:
+                  augment: int = 0, class_mode: str = "label_id",
+                  progress=None) -> Path:
     """Write a YOLO dataset from already-collected entries.
 
     ``class_mode`` picks what the detector's classes mean -- see CLASS_MODES.
@@ -303,6 +307,11 @@ def write_dataset(out: Path, entries: list[dataset_logic.Entry], *, task: str = 
     whose variable regions turn out to be constant across the dataset -- see
     ``core/augment.py``. Labels whose regions already vary get none, because
     recombining them teaches nothing and dilutes the real images.
+
+    ``progress`` is called as ``progress(done, total, message)`` as images are
+    copied. Optional and ignored by every non-interactive caller: it exists
+    because a few thousand 20 MP frames take minutes, and a window that paints
+    nothing for minutes is indistinguishable from one that has hung.
     """
     class_names: list[str] = []
     seen: set[str] = set()
@@ -339,13 +348,31 @@ def write_dataset(out: Path, entries: list[dataset_logic.Entry], *, task: str = 
         shutil.rmtree(out)
     out.mkdir(parents=True, exist_ok=True)
 
-    rows = ["split,label_id,image,boxes,group,augmented"]
-    rows += _write_split(out, train, class_index, "train", task, class_mode)
-    rows += _write_split(out, val, class_index, "val", task, class_mode)
+    # Copies plus the augmented copies, so the bar does not reach the end and
+    # then sit there through a phase nobody was told about.
+    total = len(train) + len(val) + (len(train) * max(0, augment))
+    done = 0
 
+    def tick(message: str) -> None:
+        nonlocal done
+        done += 1
+        if progress is not None:
+            progress(done, total, message)
+
+    if progress is not None:
+        progress(0, total, "Preparing")
+
+    rows = ["split,label_id,image,boxes,group,augmented"]
+    rows += _write_split(out, train, class_index, "train", task, class_mode, tick)
+    rows += _write_split(out, val, class_index, "val", task, class_mode, tick)
+
+    if progress is not None and augment:
+        progress(done, total, "Building augmented copies")
     augmented_rows, augment_notes = _write_augmented(
         out, train, class_index, task, library, augment, seed, class_mode)
     rows += augmented_rows
+    if progress is not None:
+        progress(total, total, "Writing the manifest")
 
     names_block = "\n".join(f"  {i}: {name}" for i, name in enumerate(class_names))
     (out / "data.yaml").write_text(
@@ -384,7 +411,7 @@ def export_label_yolo(label_id: str, *, task: str = "obb", reviewed_only: bool =
                       split_train: float = DEFAULT_SPLIT_TRAIN,
                       seed: int = DEFAULT_SEED, out: Path | None = None,
                       class_mode: str = "label_id",
-                      library=None, augment: int = 0) -> Path:
+                      library=None, augment: int = 0, progress=None) -> Path:
     """Export one label's dataset on its own.
 
     Useful for checking a single label in isolation. The normal training run
@@ -400,14 +427,15 @@ def export_label_yolo(label_id: str, *, task: str = "obb", reviewed_only: bool =
     target = out or (EXPORT_DIR / f"{safe_token(label_id)}_{task}")
     return write_dataset(target, entries, task=task, split_train=split_train,
                          seed=seed, reviewed_only=reviewed_only,
-                         library=library, augment=augment, class_mode=class_mode)
+                         library=library, augment=augment, class_mode=class_mode,
+                         progress=progress)
 
 
 def export_all_labels_yolo(*, task: str = "obb", reviewed_only: bool = True,
                            split_train: float = DEFAULT_SPLIT_TRAIN,
                            seed: int = DEFAULT_SEED, out: Path | None = None,
                            class_mode: str = "label_id",
-                           library=None, augment: int = 0) -> Path:
+                           library=None, augment: int = 0, progress=None) -> Path:
     """Export every label's dataset into one training set.
 
     This is the normal export, and the only one worth trusting. Labels gather
@@ -431,4 +459,5 @@ def export_all_labels_yolo(*, task: str = "obb", reviewed_only: bool = True,
     target = out or (EXPORT_DIR / f"all_labels_{task}")
     return write_dataset(target, entries, task=task, split_train=split_train,
                          seed=seed, reviewed_only=reviewed_only,
-                         library=library, augment=augment, class_mode=class_mode)
+                         library=library, augment=augment, class_mode=class_mode,
+                         progress=progress)

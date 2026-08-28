@@ -281,3 +281,43 @@ def test_an_announced_directory_is_not_second_guessed_by_the_glob():
     win._train_save_dir = None
     win._scan_for_save_dir("Logging results to runs/obb/not-written-yet")
     assert win._resolve_results_csv() is None
+
+
+# --- a classification run reports different numbers -------------------------
+
+CLASSIFY_CSV = """epoch,time,train/loss,metrics/accuracy_top1,metrics/accuracy_top5,val/loss,lr/pg0
+1,12.0,1.9040,0.4100,0.8800,1.7700,0.001
+2,24.0,1.2100,0.7400,0.9600,1.0200,0.001
+3,36.0,0.8800,0.9100,0.9900,0.7100,0.001
+4,48.0,0.7500,0.8700,0.9900,0.6900,0.001
+"""
+
+
+def test_a_classifier_run_is_summarized_by_its_own_metrics():
+    """Its columns share no substring with the detector's: the loss is
+    train/loss, not train/cls_loss, and it reports accuracy, not mAP. Neither
+    was in the tables, so the classifier's half of the summary was blank."""
+    rows = t.parse_results_csv(CLASSIFY_CSV)
+    summary = t.summarize_results(rows)
+    assert summary["final"]["accuracy_top1"] == pytest.approx(0.87)
+    assert summary["final"]["accuracy_top5"] == pytest.approx(0.99)
+    # Best is ranked on top-1, so it is epoch 3 rather than simply the last.
+    assert summary["best"]["accuracy_top1"] == pytest.approx(0.91)
+    assert summary["best_epoch"] == 3
+
+
+def test_the_classifier_chart_has_series_to_draw():
+    series = t.chart_series(t.parse_results_csv(CLASSIFY_CSV))
+    assert set(series) == {"loss", "top1", "top5"}
+    assert series["top1"] == pytest.approx([0.41, 0.74, 0.91, 0.87])
+
+
+def test_a_detector_loss_column_is_not_mistaken_for_the_classifier_one():
+    """"train/loss" must not match "train/box_loss" -- if it did, a detector
+    run would grow a duplicate series under the wrong name."""
+    detector_csv = (
+        "epoch,train/box_loss,train/cls_loss,metrics/mAP50(B),metrics/mAP50-95(B)\n"
+        "1,1.20,0.90,0.31,0.18\n2,0.95,0.70,0.55,0.33\n"
+    )
+    series = t.chart_series(t.parse_results_csv(detector_csv))
+    assert set(series) == {"box_loss", "cls_loss", "mAP50", "mAP50-95"}

@@ -100,11 +100,13 @@ def crop_targets(data: dict[str, Any]) -> list[tuple[str, list[list[float]]]]:
 
 
 def _write_crops(out: Path, entries: list[dataset_logic.Entry], split: str,
-                 size: int, margin: float) -> list[str]:
+                 size: int, margin: float, tick=None) -> list[str]:
     import cv2
 
     rows: list[str] = []
     for entry in entries:
+        if tick is not None:
+            tick(f"crops {split}: {Path(entry.image).name}")
         image_path = Path(entry.annotation.get("image") or entry.image)
         if not image_path.is_file():
             continue
@@ -128,7 +130,7 @@ def write_crop_dataset(out: Path, entries: list[dataset_logic.Entry], *,
                        size: int = DEFAULT_CROP_PX,
                        margin: float = DEFAULT_MARGIN,
                        split_train: float = DEFAULT_SPLIT_TRAIN,
-                       seed: int = DEFAULT_SEED) -> Path:
+                       seed: int = DEFAULT_SEED, progress=None) -> Path:
     """Write a YOLO classification dataset: ``train/<label_id>/`` crops.
 
     Uses the same group-aware split as the detection export, so passing the
@@ -142,9 +144,18 @@ def write_crop_dataset(out: Path, entries: list[dataset_logic.Entry], *,
         shutil.rmtree(out)
     out.mkdir(parents=True, exist_ok=True)
 
+    total = len(train) + len(val)
+    done = 0
+
+    def tick(message: str) -> None:
+        nonlocal done
+        done += 1
+        if progress is not None:
+            progress(done, total, message)
+
     rows = ["split,label_id,crop,group"]
-    rows += _write_crops(out, train, "train", size, margin)
-    rows += _write_crops(out, val, "val", size, margin)
+    rows += _write_crops(out, train, "train", size, margin, tick)
+    rows += _write_crops(out, val, "val", size, margin, tick)
 
     classes = sorted({r.split(",")[1] for r in rows[1:]})
     if not classes:
@@ -159,6 +170,18 @@ def write_crop_dataset(out: Path, entries: list[dataset_logic.Entry], *,
     return out
 
 
+def _scaled(fn):
+    """Turn a (done, total, msg) callback into one reporting a 0-100 fraction."""
+    if fn is None:
+        return None
+
+    def report(done: int, total: int, message: str) -> None:
+        fraction = (done / total) if total else 1.0
+        fn(int(round(fraction * 100)), 100, message)
+
+    return report
+
+
 def export_crops(entries, *, out: Path | None = None, **kwargs) -> Path:
     return write_crop_dataset(out or (EXPORT_DIR / "all_labels_classify"),
                               entries, **kwargs)
@@ -169,7 +192,8 @@ def export_two_stage(*, task: str = "obb", reviewed_only: bool = True,
                      seed: int = DEFAULT_SEED, out: Path | None = None,
                      library=None, size: int | None = None,
                      imgsz: int = 640,
-                     margin: float = DEFAULT_MARGIN) -> tuple[Path, Path]:
+                     margin: float = DEFAULT_MARGIN,
+                     progress=None) -> tuple[Path, Path]:
     """Both halves of a detect-then-classify pipeline, from one set of entries.
 
     Returns ``(detect_dir, classify_dir)``.
@@ -197,10 +221,19 @@ def export_two_stage(*, task: str = "obb", reviewed_only: bool = True,
         )
 
     base = out or EXPORT_DIR
+    # Two datasets, one bar: the halves are reported as one run because the
+    # operator pressed one button, and a bar that fills and restarts reads as
+    # a job that finished and then started again.
+    def half(offset: int, span: float):
+        if progress is None:
+            return None
+        return lambda done, total, message: progress(
+            offset + int(span * done), 100, message)
+
     detect_dir = yolo_export.write_dataset(
         base / f"two_stage_detect_{task}", entries, task=task,
         split_train=split_train, seed=seed, reviewed_only=reviewed_only,
-        library=library, class_mode="generic")
+        library=library, class_mode="generic", progress=_scaled(half(0, 0.5)))
     if size is None:
         from . import scale_report
         # crop_for_identity, NOT recommend_crop. recommend_crop asks whether a
@@ -212,7 +245,7 @@ def export_two_stage(*, task: str = "obb", reviewed_only: bool = True,
         size = scale_report.crop_for_identity(scale_report.measure(entries))
     classify_dir = write_crop_dataset(
         base / "two_stage_classify", entries, size=int(size), margin=margin,
-        split_train=split_train, seed=seed)
+        split_train=split_train, seed=seed, progress=_scaled(half(50, 0.5)))
     return detect_dir, classify_dir
 
 

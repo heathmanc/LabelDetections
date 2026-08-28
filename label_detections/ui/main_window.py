@@ -120,11 +120,18 @@ class TrainingMetricsChart(QWidget):
     The legend shows each series' latest value.
     """
 
+    # One visual language across both stages: red for the loss coming down,
+    # green for the headline metric going up, blue for the stricter one. A
+    # classification run draws different series and would otherwise get the
+    # default grey for all three, which is three identical white lines.
     _COLORS = {
         "box_loss": "#f87171",
         "cls_loss": "#fb923c",
         "mAP50": "#34d399",
         "mAP50-95": "#60a5fa",
+        "loss": "#f87171",
+        "top1": "#34d399",
+        "top5": "#60a5fa",
     }
     _DEFAULT = "#cbd5e1"
     _AXIS = "#475569"
@@ -1259,6 +1266,10 @@ class MainWindow(QMainWindow):
         # the first click raise instead of starting a run.
         self._train_process = None
         self._train_queue: list[tuple[dict, str]] = []
+        # What each stage of this run produced, so the summary can show
+        # both. The detector's result used to be computed and thrown away
+        # when the queue advanced, leaving only the classifier at the end.
+        self._stage_results: dict[str, dict] = {}
         self._train_stage = "detector"
         # Which run produced which weights, so the summary can wire the whole
         # pipeline instead of offering one file and guessing where it goes.
@@ -1544,6 +1555,8 @@ class MainWindow(QMainWindow):
 
         if not getattr(self, "_train_queue", None) or stage == "detector":
             self.train_log.clear()
+            self._stage_results = {}
+            self._stage_weights = {}
         self.train_log.append(f"--- {stage} ---")
         self.train_log.append("$ " + " ".join(cmd) + "\n")
         for b in (self.train_start_btn, self.train_cls_btn, self.train_both_btn):
@@ -1703,6 +1716,8 @@ class MainWindow(QMainWindow):
         stage = getattr(self, "_train_stage", "detector")
         if weights and Path(weights).exists():
             self._stage_weights[stage] = Path(weights)
+        self._stage_results[stage] = self._read_stage_result(
+            stage, exit_code, stopped, elapsed, csv_path, run_dir, weights)
 
         queued = getattr(self, "_train_queue", None)
         if queued and exit_code == 0 and not stopped:
@@ -1718,96 +1733,184 @@ class MainWindow(QMainWindow):
 
         self._show_training_summary(exit_code, stopped, elapsed, csv_path, run_dir, weights)
 
-    def _show_training_summary(self, exit_code, stopped, elapsed, csv_path, run_dir, weights) -> None:
-        """Popup summarizing the finished run: validation metrics, time, paths."""
-        params = (self._gather_classifier_params()
-                  if getattr(self, "_train_stage", "detector") == "classifier"
-                  else self._gather_train_params())
-        dur = training_logic.format_duration(elapsed)
+    def _read_stage_result(self, stage, exit_code, stopped, elapsed,
+                           csv_path, run_dir, weights) -> dict:
+        """Everything the summary needs about one finished stage.
 
-        summary = {}
+        Read here rather than when the dialog opens, because by then the
+        detector's results.csv path has been overwritten by the classifier's.
+        """
+        params = (self._gather_classifier_params() if stage == "classifier"
+                  else self._gather_train_params())
+        summary: dict = {}
+        epochs: list[float] = []
+        series: dict[str, list[float]] = {}
         if csv_path and Path(csv_path).exists():
             try:
-                rows = training_logic.parse_results_csv(Path(csv_path).read_text(encoding="utf-8", errors="replace"))
+                rows = training_logic.parse_results_csv(
+                    Path(csv_path).read_text(encoding="utf-8", errors="replace"))
                 summary = training_logic.summarize_results(rows)
+                epochs = training_logic.metric_series(rows, "epoch")
+                series = training_logic.chart_series(rows)
             except Exception:
-                summary = {}
+                pass
+        return {
+            "stage": stage, "params": params, "summary": summary,
+            "epochs": epochs, "series": series, "elapsed": elapsed,
+            "exit_code": exit_code, "stopped": stopped,
+            "csv_path": csv_path, "run_dir": run_dir, "weights": weights,
+        }
 
-        lines: list[str] = []
-        if stopped:
-            headline = "Training stopped by user."
-        elif exit_code == 0:
-            headline = "Training completed successfully."
-        else:
-            headline = f"Training exited with code {exit_code} (it may not have finished)."
-        lines.append(headline)
-        lines.append("")
-        lines.append(f"Task / model: {params.get('task')} · {params.get('model')}")
-        lines.append(f"Dataset: {params.get('data') or '(none)'}")
-        lines.append(f"Time spent training: {dur}")
+    @staticmethod
+    def _stage_metric_text(result: dict) -> str:
+        """One stage's numbers, in the words its own task uses.
 
-        epochs_done = summary.get("rows", 0)
-        if epochs_done:
-            lines.append(f"Epochs recorded: {epochs_done} (requested {params.get('epochs')})")
+        A detector reports precision/recall/mAP; a classifier reports top-1 and
+        top-5 accuracy. The metric table lists both and skips whatever is not
+        in that run's results.csv, so this does not need to know which is which.
+        """
+        params = result.get("params") or {}
+        summary = result.get("summary") or {}
+        lines = [
+            f"Model: {params.get('model') or '—'}",
+            f"Data: {params.get('data') or '—'}",
+            f"Image size: {params.get('imgsz')}   Batch: {params.get('batch')}",
+            f"Time: {training_logic.format_duration(result.get('elapsed', 0))}",
+        ]
+        recorded = summary.get("rows", 0)
+        if recorded:
+            lines.append(f"Epochs recorded: {recorded} of {params.get('epochs')}")
 
-        def _metric_block(title: str, metrics: dict, epoch: int | None = None) -> None:
+        def block(title: str, metrics: dict, epoch=None) -> None:
             if not metrics:
                 return
-            suffix = f" (epoch {epoch})" if epoch is not None else ""
             lines.append("")
-            lines.append(f"{title}{suffix}:")
-            order = ["precision", "recall", "mAP50", "mAP50-95"]
-            for key in order:
-                if key in metrics:
-                    lines.append(f"  • {key}: {metrics[key]:.4f}")
+            lines.append(title + (f" (epoch {epoch})" if epoch is not None else "") + ":")
+            for key, value in metrics.items():
+                lines.append(f"   {key}: {value:.4f}")
 
         if summary.get("final") or summary.get("best"):
-            _metric_block("Final validation metrics", summary.get("final", {}))
-            _metric_block("Best validation metrics", summary.get("best", {}), summary.get("best_epoch"))
+            block("Final", summary.get("final", {}))
+            block("Best", summary.get("best", {}), summary.get("best_epoch"))
         else:
             lines.append("")
-            lines.append("No validation metrics were found in results.csv for this run.")
+            lines.append("No validation metrics in results.csv for this run.")
 
+        weights = result.get("weights")
         lines.append("")
-        if weights and Path(weights).exists():
-            lines.append(f"Best weights: {weights}")
-            lines.append("Use the buttons below to make this the active model or continue training from it.")
-        elif weights:
-            lines.append(f"Best weights (expected): {weights}")
-        if run_dir:
-            lines.append(f"Run folder: {run_dir}")
+        lines.append(f"Weights: {Path(weights).name if weights else '—'}")
+        if result.get("stopped"):
+            lines.append("Stopped by the operator.")
+        elif result.get("exit_code"):
+            lines.append(f"Exited with code {result['exit_code']}.")
+        return "\n".join(lines)
 
-        box = QMessageBox(self)
-        box.setWindowTitle("Training Summary")
-        box.setIcon(QMessageBox.Information if (exit_code == 0 and not stopped) else QMessageBox.Warning)
-        box.setText(headline)
-        box.setInformativeText("\n".join(lines[2:]))  # body after the headline + blank
+    def _show_training_summary(self, exit_code, stopped, elapsed, csv_path, run_dir, weights) -> None:
+        """Every stage this run trained, side by side, each with its curves.
 
-        # One-click follow-ups when best.pt actually exists: skip the manual
-        # copy-the-path dance between the Train, Test, and Evaluate tabs.
+        A dialog rather than a message box because a message box is one column
+        of text: Train Both produced two runs and only the last one survived to
+        be shown, so the detector's metrics -- the half that took the hour --
+        were computed and discarded.
+        """
+        from PySide6.QtWidgets import QDialogButtonBox, QScrollArea
+
+        results = dict(getattr(self, "_stage_results", {}) or {})
+        if not results:
+            results = {getattr(self, "_train_stage", "detector"): self._read_stage_result(
+                getattr(self, "_train_stage", "detector"), exit_code, stopped,
+                elapsed, csv_path, run_dir, weights)}
+        order = [s for s in ("detector", "classifier") if s in results]
+        order += [s for s in results if s not in order]
+
+        if stopped:
+            headline = "Training stopped by the operator."
+        elif exit_code == 0:
+            headline = ("Training completed." if len(order) < 2
+                        else "Both stages finished.")
+        else:
+            headline = f"Training exited with code {exit_code} (it may not have finished)."
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Training Summary")
+        dialog.resize(520 * max(1, len(order)) + 60, 760)
+        root = QVBoxLayout(dialog)
+
+        head = QLabel(headline)
+        head.setStyleSheet("font-weight: 600; font-size: 15px;")
+        root.addWidget(head)
+
+        columns = QHBoxLayout()
+        root.addLayout(columns, 1)
+        for stage in order:
+            result = results[stage]
+            column = QVBoxLayout()
+            title = QLabel("Stage 1 — detector (where a label is)"
+                           if stage == "detector" else
+                           "Stage 2 — classifier (which label it is)"
+                           if stage == "classifier" else stage)
+            title.setStyleSheet("font-weight: 600; color: #93c5fd;")
+            column.addWidget(title)
+
+            body = QLabel(self._stage_metric_text(result))
+            body.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            body.setAlignment(Qt.AlignTop)
+            body.setWordWrap(True)
+            scroll = QScrollArea()
+            scroll.setWidget(body)
+            scroll.setWidgetResizable(True)
+            # Fixed, not minimum: the columns are read side by side, and a
+            # taller block on one side pushes its chart out of line with the
+            # other's so the two curves cannot be compared at a glance.
+            scroll.setFixedHeight(250)
+            column.addWidget(scroll)
+
+            chart = TrainingMetricsChart()
+            chart.setMinimumHeight(260)
+            chart.set_data(result.get("epochs") or [], result.get("series") or {})
+            column.addWidget(chart, 1)
+
+            run_dir_text = result.get("run_dir")
+            folder = QLabel(f"Run folder: {run_dir_text}" if run_dir_text else "")
+            folder.setStyleSheet("color: #94a3b8;")
+            folder.setWordWrap(True)
+            folder.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            column.addWidget(folder)
+            columns.addLayout(column, 1)
+
+        buttons = QDialogButtonBox()
+        det_weights = self._stage_weights.get("detector")
+        cls_weights = self._stage_weights.get("classifier")
         have_weights = bool(weights and Path(weights).exists())
         last_weights = (Path(run_dir) / "weights" / "last.pt") if run_dir else None
         can_resume = bool(stopped and last_weights and last_weights.exists())
-        use_btn = train_more_btn = resume_btn = None
-        if have_weights:
-            use_btn = box.addButton("Use as active model", QMessageBox.AcceptRole)
-            if can_resume:
-                # Interrupted run: Ultralytics can resume last.pt to its original
-                # epoch target. (A completed run cannot be resumed.)
-                resume_btn = box.addButton("Resume training", QMessageBox.ActionRole)
-            else:
-                # Completed run: continue from best.pt as a fresh fine-tune run.
-                train_more_btn = box.addButton("Train more from best.pt", QMessageBox.ActionRole)
-        both_btn = None
-        det_weights = self._stage_weights.get("detector")
-        cls_weights = self._stage_weights.get("classifier")
+
+        both_btn = use_btn = resume_btn = train_more_btn = None
         if det_weights and cls_weights:
-            both_btn = box.addButton("Use both (detector + classifier)",
-                                     QMessageBox.AcceptRole)
-        box.addButton(QMessageBox.Ok)
-        box.exec()
-        clicked = box.clickedButton()
-        if both_btn is not None and clicked is both_btn:
+            both_btn = buttons.addButton("Use both (detector + classifier)",
+                                         QDialogButtonBox.AcceptRole)
+        if have_weights:
+            use_btn = buttons.addButton("Use as active model",
+                                        QDialogButtonBox.AcceptRole)
+            if can_resume:
+                resume_btn = buttons.addButton("Resume training",
+                                               QDialogButtonBox.ActionRole)
+            else:
+                train_more_btn = buttons.addButton("Train more from best.pt",
+                                                   QDialogButtonBox.ActionRole)
+        buttons.addButton(QDialogButtonBox.Ok)
+        buttons.rejected.connect(dialog.reject)
+        clicked: dict = {}
+        buttons.clicked.connect(lambda b: clicked.setdefault("button", b))
+        buttons.accepted.connect(dialog.accept)
+        for b in (both_btn, use_btn, resume_btn, train_more_btn):
+            if b is not None:
+                b.clicked.connect(dialog.accept)
+        root.addWidget(buttons)
+        dialog.exec()
+
+        pressed = clicked.get("button")
+        if both_btn is not None and pressed is both_btn:
             self._use_trained_as_active(det_weights, "detector")
             self._use_trained_as_active(cls_weights, "classifier")
             QMessageBox.information(
@@ -1815,11 +1918,11 @@ class MainWindow(QMainWindow):
                 f"Detector: {det_weights}\n"
                 f"Classifier: {cls_weights}\n\n"
                 f"Both fields on Live Detect now point at this run.")
-        elif have_weights and clicked is use_btn:
+        elif use_btn is not None and pressed is use_btn:
             self._use_trained_as_active(Path(weights))
-        elif can_resume and clicked is resume_btn:
+        elif resume_btn is not None and pressed is resume_btn:
             self._resume_training_from(last_weights)
-        elif have_weights and clicked is train_more_btn:
+        elif train_more_btn is not None and pressed is train_more_btn:
             self._finetune_training_from(Path(weights))
 
     def _use_trained_as_active(self, weights: Path, stage: str = "") -> None:
@@ -7320,9 +7423,11 @@ class MainWindow(QMainWindow):
 
         task = self._export_task()
         try:
-            detect_dir, classify_dir = classify_export.export_two_stage(
-                task=task, reviewed_only=self._export_reviewed_only(),
-                library=self.library)
+            detect_dir, classify_dir = self._run_with_progress(
+                "Exporting both stages",
+                lambda progress: classify_export.export_two_stage(
+                    task=task, reviewed_only=self._export_reviewed_only(),
+                    library=self.library, progress=progress))
         except FileNotFoundError as exc:
             QMessageBox.information(self, "Export Two-Stage", str(exc))
             return
@@ -7350,6 +7455,49 @@ class MainWindow(QMainWindow):
         )
         self.status.showMessage(f"Exported two-stage datasets to {classify_dir.parent}", 8000)
 
+    def _run_with_progress(self, title: str, work):
+        """Run a blocking export behind a progress dialog.
+
+        ``work`` is handed a ``progress(done, total, message)`` to call. Inline
+        rather than threaded, like every other model-and-disk job here -- what
+        was missing was not concurrency but any sign of life. A few thousand
+        20 MP frames take minutes, and a window that paints nothing for minutes
+        is indistinguishable from one that has hung.
+
+        Cancel is deliberately absent. Half a dataset on disk looks exactly
+        like a whole one to everything downstream, and there is no partial
+        export worth keeping.
+        """
+        from PySide6.QtWidgets import QProgressDialog
+
+        dialog = QProgressDialog(f"{title}...", "", 0, 100, self)
+        dialog.setWindowTitle(title)
+        dialog.setCancelButton(None)
+        dialog.setWindowModality(Qt.WindowModal)
+        dialog.setMinimumDuration(0)
+        dialog.setAutoClose(False)
+        dialog.setValue(0)
+        QApplication.processEvents()
+
+        state = {"last": -1.0}
+
+        def progress(done: int, total: int, message: str) -> None:
+            pct = int(round(100.0 * done / total)) if total else 100
+            dialog.setValue(max(0, min(100, pct)))
+            dialog.setLabelText(f"{title}\n{done} of {total}\n{message}")
+            # Repainting on every frame of a few thousand costs more than the
+            # copy does. Twenty times a second is smooth and nearly free.
+            now = time.perf_counter()
+            if now - state["last"] > 0.05:
+                state["last"] = now
+                QApplication.processEvents()
+
+        try:
+            return work(progress)
+        finally:
+            dialog.setValue(100)
+            dialog.close()
+
     def _export_task(self) -> str:
         return self.export_task_combo.currentData() if hasattr(self, "export_task_combo") else "obb"
 
@@ -7368,8 +7516,12 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Export", "Open a label first.")
             return
         try:
-            out = export_label_yolo(self.label_id, task=task, reviewed_only=reviewed_only,
-                                    library=self.library, augment=self._export_augment())
+            out = self._run_with_progress(
+                f"Exporting {self.label_id}",
+                lambda progress: export_label_yolo(
+                    self.label_id, task=task, reviewed_only=reviewed_only,
+                    library=self.library, augment=self._export_augment(),
+                    progress=progress))
         except Exception as e:
             QMessageBox.warning(self, "Export", str(e))
             return
@@ -7399,9 +7551,11 @@ class MainWindow(QMainWindow):
         task = self._export_task()
         reviewed_only = self._export_reviewed_only()
         try:
-            out = export_all_labels_yolo(task=task, reviewed_only=reviewed_only,
-                                          library=self.library,
-                                          augment=self._export_augment())
+            out = self._run_with_progress(
+                "Exporting every label",
+                lambda progress: export_all_labels_yolo(
+                    task=task, reviewed_only=reviewed_only, library=self.library,
+                    augment=self._export_augment(), progress=progress))
         except Exception as e:
             QMessageBox.warning(self, "Export All Labels", str(e))
             return

@@ -1441,3 +1441,113 @@ def test_the_current_image_is_the_selected_row():
     win._load_image_path(second)
     win._select_image_in_list()
     assert win._image_name_from_list_item(win.image_list.currentItem()) == second.name
+
+
+# --- the training summary shows every stage that ran ------------------------
+
+DETECTOR_CSV = (
+    "epoch,train/box_loss,train/cls_loss,metrics/precision(B),metrics/recall(B),"
+    "metrics/mAP50(B),metrics/mAP50-95(B)\n"
+    "1,1.30,0.95,0.44,0.51,0.38,0.19\n"
+    "2,0.98,0.71,0.81,0.79,0.72,0.48\n"
+    "3,0.86,0.62,0.88,0.86,0.83,0.57\n"
+)
+CLASSIFIER_CSV = (
+    "epoch,time,train/loss,metrics/accuracy_top1,metrics/accuracy_top5,val/loss\n"
+    "1,10,1.90,0.41,0.88,1.77\n"
+    "2,20,1.21,0.74,0.96,1.02\n"
+    "3,30,0.88,0.93,0.99,0.71\n"
+)
+
+
+def _finished_run(win, tmp_path, stage, csv_text, name):
+    """Put a finished run on disk and record it the way training does."""
+    run_dir = tmp_path / name
+    (run_dir / "weights").mkdir(parents=True, exist_ok=True)
+    (run_dir / "results.csv").write_text(csv_text, encoding="utf-8")
+    (run_dir / "weights" / "best.pt").write_bytes(b"weights")
+    win._train_stage = stage
+    return win._read_stage_result(
+        stage, 0, False, 120.0, run_dir / "results.csv", run_dir,
+        run_dir / "weights" / "best.pt")
+
+
+def test_both_stages_survive_to_the_summary(tmp_path):
+    """Train Both computed the detector's result and threw it away when the
+    queue advanced, so only the classifier -- the cheaper half -- was shown."""
+    win = _window()
+    win._stage_results = {}
+    win._stage_results["detector"] = _finished_run(
+        win, tmp_path, "detector", DETECTOR_CSV, "det")
+    win._stage_results["classifier"] = _finished_run(
+        win, tmp_path, "classifier", CLASSIFIER_CSV, "cls")
+
+    assert set(win._stage_results) == {"detector", "classifier"}
+    det = win._stage_results["detector"]
+    assert det["summary"]["best"]["mAP50-95"] == pytest.approx(0.57)
+    assert set(det["series"]) == {"box_loss", "cls_loss", "mAP50", "mAP50-95"}
+
+    cls = win._stage_results["classifier"]
+    assert cls["summary"]["best"]["accuracy_top1"] == pytest.approx(0.93)
+    assert set(cls["series"]) == {"loss", "top1", "top5"}
+
+
+def test_each_stage_is_described_in_its_own_metrics(tmp_path):
+    win = _window()
+    det = _finished_run(win, tmp_path, "detector", DETECTOR_CSV, "det2")
+    cls = _finished_run(win, tmp_path, "classifier", CLASSIFIER_CSV, "cls2")
+
+    det_text = win._stage_metric_text(det)
+    assert "mAP50-95" in det_text and "accuracy_top1" not in det_text
+
+    cls_text = win._stage_metric_text(cls)
+    assert "accuracy_top1" in cls_text
+    assert "No validation metrics" not in cls_text
+
+
+def test_the_summary_builds_a_column_per_stage(tmp_path, monkeypatch):
+    """The dialog itself: two columns, each with its own chart."""
+    from PySide6.QtWidgets import QDialog, QLabel
+    from label_detections.ui.main_window import TrainingMetricsChart
+
+    win = _window()
+    win._stage_results = {
+        "detector": _finished_run(win, tmp_path, "detector", DETECTOR_CSV, "det3"),
+        "classifier": _finished_run(win, tmp_path, "classifier", CLASSIFIER_CSV, "cls3"),
+    }
+    win._stage_weights = {}
+
+    built = {}
+    monkeypatch.setattr(QDialog, "exec",
+                        lambda self: built.setdefault("dialog", self) and 0 or 0)
+    win._show_training_summary(0, False, 120.0, None, None, None)
+
+    dialog = built.get("dialog")
+    assert dialog is not None
+    charts = dialog.findChildren(TrainingMetricsChart)
+    assert len(charts) == 2, "one chart per stage"
+    text = " ".join(w.text() for w in dialog.findChildren(QLabel))
+    assert "Stage 1" in text and "Stage 2" in text
+    assert "mAP50-95" in text and "accuracy_top1" in text
+
+
+def test_a_single_stage_run_still_summarizes(tmp_path, monkeypatch):
+    """Training only the detector must not depend on a queue having run."""
+    from PySide6.QtWidgets import QDialog
+    from label_detections.ui.main_window import TrainingMetricsChart
+
+    win = _window()
+    win._stage_results = {}
+    win._stage_weights = {}
+    run_dir = tmp_path / "solo"
+    (run_dir / "weights").mkdir(parents=True, exist_ok=True)
+    (run_dir / "results.csv").write_text(DETECTOR_CSV, encoding="utf-8")
+    win._train_stage = "detector"
+
+    built = {}
+    monkeypatch.setattr(QDialog, "exec",
+                        lambda self: built.setdefault("dialog", self) and 0 or 0)
+    win._show_training_summary(0, False, 90.0, run_dir / "results.csv", run_dir, None)
+
+    dialog = built.get("dialog")
+    assert len(dialog.findChildren(TrainingMetricsChart)) == 1
