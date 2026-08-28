@@ -275,8 +275,15 @@ class InferenceWorker(QObject):
         return line
 
     @Slot(object)
+    @Slot(object)
     def infer(self, frame) -> None:
-        """Run one frame. Silently drops it if the model never loaded."""
+        """Run one frame. Silently drops it if the model never loaded.
+
+        A slot, and invoked through a signal, so Qt queues it onto this
+        worker's own thread. Called directly it would run on the caller's --
+        which is how a 66 ms inference came to sit inside the display tick and
+        pin the preview to 1/66th of a second.
+        """
         if self._model is None or self._stopping or frame is None:
             return
         args = {"imgsz": self._imgsz, "conf": self._conf, "verbose": False}
