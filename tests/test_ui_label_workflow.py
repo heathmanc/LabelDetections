@@ -33,6 +33,20 @@ except Exception as exc:  # pragma: no cover - depends on the environment
 pytestmark = pytest.mark.skipif(not HAVE_QT, reason="PySide6/cv2 not available")
 
 
+def _reference_file(label_id: str) -> str:
+    """A real reference image on disk for a test label.
+
+    It has to exist, not merely be named: a label with no artwork is refused
+    everywhere now, because every region on it is a fraction of an outline
+    drawn on a picture. Pointing at a filename that was never written made the
+    old helper describe a label the app would not open.
+    """
+    import numpy as np
+    from label_detections.core.imageio import save_reference
+
+    return str(save_reference(label_id, np.full((60, 90, 3), 220, np.uint8)))
+
+
 def _define(win, label_id):
     """Add a label to the library and make the window aware of it.
 
@@ -46,7 +60,8 @@ def _define(win, label_id):
 
     library = persistence.load_library()
     library.add(LabelDef(label_id=label_id, size_mm=[90, 60],
-                         reference_images=["ref.png"], train_target=10),
+                         reference_images=[_reference_file(label_id)],
+                         train_target=10),
                 replace=True)
     persistence.save_library(library)
     win.library = persistence.load_library()
@@ -75,6 +90,29 @@ def _capture(win, label_id, name="frame_001.jpg"):
     win._dataset_index_dirty = True
     win._load_image_path(path)
     return path
+
+
+def _with_artwork(win, label_id, monkeypatch=None, name="ref.jpg"):
+    """A label whose reference was made from one of its captured images.
+
+    Returns that image, which the list has to keep at the top: it is the shot
+    every read-region on the label is a fraction of, and the one to go back to
+    when a region looks wrong -- but it is also the first shot taken, so a
+    newest-first list buries it a row deeper with every capture after it.
+    """
+    from label_detections.core import persistence
+
+    _define(win, label_id)
+    win.set_active_label(label_id)
+    source = _capture(win, label_id, name)
+    library = persistence.load_library()
+    label = library.get(label_id)
+    updated = type(label).from_dict({**label.to_dict(),
+                                     "reference_source": str(source)})
+    library.add(updated, replace=True)
+    persistence.save_library(library)
+    win.library = persistence.load_library()
+    return source, label_id
 
 
 def _draw(win, class_name, label_id=""):
@@ -220,105 +258,24 @@ def test_no_recipe_authoring_survived_the_fork():
 
 # --- read-regions from a captured image ------------------------------------
 
-def test_regions_are_defined_from_a_capture_not_an_artwork_file(monkeypatch):
-    """The workflow question: no external file, no measuring, no calibration.
-
-    Capture an image, draw the label's box, and that box -- flattened -- becomes
-    the artwork the regions are drawn on.
-    """
-    from label_detections.core import persistence
-
-    win = _window()
-    _define(win, "wf_regions")
-    win.set_active_label("wf_regions")
-    _capture(win, "wf_regions", "with_label.jpg")
-    win.canvas.boxes.clear()
-    _draw(win, win.label_id)
-
-    # Stand in for the operator dragging two regions on the flattened crop.
-    import label_detections.ui.region_editor as region_editor
-
-    class FakeDialog:
-        def __init__(self, reference, codes, text_fields, anchor, parent=None):
-            FakeDialog.reference = reference
-
-        def exec(self):
-            return True
-
-        def result_regions(self):
-            return {
-                "codes": [{"role": "serial", "symbology": "datamatrix",
-                           "policy": "must_decode", "region": [0.6, 0.1, 0.3, 0.4]}],
-                "text_fields": [{"name": "date_code", "policy": "must_be_present",
-                                 "region": [0.1, 0.7, 0.4, 0.2]}],
-                "anchor_region": [0.0, 0.0, 0.5, 0.5],
-            }
-
-    monkeypatch.setattr(region_editor, "RegionEditorDialog", FakeDialog)
-    win.define_read_regions()
-
-    label = persistence.load_library().get("wf_regions")
-    assert label.code_by_role("serial").region == [0.6, 0.1, 0.3, 0.4]
-    assert label.text_fields[0].name == "date_code"
-    # Drawing an anchor is itself the statement that the artwork varies.
-    assert label.variable_data is True
-    # The flattened crop was saved as this label's artwork -- no file hunting.
-    assert label.reference_images and Path(label.reference_images[0]).is_file()
-    assert FakeDialog.reference == label.reference_images[0]
-
-
-def test_defined_regions_then_place_themselves_on_every_other_image():
-    """The point of storing fractions: draw once, applies to every image."""
-    from label_detections.core import persistence
-    from label_detections.core.labels import CodeSpec
-
-    win = _window()
-    _define(win, "wf_reuse")
-    library = persistence.load_library()
-    label = library.get("wf_reuse")
-    label.codes = [CodeSpec(role="serial", region=[0.5, 0.25, 0.25, 0.5])]
-    library.add(label, replace=True)
-    persistence.save_library(library)
-    win.library = persistence.load_library()
-
-    win.set_active_label("wf_reuse")
-    _capture(win, "wf_reuse", "another.jpg")
-    win.canvas.boxes.clear()
-    _draw(win, win.label_id)             # box at (10, 10) 100x60
-    win.place_regions_on_canvas()
-
-    box = win.canvas.boxes[0]
-    assert box.label_id == "wf_reuse"
-    code = next(r for r in box.regions if r.get("code_role") == "serial")
-    # 50% across and 25% down a 100x60 box drawn at (10, 10).
-    assert code["points"][0] == pytest.approx([60.0, 25.0])
-
-
-def test_defining_regions_without_a_label_box_says_what_to_do():
-    win = _window()
-    _define(win, "wf_no_box")
-    win.set_active_label("wf_no_box")
-    _capture(win, "wf_no_box", "empty.jpg")
-    win.canvas.boxes.clear()
-
-    shown = {}
-    import label_detections.ui.main_window as mw_mod
-    original = mw_mod.QMessageBox.information
-    mw_mod.QMessageBox.information = lambda parent, title, text, *a, **k: shown.update(
-        {"title": title, "text": text})
-    try:
-        win.define_read_regions()
-    finally:
-        mw_mod.QMessageBox.information = original
-    assert "Draw the wf_no_box box" in shown.get("text", "")
-
-
-def test_the_action_is_reachable_without_opening_the_wizard():
-    """It was buried on a wizard page, which is why nobody found it."""
+def test_one_action_covers_the_whole_reference_job():
+    """Define, Edit, Place and Replace were four entries and three buttons for
+    parts of one job, in an order nothing enforced. A label is photographed,
+    outlined and marked up in one window or not at all."""
     win = _window()
     titles = {a.text() for a in win.actions()}
-    assert "Define read-regions from this image" in titles
-    assert "Place read-regions" in titles
+    assert "Capture reference image..." in titles
+    for retired in ("Define read-regions from this image", "Place read-regions",
+                    "Edit read-regions", "Replace label artwork..."):
+        assert retired not in titles, retired
+
+
+def test_the_annotation_pane_no_longer_carries_them():
+    """They were on the pane about annotating images, doing a job about
+    defining labels."""
+    win = _window()
+    for gone in ("define_regions_btn", "replace_artwork_btn"):
+        assert not hasattr(win, gone), gone
 
 
 # --- capturing the reference from the camera --------------------------------
@@ -344,149 +301,31 @@ def _fake_editor(monkeypatch, result=None):
     return calls
 
 
-def test_capture_reference_saves_the_frame_and_arms_the_follow_through(monkeypatch):
-    """A picture of the label is training data whatever else it is used for."""
-    import numpy as np
-    from label_detections.core import storage
-
+def test_replacing_a_reference_asks_first_and_says_what_it_costs(monkeypatch):
+    """The artwork is the coordinate system every region is written in, so
+    replacing it is a delete and redraw, not an edit."""
     win = _window()
-    _define(win, "wf_capref")
-    win.set_active_label("wf_capref")
-    win.last_raw = np.zeros((200, 400, 3), dtype=np.uint8)
+    _define(win, "wf_replace")
+    win.set_active_label("wf_replace")
 
-    before = len(storage.list_images("wf_capref"))
+    asked = {}
+    monkeypatch.setattr(win, "_ask_replace_reference",
+                        lambda label: asked.setdefault("label", label) and False)
     win.capture_reference()
-    assert len(storage.list_images("wf_capref")) == before + 1
-    assert win._awaiting_reference_box is True
-    assert "draw the wf_capref box" in win.guidance_label.text()
+    assert asked.get("label") is not None, "replaced without asking"
 
 
-def test_the_box_can_be_adjusted_before_it_becomes_the_artwork(monkeypatch):
-    """Drawing the box must not commit it.
+def test_declining_the_replace_leaves_the_reference_alone(monkeypatch):
+    from label_detections.core import reference as ref
 
-    The outline is the one thing every read-region is measured against, and it
-    used to be whatever the first rough drag produced: the editor opened on
-    mouse-up, so the handles could never be touched. Now the box waits.
-    """
-    import numpy as np
-    from PySide6.QtWidgets import QApplication
-
-    calls = _fake_editor(monkeypatch)
     win = _window()
-    _define(win, "wf_capflow")
-    win.set_active_label("wf_capflow")
-    win.last_raw = np.zeros((200, 400, 3), dtype=np.uint8)
+    _define(win, "wf_keep")
+    win.set_active_label("wf_keep")
+    before = ref.reference_path(win.library.get("wf_keep"))
+
+    monkeypatch.setattr(win, "_ask_replace_reference", lambda label: False)
     win.capture_reference()
-
-    _draw(win, win.label_id)
-    win._update_box_count()
-    QApplication.processEvents()
-
-    assert calls.get("opened") is None, "committed the box on mouse-up"
-    assert win._awaiting_reference_box is True
-    assert win.reference_confirm_btn.isVisible() or True   # offscreen has no show
-    assert win.reference_confirm_btn.isEnabled(), "no way to say the box is right"
-
-
-def test_confirming_the_box_opens_the_editor_with_no_menu_hunting(monkeypatch):
-    """The flow still ends in one press, it just ends when the operator says so."""
-    import numpy as np
-    from PySide6.QtWidgets import QApplication
-
-    calls = _fake_editor(monkeypatch)
-    win = _window()
-    _define(win, "wf_capflow2")
-    win.set_active_label("wf_capflow2")
-    win.last_raw = np.zeros((200, 400, 3), dtype=np.uint8)
-    win.capture_reference()
-    _draw(win, win.label_id)
-    win._update_box_count()
-    QApplication.processEvents()
-
-    win.reference_confirm_btn.click()
-    QApplication.processEvents()
-
-    assert calls.get("opened") == 1
-    assert win._awaiting_reference_box is False
-
-
-def test_the_confirm_button_is_dead_until_there_is_a_box(monkeypatch):
-    """Pressing it with nothing drawn would flatten whatever was on screen."""
-    import numpy as np
-
-    _fake_editor(monkeypatch)
-    win = _window()
-    _define(win, "wf_capflow3")
-    win.set_active_label("wf_capflow3")
-    win.last_raw = np.zeros((200, 400, 3), dtype=np.uint8)
-    win.capture_reference()
-    assert win.reference_confirm_btn.isEnabled() is False
-
-
-def test_a_reference_capture_can_be_abandoned(monkeypatch):
-    """Armed with nowhere to go was a state with no exit but drawing a box."""
-    import numpy as np
-
-    _fake_editor(monkeypatch)
-    win = _window()
-    _define(win, "wf_capflow4")
-    win.set_active_label("wf_capflow4")
-    win.last_raw = np.zeros((200, 400, 3), dtype=np.uint8)
-    win.capture_reference()
-    win.reference_cancel_btn.click()
-    assert win._awaiting_reference_box is False
-    assert win.reference_confirm_btn.isVisible() is False
-
-
-def test_a_box_of_another_family_does_not_trigger_it(monkeypatch):
-    import numpy as np
-    from PySide6.QtWidgets import QApplication
-
-    calls = _fake_editor(monkeypatch)
-    win = _window()
-    _define(win, "wf_capwrong", )
-    win.set_active_label("wf_capwrong")
-    win.last_raw = np.zeros((200, 400, 3), dtype=np.uint8)
-    win.capture_reference()
-
-    _draw(win, "some_other_label")
-    win._update_box_count()
-    QApplication.processEvents()
-
-    assert "opened" not in calls
-    assert win._awaiting_reference_box is True
-
-
-def test_switching_label_cancels_an_armed_reference_capture():
-    import numpy as np
-
-    win = _window()
-    _define(win, "wf_capcancel_a")
-    _define(win, "wf_capcancel_b")
-    win.set_active_label("wf_capcancel_a")
-    win.last_raw = np.zeros((200, 400, 3), dtype=np.uint8)
-    win.capture_reference()
-
-    win.set_active_label("wf_capcancel_b")
-    assert win._awaiting_reference_box is False
-
-
-def test_capture_reference_without_a_frame_says_so():
-    win = _window()
-    _define(win, "wf_noframe")
-    win.set_active_label("wf_noframe")
-    win.last_raw = None
-
-    shown = {}
-    import label_detections.ui.main_window as mw_mod
-    original = mw_mod.QMessageBox.information
-    mw_mod.QMessageBox.information = lambda parent, title, text, *a, **k: shown.update(
-        {"text": text})
-    try:
-        win.capture_reference()
-    finally:
-        mw_mod.QMessageBox.information = original
-    assert "live preview" in shown.get("text", "")
+    assert ref.reference_path(win.library.get("wf_keep")) == before
 
 
 # --- live preview is not a drawing surface ----------------------------------
@@ -613,195 +452,6 @@ def test_stopping_the_preview_opens_the_last_capture_ready_to_label():
         win._refresh_live_mode()
 
 
-def test_the_image_the_artwork_came_from_is_marked_in_the_list(monkeypatch):
-    """Redefining regions from a different shot silently moves every region."""
-    from label_detections.core import persistence
-
-    calls = _fake_editor(monkeypatch, {
-        "codes": [], "text_fields": [], "anchor_region": [0.0, 0.0, 0.5, 0.5]})
-    win = _window()
-    _define(win, "wf_marker")
-    win.set_active_label("wf_marker")
-    plain = _capture(win, "wf_marker", "plain.jpg")
-    source = _capture(win, "wf_marker", "source.jpg")
-    win.canvas.boxes.clear()
-    _draw(win, win.label_id)
-    win.define_read_regions()
-    assert calls.get("opened") == 1
-
-    label = persistence.load_library().get("wf_marker")
-    assert Path(label.reference_source) == source
-
-    win.library = persistence.load_library()
-    win._image_status_cache.clear()
-    assert "◆ REFERENCE" in win._cached_image_status(source)["prefix"]
-    assert "◆ REFERENCE" not in win._cached_image_status(plain)["prefix"]
-
-
-def _with_artwork(win, label_id, monkeypatch, name="first.jpg"):
-    """Get a label to the state of having artwork, and return the source image."""
-    _define(win, label_id)
-    win.set_active_label(label_id)
-    source = _capture(win, label_id, name)
-    win.canvas.boxes.clear()
-    _draw(win, win.label_id)
-    calls = _fake_editor(monkeypatch)
-    win.define_read_regions()
-    assert calls.get("opened") == 1
-    return source, calls
-
-
-def test_a_second_define_edits_the_existing_artwork_instead_of_making_new(monkeypatch):
-    """Artwork is defined once. Regions are fractions of it, so re-flattening a
-    different shot moves every one of them against images already reviewed."""
-    from label_detections.core import persistence
-
-    win = _window()
-    first, calls = _with_artwork(win, "wf_once", monkeypatch)
-    artwork = persistence.load_library().get("wf_once").reference_images[0]
-
-    second = _capture(win, "wf_once", "second.jpg")
-    win.canvas.boxes.clear(); _draw(win, win.label_id)
-    win.define_read_regions()
-
-    assert calls["opened"] == 2                       # it opened, ...
-    assert calls["reference"] == artwork              # ... on the SAME artwork
-    label = persistence.load_library().get("wf_once")
-    assert Path(label.reference_source) == first      # the source did not move
-    assert "◆ REFERENCE" in win._cached_image_status(first)["prefix"]
-    assert "◆ REFERENCE" not in win._cached_image_status(second)["prefix"]
-
-
-def test_replacing_artwork_asks_first_and_says_what_it_costs(monkeypatch):
-    win = _window()
-    _with_artwork(win, "wf_replace_no", monkeypatch)
-    _capture(win, "wf_replace_no", "second.jpg")
-    win.canvas.boxes.clear(); _draw(win, win.label_id)
-
-    asked = {}
-    import label_detections.ui.main_window as mw_mod
-    original = mw_mod.QMessageBox.question
-    mw_mod.QMessageBox.question = lambda parent, title, text, *a, **k: (
-        asked.update({"text": text}) or mw_mod.QMessageBox.No)
-    try:
-        win.replace_label_artwork()
-    finally:
-        mw_mod.QMessageBox.question = original
-
-    assert "every one of them moves" in asked.get("text", "")
-    assert "already reviewed" in asked.get("text", "")
-
-
-def test_confirming_the_replace_moves_the_artwork_and_the_marker(monkeypatch):
-    from label_detections.core import persistence
-
-    win = _window()
-    first, calls = _with_artwork(win, "wf_replace_yes", monkeypatch)
-    second = _capture(win, "wf_replace_yes", "second.jpg")
-    win.canvas.boxes.clear(); _draw(win, win.label_id)
-
-    import label_detections.ui.main_window as mw_mod
-    original = mw_mod.QMessageBox.question
-    mw_mod.QMessageBox.question = lambda *a, **k: mw_mod.QMessageBox.Yes
-    try:
-        win.replace_label_artwork()
-    finally:
-        mw_mod.QMessageBox.question = original
-
-    label = persistence.load_library().get("wf_replace_yes")
-    assert Path(label.reference_source) == second
-    # The old marker must not linger: the status cache keys on it for this reason.
-    assert "◆ REFERENCE" not in win._cached_image_status(first)["prefix"]
-    assert "◆ REFERENCE" in win._cached_image_status(second)["prefix"]
-
-
-def test_replacing_carries_the_existing_regions_onto_the_new_artwork(monkeypatch):
-    """The one thing that silently breaks is an outline drawn differently."""
-    from label_detections.core import persistence
-    from label_detections.core.labels import CodeSpec
-
-    win = _window()
-    _with_artwork(win, "wf_replace_carry", monkeypatch)
-    library = persistence.load_library()
-    label = library.get("wf_replace_carry")
-    label.codes = [CodeSpec(role="serial", region=[0.5, 0.25, 0.2, 0.2])]
-    library.add(label, replace=True); persistence.save_library(library)
-    win.library = persistence.load_library()
-
-    _capture(win, "wf_replace_carry", "second.jpg")
-    win.canvas.boxes.clear(); _draw(win, win.label_id)
-
-    seen = {}
-    import label_detections.ui.region_editor as region_editor
-
-    class Capturing:
-        def __init__(self, reference, codes, text_fields, anchor, parent=None):
-            seen["codes"] = codes
-
-        def exec(self):
-            return False        # cancelled: nothing should be written
-
-    monkeypatch.setattr(region_editor, "RegionEditorDialog", Capturing)
-    import label_detections.ui.main_window as mw_mod
-    original = mw_mod.QMessageBox.question
-    mw_mod.QMessageBox.question = lambda *a, **k: mw_mod.QMessageBox.Yes
-    try:
-        win.replace_label_artwork()
-    finally:
-        mw_mod.QMessageBox.question = original
-
-    assert seen["codes"][0]["region"] == [0.5, 0.25, 0.2, 0.2]
-
-
-def test_capture_reference_offers_to_replace_rather_than_dead_ending(monkeypatch):
-    """It used to say no and point at a button on another tab -- which itself
-    needs a box drawn on an image. Somebody who has just deleted the capture
-    they thought was the reference has neither, and no way from here to
-    anywhere. Declining still leaves the artwork alone."""
-    import numpy as np
-
-    win = _window()
-    _with_artwork(win, "wf_capref_once", monkeypatch)
-    win.last_raw = np.zeros((120, 200, 3), dtype=np.uint8)
-
-    asked = {}
-    monkeypatch.setattr(win, "_ask_replace_artwork",
-                        lambda existing: asked.setdefault("path", existing) and False)
-    win.capture_reference()
-    assert "wf_capref_once" in asked.get("path", "")
-    assert win._awaiting_reference_box is False, "armed after being declined"
-
-
-def test_agreeing_to_replace_arms_the_capture_in_replace_mode(monkeypatch):
-    import numpy as np
-
-    win = _window()
-    _with_artwork(win, "wf_capref_yes", monkeypatch)
-    win.last_raw = np.zeros((120, 200, 3), dtype=np.uint8)
-    monkeypatch.setattr(win, "_ask_replace_artwork", lambda existing: True)
-    monkeypatch.setattr(win, "capture_frame", lambda **k: None)
-    monkeypatch.setattr(win, "close_camera", lambda: None)
-
-    win.capture_reference()
-    assert win._awaiting_reference_box is True
-    assert win._reference_replaces_artwork is True
-
-
-def test_artwork_deleted_from_disk_can_be_defined_again(monkeypatch):
-    """Recovering from a missing file is not the same act as replacing artwork."""
-    from label_detections.core import persistence
-
-    win = _window()
-    _with_artwork(win, "wf_recover", monkeypatch)
-    label = persistence.load_library().get("wf_recover")
-    Path(label.reference_images[0]).unlink()
-    win.library = persistence.load_library()
-
-    assert win._existing_artwork(win.library.get("wf_recover")) is None
-
-
-# --- the list row must not become a file path -------------------------------
-
 def test_a_stacked_prefix_does_not_leak_into_the_file_name():
     """The bug this pins: "◆ REFERENCE  ✓ REVIEWED OK  x.jpg" split on the FIRST
     double space handed back "✓ REVIEWED OK  x.jpg" as the name, and opening
@@ -815,51 +465,6 @@ def test_a_stacked_prefix_does_not_leak_into_the_file_name():
     assert win._image_name_from_list_item("🟡 REVIEW 1x  c.jpg") == "c.jpg"
     assert win._image_name_from_list_item("plain.jpg") == "plain.jpg"
 
-
-def test_rows_carry_their_file_name_rather_than_it_being_parsed_back(monkeypatch):
-    """Prefixes stack and change; the name behind a row must not depend on them."""
-    from PySide6.QtCore import Qt
-
-    _fake_editor(monkeypatch)
-    win = _window()
-    _define(win, "wf_rowname")
-    win.set_active_label("wf_rowname")
-    source = _capture(win, "wf_rowname", "row_name.jpg")
-    win.canvas.boxes.clear(); _draw(win, win.label_id)
-    win.define_read_regions()          # gives this row the REFERENCE prefix too
-
-    win._image_status_cache.clear()
-    win._refresh_images(force=True)
-    row = next(win.image_list.item(i) for i in range(win.image_list.count())
-               if "row_name.jpg" in win.image_list.item(i).text())
-    assert "◆ REFERENCE" in row.text()
-    assert row.data(Qt.ItemDataRole.UserRole) == "row_name.jpg"
-    assert win._image_name_from_list_item(row) == "row_name.jpg"
-
-
-def test_opening_a_marked_row_loads_the_real_image(monkeypatch):
-    """End to end: the failure was an unreadable path, so open one and check."""
-    _fake_editor(monkeypatch)
-    win = _window()
-    _define(win, "wf_openrow")
-    win.set_active_label("wf_openrow")
-    source = _capture(win, "wf_openrow", "open_me.jpg")
-    win.canvas.boxes.clear(); _draw(win, win.label_id)
-    win.define_read_regions()
-
-    win.current_image_path = None
-    win._image_status_cache.clear()
-    win._refresh_images(force=True)
-    row = next(win.image_list.item(i) for i in range(win.image_list.count())
-               if "open_me.jpg" in win.image_list.item(i).text())
-    win.image_list.setCurrentItem(row)
-    win._load_selected_image()
-
-    assert win.current_image_path == source
-    assert win.canvas.image_w > 0        # it actually decoded
-
-
-# --- filtering a large label list -------------------------------------------
 
 def test_typing_narrows_the_label_list_and_says_by_how_much():
     """With hundreds of labels the list is unusable without this."""
@@ -1128,18 +733,23 @@ def test_opening_the_camera_drops_the_still_s_detections():
 
 # --- the way out of artwork drawn wrong is reachable -----------------------
 
-def test_replacing_artwork_has_a_button_and_it_says_when_it_will_work(monkeypatch):
-    """Redrawing badly-drawn artwork was signposted only in a tooltip, and only
-    as an entry in a menu bar that is hidden. There was no visible way back."""
-    win = _window()
-    _define(win, "wf_replace_btn_none")
-    win.set_active_label("wf_replace_btn_none")
-    assert win.replace_artwork_btn.isEnabled() is False
-    assert "no artwork" in win.replace_artwork_btn.toolTip()
+def test_a_label_with_no_reference_is_marked_in_the_list():
+    """A tick beside 150 reviewed images would say "nearly done" about a label
+    that cannot be used at all."""
+    from label_detections.core import persistence
+    from label_detections.core.labels import LabelDef
 
-    _with_artwork(win, "wf_replace_btn", monkeypatch, name="art.jpg")
-    assert win.replace_artwork_btn.isEnabled() is True
-    assert "Ctrl+Shift+A" in win.replace_artwork_btn.toolTip()
+    win = _window()
+    library = persistence.load_library()
+    library.add(LabelDef(label_id="wf_noref", train_target=1), replace=True)
+    persistence.save_library(library)
+    win.library = persistence.load_library()
+    win._refresh_labels()
+
+    rows = [win.label_list.item(i).text()
+            for i in range(win.label_list.count())]
+    mine = [r for r in rows if "wf_noref" in r]
+    assert mine and "NO REFERENCE" in mine[0]
 
 
 def test_nothing_tells_the_operator_to_open_a_menu_that_is_hidden():
@@ -1749,83 +1359,77 @@ def test_an_old_box_with_no_id_still_matches_on_its_family():
     assert win._box_is_active_label(legacy) is True
 
 
-def test_the_reference_capture_sees_a_generic_family_box(monkeypatch):
-    """The screenshot, end to end: capture, draw, and the confirm has to arm.
-    It depended on the same comparison, so the new button was dead too."""
-    import numpy as np
-    from PySide6.QtWidgets import QApplication
 
-    _fake_editor(monkeypatch)
+# --- the reference is required, and it is the one way in --------------------
+
+def _bare_label(win, label_id):
+    """A label in the library with no artwork -- the state the rule refuses."""
+    from label_detections.core import persistence
+    from label_detections.core.labels import LabelDef
+
+    library = persistence.load_library()
+    library.add(LabelDef(label_id=label_id, train_target=1), replace=True)
+    persistence.save_library(library)
+    win.library = persistence.load_library()
+    return label_id
+
+
+def test_a_label_with_no_reference_cannot_be_opened():
+    """It has regions that are fractions of an outline drawn on a picture that
+    does not exist -- there is nothing to draw against or verify with, and
+    letting it open is what let a half-defined label look finished."""
     win = _window()
-    _define(win, "wf_refsplit")
-    win.set_active_label("wf_refsplit")
-    win.last_raw = np.zeros((200, 400, 3), dtype=np.uint8)
-    win.capture_reference()
-    win.canvas.boxes.clear()
-    _draw_as_the_app_does(win, "wf_refsplit")
-    win._update_box_count()
-    QApplication.processEvents()
+    _define(win, "wf_gate_ok")
+    win.set_active_label("wf_gate_ok")
+    _bare_label(win, "wf_gate_bare")
 
-    assert win._reference_box_drawn() is True
-    assert win.reference_confirm_btn.isEnabled() is True
+    win.set_active_label("wf_gate_bare")
+    assert win.label_id == "wf_gate_ok", "opened a label with no reference"
 
 
-# --- a deleted region has to leave the canvas too ----------------------------
-#
-# A code was deleted from the label and its box stayed on the reference image,
-# because Place Regions kept every region already on the box and only ever
-# added. There was no way to get rid of one at all.
-
-def test_place_regions_clears_a_region_the_label_no_longer_has():
-    """The reported symptom: 'I deleted the serial box and it is still there.'"""
-    from label_detections.core import annotations as ann
-
+def test_opening_it_from_the_list_offers_the_way_through(monkeypatch):
+    """A refusal that only says no is a wall."""
     win = _window()
-    _define(win, "wf_stale")
-    win.set_active_label("wf_stale")
-    label = win.library.get("wf_stale")
-    label.text_fields = [type("F", (), {"name": "field_1", "policy": "must_be_present",
-                                        "pattern": "X", "region": [0.1, 0.1, 0.2, 0.2]})()]
-    win.canvas.boxes.clear()
-    box = _draw_as_the_app_does(win, "wf_stale")
-    # A region placed from a code that has since been deleted.
-    box.regions = [{"role": "code", "code_role": "serial", "placed_from": "reference",
-                    "points": [[0, 0], [1, 0], [1, 1], [0, 1]]}]
+    _bare_label(win, "wf_gate_offer")
+    monkeypatch.setattr(win, "_selected_label_id", lambda: "wf_gate_offer")
 
-    win.place_regions_on_canvas()
-    roles = {r.get("code_role") or r.get("field") for r in ann.regions(box.to_dict())}
-    assert "serial" not in roles, "the deleted region survived a re-place"
+    asked = {}
+    monkeypatch.setattr(win, "_ask_reference_needed",
+                        lambda label: asked.setdefault("label", label) and False)
+    monkeypatch.setattr(win, "capture_reference",
+                        lambda: asked.setdefault("captured", True))
+    win._load_selected_label()
+    assert asked.get("label") is not None
 
 
-def test_place_regions_keeps_a_region_somebody_nudged_by_hand():
-    """An operator who moved a region because the artwork drifted has produced
-    better data than the library holds; refreshing must not throw that away."""
-    from label_detections.core import annotations as ann
-
+def test_saying_yes_to_the_offer_runs_the_capture(monkeypatch):
     win = _window()
-    _define(win, "wf_nudged")
-    win.set_active_label("wf_nudged")
-    win.library.get("wf_nudged").text_fields = []
-    win.canvas.boxes.clear()
-    box = _draw_as_the_app_does(win, "wf_nudged")
-    box.regions = [{"role": "text", "field": "by_hand", "placed_from": "operator",
-                    "points": [[0, 0], [1, 0], [1, 1], [0, 1]]}]
-
-    win.place_regions_on_canvas()
-    fields = {r.get("field") for r in ann.regions(box.to_dict())}
-    assert "by_hand" in fields
+    _bare_label(win, "wf_gate_yes")
+    monkeypatch.setattr(win, "_selected_label_id", lambda: "wf_gate_yes")
+    monkeypatch.setattr(win, "_ask_reference_needed", lambda label: True)
+    ran = {}
+    monkeypatch.setattr(win, "capture_reference",
+                        lambda: ran.setdefault("yes", True))
+    win._load_selected_label()
+    assert ran.get("yes") is True
 
 
-def test_place_regions_finds_the_box_at_all():
-    """It compared the detector family against the library id, so it matched
-    nothing the app draws and silently placed zero regions."""
+def test_nothing_prompts_when_the_app_repoints_itself():
+    """A modal over an empty window on launch is a worse greeting than a list
+    that says which labels need one, and every refresh would raise it."""
     win = _window()
-    _define(win, "wf_placefind")
-    win.set_active_label("wf_placefind")
-    win.library.get("wf_placefind").text_fields = [
-        type("F", (), {"name": "f", "policy": "must_be_present", "pattern": "X",
-                       "region": [0.1, 0.1, 0.2, 0.2]})()]
-    win.canvas.boxes.clear()
-    box = _draw_as_the_app_does(win, "wf_placefind")
-    win.place_regions_on_canvas()
-    assert box.regions, "no region was placed on a box the app itself drew"
+    _bare_label(win, "wf_gate_quiet")
+    # No stub for the prompt: if this raised one, it would block here.
+    win.set_active_label("wf_gate_quiet")
+    assert win.label_id != "wf_gate_quiet"
+
+
+def test_a_label_that_gains_a_reference_opens_normally():
+    win = _window()
+    _bare_label(win, "wf_gate_fixed")
+    win.set_active_label("wf_gate_fixed")
+    assert win.label_id != "wf_gate_fixed"
+
+    _define(win, "wf_gate_fixed")          # writes real artwork
+    win.set_active_label("wf_gate_fixed")
+    assert win.label_id == "wf_gate_fixed"

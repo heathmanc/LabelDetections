@@ -26,6 +26,7 @@ from pathlib import Path
 from PySide6.QtCore import QPoint, QRect, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
+    QWidget,
     QComboBox, QDialog, QDialogButtonBox, QHBoxLayout, QHeaderView, QLabel,
     QLineEdit, QMessageBox, QPushButton, QTableWidget, QTableWidgetItem,
     QVBoxLayout, QWidget,
@@ -61,6 +62,13 @@ class RegionCanvas(QWidget):
         # Each region: {"role", "name", "rect": QRectF in image pixels}
         self.regions: list[dict] = []
         self.outline = QRectF()
+        # Whether anyone actually drew it. load() defaults the outline to the
+        # whole image, which is right for an artwork that has already been
+        # cropped to the label and badly wrong for a raw photograph with a
+        # table around it -- there every region would be a fraction of the
+        # photo, and at runtime those fractions land on the detector's tight
+        # label box and miss by the width of the margin.
+        self.outline_is_default = True
         self.selected = -1
         self.draw_role = "code"
         self._drag_from: QPoint | None = None
@@ -82,6 +90,7 @@ class RegionCanvas(QWidget):
             # common case, and an operator who did crop should not have to
             # re-draw what they already framed.
             self.outline = QRectF(0, 0, self._pixmap.width(), self._pixmap.height())
+            self.outline_is_default = True
         self.update()
         return True
 
@@ -227,6 +236,7 @@ class RegionCanvas(QWidget):
                 and self._drag_rect.height() > 3:
             if self.draw_role == OUTLINE:
                 self.outline = QRectF(self._drag_rect)
+                self.outline_is_default = False
             else:
                 self.regions.append({
                     "role": self.draw_role,
@@ -298,22 +308,20 @@ class RegionCanvas(QWidget):
             p.drawRect(self._to_screen(self._drag_rect))
 
 
-class RegionEditorDialog(QDialog):
-    """Draw a label's read-regions on its reference artwork.
+class RegionEditorBody(QWidget):
+    """Draw a label's outline and read-regions on a photograph of it.
 
-    Opened from the add-a-label wizard with whatever rows already exist, and it
-    hands them back with their geometry filled in. The wizard's tables stay the
-    one source of truth for policies and patterns; this only supplies the
-    coordinates, which are the part nobody can type accurately.
+    A widget rather than a dialog so it can be the second page of the
+    reference-setup popup as well as its own window. Everything about drawing
+    lives here; the two hosts differ only in how they are dismissed.
     """
 
     def __init__(self, reference: str, codes: list[dict], text_fields: list[dict],
                  anchor: list[float] | None = None, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Draw read-regions on the reference")
-        self.resize(1080, 700)
 
         root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
         blurb = QLabel(
             "Drag on the artwork to add a region. Regions are stored as fractions of "
             "the label, so they follow it onto any image at any angle and any "
@@ -380,11 +388,6 @@ class RegionEditorDialog(QDialog):
         self.feasibility.setWordWrap(True)
         self.feasibility.setStyleSheet("color: #fbbf24;")
         side.addWidget(self.feasibility)
-
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        root.addWidget(buttons)
 
         self.canvas.regions_changed.connect(self._refresh_table)
         self.canvas.selection_changed.connect(self._sync_side_panel)
@@ -562,11 +565,51 @@ class RegionEditorDialog(QDialog):
         if 0 <= self.canvas.selected < self.table.rowCount():
             self.table.selectRow(self.canvas.selected)
 
+    def has_image(self) -> bool:
+        return self.canvas.image_size() != (0, 0)
+
+    def has_outline(self) -> bool:
+        """Has somebody drawn the label outline on this photograph?
+
+        Not merely "is there a rectangle": loading defaults it to the whole
+        image, and accepting that on a raw photo would make every region a
+        fraction of the photograph rather than of the label. The two are the
+        same only when the picture has already been cropped to the label.
+        """
+        return (self.canvas.outline.width() > 0
+                and self.canvas.outline.height() > 0
+                and not self.canvas.outline_is_default)
+
+
+class RegionEditorDialog(QDialog):
+    """The body in a window of its own, for editing an existing label's regions."""
+
+    def __init__(self, reference: str, codes: list[dict], text_fields: list[dict],
+                 anchor: list[float] | None = None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Draw read-regions on the reference")
+        self.resize(1080, 700)
+        layout = QVBoxLayout(self)
+        self.body = RegionEditorBody(reference, codes, text_fields, anchor, self)
+        layout.addWidget(self.body, 1)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    # The dialog is a shell; callers ask it the same questions as before.
+    @property
+    def canvas(self):
+        return self.body.canvas
+
+    def result_regions(self) -> dict:
+        return self.body.result_regions()
+
     def accept(self) -> None:
-        if self.canvas.image_size() == (0, 0):
+        if not self.body.has_image():
             QMessageBox.information(
                 self, "Regions",
-                "There is no reference image to draw on. Add one on the Appearance "
-                "page first.")
+                "There is no reference image to draw on. Add one on the "
+                "Appearance page first.")
             return
         super().accept()

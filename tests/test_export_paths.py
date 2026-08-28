@@ -49,7 +49,11 @@ def _dataset(label_id, images=3):
     from label_detections.core.labels import LabelDef
 
     library = persistence.load_library()
-    library.add(LabelDef(label_id=label_id, train_target=5), replace=True)
+    from conftest import reference_for
+
+    library.add(LabelDef(label_id=label_id, train_target=5,
+                         reference_images=[reference_for(label_id)]),
+                replace=True)
     persistence.save_library(library)
 
     folder = storage.dataset_folder(label_id)
@@ -169,7 +173,11 @@ def test_exporting_with_nothing_reviewed_explains_itself(monkeypatch):
 
     win = _window()
     library = persistence.load_library()
-    library.add(LabelDef(label_id="exp_empty", ), replace=True)
+    from conftest import reference_for
+
+    library.add(LabelDef(label_id="exp_empty",
+                         reference_images=[reference_for("exp_empty")]),
+                replace=True)
     persistence.save_library(library)
     win.library = persistence.load_library()
     win.set_active_label("exp_empty")

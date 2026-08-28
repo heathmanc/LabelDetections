@@ -19,6 +19,21 @@ def rect(x, y, w, h):
     return [[x, y], [x + w, y], [x + w, y + h], [x, y + h]]
 
 
+def reference_for(label_id: str) -> str:
+    """A real reference image on disk for a test label.
+
+    It has to exist rather than merely be named. A label with no artwork is
+    refused everywhere now -- every region on it is a fraction of an outline
+    drawn on a picture -- so a helper that pointed at a filename nobody wrote
+    described a label the app would not open.
+    """
+    import numpy as np
+
+    from label_detections.core.imageio import save_reference
+
+    return str(save_reference(label_id, np.full((60, 90, 3), 220, np.uint8)))
+
+
 @pytest.fixture
 def library():
     plate = LabelDef(label_id="spec_plate_31agm", reference_images=["ref.png"],

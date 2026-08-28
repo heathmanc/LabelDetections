@@ -202,8 +202,12 @@ def _label(win, label_id="live_sp", ):
     from label_detections.core import persistence
     from label_detections.core.labels import LabelDef
 
+    from conftest import reference_for
+
     library = persistence.load_library()
-    library.add(LabelDef(label_id=label_id, ), replace=True)
+    library.add(LabelDef(label_id=label_id,
+                         reference_images=[reference_for(label_id)]),
+                replace=True)
     persistence.save_library(library)
     win.library = persistence.load_library()
     win.set_active_label(label_id)

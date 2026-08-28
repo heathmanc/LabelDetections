@@ -98,6 +98,7 @@ from label_detections.core import training as training_logic
 from label_detections.core import evaluation as evaluation_logic
 from label_detections.core import dataset_health
 from label_detections.core import storage as storage_mod
+from label_detections.core import reference as reference_logic
 from label_detections.ui import novelty as novelty_ui
 from label_detections.core import code_reader
 from label_detections.core import text_reader
@@ -349,7 +350,7 @@ class MainWindow(QMainWindow):
         self._image_status_cache: dict[str, dict] = {}
         # Set by Capture Reference: the next label box drawn opens the region
         # editor on it, so the whole flow is capture, draw, draw regions.
-        self._awaiting_reference_box = False
+
         # Built on the first click, not at startup: most sessions never press
         # the button, and a launch that stalls on a download nobody asked for
         # is worse than a first click that does.
@@ -579,30 +580,18 @@ class MainWindow(QMainWindow):
         assist_action.triggered.connect(self._guarded(self.toggle_outline_assist))
         tools_menu.addAction(assist_action)
 
-        define_regions_action = QAction("Define read-regions from this image", self)
-        define_regions_action.setShortcut("Ctrl+Shift+D")
-        define_regions_action.triggered.connect(self._guarded(self.define_read_regions))
-        tools_menu.addAction(define_regions_action)
-
-        edit_regions_action = QAction("Edit read-regions", self)
-        edit_regions_action.setShortcut("Ctrl+Shift+E")
-        edit_regions_action.triggered.connect(self._guarded(self.edit_read_regions))
-        tools_menu.addAction(edit_regions_action)
-
-        replace_artwork_action = QAction("Replace label artwork...", self)
-        replace_artwork_action.setShortcut("Ctrl+Shift+A")
-        replace_artwork_action.setToolTip(
-            "Re-flatten this label's artwork from the box on this image. Every "
-            "region is positioned against it, so this is behind a confirmation.")
-        replace_artwork_action.triggered.connect(self._guarded(self.replace_label_artwork))
-        tools_menu.addAction(replace_artwork_action)
-
-        regions_action = QAction("Place read-regions", self)
-        regions_action.setShortcut("Ctrl+R")
-        regions_action.setToolTip(
-            "Fill in the active label's read-regions from its artwork.")
-        regions_action.triggered.connect(self._guarded(self.place_regions_on_canvas))
-        tools_menu.addAction(regions_action)
+        # Define / Edit / Place read-regions and Replace artwork used to be four
+        # entries here and three buttons on the annotation pane, all doing parts
+        # of one job in an order nothing enforced. Capture Reference does the
+        # whole job in one window now.
+        reference_action = QAction("Capture reference image...", self)
+        reference_action.setShortcut("Ctrl+Shift+D")
+        reference_action.setToolTip(
+            "Photograph the active label, outline it, and mark what to read on "
+            "it -- in one window. A label cannot be worked on until this is "
+            "done, because every region is a fraction of that outline.")
+        reference_action.triggered.connect(self._guarded(self.capture_reference))
+        tools_menu.addAction(reference_action)
 
         prelabel_action = QAction("Pre-label unlabeled && review (model)", self)
         prelabel_action.setShortcut("Ctrl+Shift+P")
@@ -680,9 +669,8 @@ class MainWindow(QMainWindow):
             next_action, prev_action,
             unreviewed_action, mark_reviewed_action, force_review_action,
             capture_action, auto_label_action, validate_action,
-            prelabel_action, next_queue_action, shortcuts_action, regions_action,
-            build_queue_action, assist_action,
-            define_regions_action, edit_regions_action, replace_artwork_action,
+            prelabel_action, next_queue_action, shortcuts_action,
+            build_queue_action, assist_action, reference_action,
             variance_action, scale_action, live_detect_action, keep_frame_action,
             keep_json_action,
         ):
@@ -3213,9 +3201,15 @@ class MainWindow(QMainWindow):
             statuses = list(persistence.dataset_statuses(label.label_id).values())
             ready = sum(1 for s in statuses if review_logic.export_ready(s))
             target = max(1, int(getattr(label, "train_target", 150) or 150))
-            mark = "✓" if ready >= target else " "
+            # A missing reference outranks the image count: a label with 150
+            # reviewed images and no artwork is not nearly finished, it is
+            # unusable, and a tick beside it would say the opposite.
+            if not reference_logic.has_reference(label):
+                mark, tail = "\u26a0", "   NO REFERENCE"
+            else:
+                mark, tail = ("\u2713" if ready >= target else " "), ""
             item = QListWidgetItem(
-                f"{mark} {label.label_id}  {ready}/{target}")
+                f"{mark} {label.label_id}  {ready}/{target}{tail}")
             item.setData(Qt.ItemDataRole.UserRole, label.label_id)
             self.label_list.addItem(item)
 
@@ -3448,39 +3442,6 @@ class MainWindow(QMainWindow):
         except Exception:
             return None
 
-    def _refresh_regions_button(self) -> None:
-        """Say which of the two things the button will do, before it is pressed."""
-        if not hasattr(self, "define_regions_btn"):
-            return
-        label = self.library.get(self.label_id) if self.label_id else None
-        has_artwork = label is not None and self._existing_artwork(label) is not None
-        self.define_regions_btn.setText(
-            "Edit Regions..." if has_artwork else "Define Regions...")
-        self.define_regions_btn.setToolTip(
-            "Open this label's artwork and adjust its read-regions. The artwork "
-            "itself is kept -- if the box you flattened it from was drawn wrong, "
-            "redraw the box and use Replace Artwork."
-            if has_artwork else
-            "Flatten the label box on this image into straight-on artwork and draw "
-            "the areas to read inside it -- a barcode, a serial, a date code. "
-            "Stored as fractions of the label, so they then apply to every image "
-            "of it. (Ctrl+Shift+D)")
-        if not hasattr(self, "replace_artwork_btn"):
-            return
-        # Disabled rather than hidden when there is nothing to replace: a button
-        # that appears once artwork exists is a button nobody knows exists at
-        # the moment they need it.
-        self.replace_artwork_btn.setEnabled(has_artwork)
-        self.replace_artwork_btn.setToolTip(
-            "Throw away this label's artwork and re-flatten it from the box on "
-            "this image -- the fix for an outline drawn around the wrong area. "
-            "Draw the box around the whole label first. Regions are fractions "
-            "of the label, so they are carried over and shown on the new artwork "
-            "to be checked. (Ctrl+Shift+A)"
-            if has_artwork else
-            "Nothing to replace yet: this label has no artwork. Draw its box and "
-            "use Define Regions.")
-
     def _refresh_active_label_panel(self) -> None:
         if not hasattr(self, "label_id_label"):
             return
@@ -3508,7 +3469,6 @@ class MainWindow(QMainWindow):
             bits.append(label.surface)
         self.label_meta_label.setText(" · ".join(bits) or str(label.name or "—"))
 
-        self._refresh_regions_button()
         self._refresh_assist_button()
         statuses = list(persistence.dataset_statuses(label.label_id).values())
         self.label_progress_label.setText(
@@ -3529,17 +3489,60 @@ class MainWindow(QMainWindow):
         if not label_id:
             QMessageBox.information(self, "Label", "Select a label in the list first.")
             return
-        self.set_active_label(label_id)
+        self.set_active_label(label_id, prompt=True)
 
-    def set_active_label(self, label_id: str) -> None:
+    def _ask_reference_needed(self, label) -> bool:
+        """Say a label cannot be opened yet, and offer the way through.
+
+        Its own method so it can be stubbed: a modal built here rather than
+        through QMessageBox's static helpers does not see them monkeypatched,
+        and a test that opens a label blocks on it forever.
+        """
+        box = QMessageBox(self)
+        box.setWindowTitle("Reference image needed")
+        box.setIcon(QMessageBox.Information)
+        box.setText(reference_logic.block_reason(label, "labelling against it"))
+        start = box.addButton("Capture Reference", QMessageBox.AcceptRole)
+        box.addButton("Not now", QMessageBox.RejectRole)
+        box.exec()
+        return box.clickedButton() is start
+
+    def set_active_label(self, label_id: str, *, prompt: bool = False) -> None:
         """Point the whole app at one label's dataset.
 
         The Class combo follows to that label, because the next thing the
         operator does is draw one -- and a box drawn under the wrong class
         is a mislabel that survives all the way into training.
+
+        A label with no reference image is refused. Every region on it is a
+        fraction of an outline drawn on artwork that does not exist, so there
+        is nothing to draw against, nothing to verify with, and nothing worth
+        exporting -- and letting it be opened anyway is what allowed a
+        half-defined label to sit in the list looking finished.
+
+        ``prompt`` is off by default and turned on only where a person just
+        clicked a label. Everything else that re-points the app -- the restore
+        on launch, a refresh after an edit -- would otherwise raise a modal
+        nobody asked for, and a modal over an empty window on launch is a worse
+        greeting than a label list that says which labels need one.
         """
+        candidate = self.library.get(str(label_id))
+        if candidate is not None and not reference_logic.has_reference(candidate):
+            if prompt:
+                if self._ask_reference_needed(candidate):
+                    # Point at it just long enough to set one up. The capture
+                    # dialog needs a label to work on, and it is the only thing
+                    # this label can be used for until it has artwork.
+                    self.label_id = str(label_id)
+                    self._refresh_class_combo()
+                    self.capture_reference()
+                    if reference_logic.has_reference(
+                            self.library.get(str(label_id)) or candidate):
+                        self.set_active_label(label_id, prompt=False)
+                        return
+            self._refresh_labels()
+            return
         self.label_id = str(label_id)
-        self._disarm_reference_capture()
         # Re-derive first: a label added since construction is not in the combo
         # yet, and set_class_by_name would silently leave the class on
         # battery_side -- every box then drawn would carry the wrong identity.
@@ -3566,7 +3569,7 @@ class MainWindow(QMainWindow):
         self._refresh_class_combo()
         self._refresh_class_list_widget()
         self._refresh_labels()
-        self.set_active_label(label.label_id)
+        self.set_active_label(label.label_id, prompt=True)
 
     def edit_selected_label(self) -> None:
         label_id = self._selected_label_id() or self.label_id
@@ -4113,17 +4116,13 @@ class MainWindow(QMainWindow):
         copy_prev.clicked.connect(self.copy_previous_labels)
         qa_btn = QPushButton("Find Problem")
         qa_btn.clicked.connect(self.find_next_problem_image)
-        self.define_regions_btn = QPushButton("Define Regions...")
-        self.define_regions_btn.clicked.connect(self.define_read_regions)
-        define_regions_btn = self.define_regions_btn
-        # The way out of artwork drawn wrong. It used to be named only in a
-        # tooltip, naming an entry in the Tools menu -- and the menu bar is
-        # hidden, so the one signposted recovery pointed somewhere that cannot
-        # be opened. Anyone who outlined the label badly the first time had no
-        # visible second chance.
-        self.replace_artwork_btn = QPushButton("Replace Artwork...")
-        self.replace_artwork_btn.clicked.connect(self.replace_label_artwork)
-        replace_artwork_btn = self.replace_artwork_btn
+        # Define Regions, Replace Artwork and Place Regions used to live here.
+        # They were three controls doing parts of one job -- photograph the
+        # label, say where it is, say what to read on it -- in an order nothing
+        # enforced, on a pane about annotating images rather than about
+        # defining labels. Capture Reference now does the whole thing in one
+        # window, and a label that has not been through it cannot be worked on
+        # at all, so there is nothing left for these to be half-done with.
         # Checkable, not a one-shot: outlining is what somebody does a hundred
         # and fifty times in a row, and re-arming between every image would
         # give most of the saving back.
@@ -4132,13 +4131,6 @@ class MainWindow(QMainWindow):
         self.assist_btn.toggled.connect(self.set_outline_assist)
         assist_btn = self.assist_btn
         self._refresh_assist_button()
-        self._refresh_regions_button()
-        regions_btn = QPushButton("Place Regions")
-        regions_btn.setToolTip(
-            "Fill in this label's read-regions -- barcodes, text fields, the match "
-            "anchor -- from its artwork. They are stored as fractions of the label, "
-            "so drawing its four corners is all the positioning they need. (Ctrl+R)")
-        regions_btn.clicked.connect(self.place_regions_on_canvas)
         delete = QPushButton("Delete Box")
         delete.setToolTip("Delete only the selected on-screen box. Click Save when you want to write the change.")
         delete.clicked.connect(self.canvas.delete_selected)
@@ -4157,7 +4149,6 @@ class MainWindow(QMainWindow):
         zplus.clicked.connect(self.canvas.zoom_in)
 
         right_panel_buttons = (save, save_next, copy_prev, qa_btn, assist_btn,
-                               define_regions_btn, replace_artwork_btn, regions_btn,
                                delete, clear, clear_saved, zminus, zfit, zplus)
         for btn in right_panel_buttons:
             btn.setProperty("rightPanelButton", True)
@@ -4198,25 +4189,6 @@ class MainWindow(QMainWindow):
 
         v.addWidget(self.mode_label)
         v.addWidget(self.guidance_label)
-        # Only ever visible during a reference capture. The box used to be
-        # committed the instant the mouse came up, which meant the one drag
-        # that decides the artwork -- and every region positioned on it
-        # afterwards -- could not be adjusted at all.
-        self.reference_confirm_btn = QPushButton("Use This Box \u2192 Define Regions")
-        self.reference_confirm_btn.setStyleSheet("font-weight: 700;")
-        self.reference_confirm_btn.setToolTip(
-            "Flatten the box you have drawn into this label's artwork and open "
-            "the region editor on it.\n\n"
-            "Adjust the corner handles until the box follows the label exactly "
-            "before pressing this. Every read-region is stored as a fraction of "
-            "this outline, so the outline is the thing that has to be right.")
-        self.reference_confirm_btn.clicked.connect(self._confirm_reference_box)
-        self.reference_confirm_btn.setVisible(False)
-        v.addWidget(self.reference_confirm_btn)
-        self.reference_cancel_btn = QPushButton("Cancel reference capture")
-        self.reference_cancel_btn.clicked.connect(self._cancel_reference_capture)
-        self.reference_cancel_btn.setVisible(False)
-        v.addWidget(self.reference_cancel_btn)
         v.addLayout(form)
         v.addWidget(self.count_label)
         v.addWidget(self.dataset_label)
@@ -4225,8 +4197,6 @@ class MainWindow(QMainWindow):
         v.addLayout(button_row(save, save_next))
         v.addLayout(button_row(copy_prev, qa_btn))
         v.addWidget(assist_btn)
-        v.addLayout(button_row(define_regions_btn, regions_btn))
-        v.addWidget(replace_artwork_btn)
         v.addLayout(button_row(delete, clear))
         v.addWidget(clear_saved)
 
@@ -5494,7 +5464,7 @@ class MainWindow(QMainWindow):
             self.canvas.set_drawing_enabled(not live)
         if hasattr(self, "mode_label"):
             self.mode_label.setText("Mode: Live preview" if live else "Mode: Labeling")
-        if hasattr(self, "guidance_label") and not getattr(self, "_awaiting_reference_box", False):
+        if hasattr(self, "guidance_label"):
             self.guidance_label.setText(
                 "Live preview — capture a frame before drawing. A box drawn on a "
                 "live frame belongs to no image."
@@ -5554,70 +5524,114 @@ class MainWindow(QMainWindow):
             return bool(self.camera.is_open())
         except Exception:
             return False
-    def capture_reference(self) -> None:
-        """Capture a frame in order to define this label's read-regions.
+    def _ask_replace_reference(self, label) -> bool:
+        """Confirm deleting a label's artwork, saying what it costs.
 
-        The frame is saved into the dataset like any other capture -- a picture
-        of the label is training data whatever else it is also used for. What
-        this adds is the follow-through: draw the label's box and the region
-        editor opens on it, flattened, without anyone hunting for a menu.
+        Its own method so it can be stubbed: a modal built here rather than
+        through QMessageBox's static helpers does not see them monkeypatched,
+        and a test that reaches this blocks on it forever.
         """
+        box = QMessageBox(self)
+        box.setWindowTitle("Replace reference image")
+        box.setIcon(QMessageBox.Question)
+        box.setText(reference_logic.replace_warning(label))
+        redo = box.addButton("Delete it and start again", QMessageBox.AcceptRole)
+        keep = box.addButton("Keep it", QMessageBox.RejectRole)
+        box.setDefaultButton(keep)
+        box.exec()
+        return box.clickedButton() is redo
+
+    def capture_reference(self) -> None:
+        """Set up the active label's reference image, outline and regions.
+
+        The one entry point. It used to be the first of four steps spread over
+        two panes; the others are gone, and this runs the whole job in one
+        window that writes nothing until it finishes.
+        """
+        from .reference_setup import ReferenceSetupDialog
+
         label = self.library.get(self.label_id) if self.label_id else None
         if label is None:
             QMessageBox.information(
                 self, "Capture Reference",
-                "Open a label first -- read-regions belong to a label.")
+                "Open a label first -- a reference image belongs to a label.")
             return
-        existing = self._existing_artwork(label)
-        if existing is not None:
-            # A label's artwork is defined once, and replacing it moves every
-            # region positioned on it -- so it stays a deliberate act. But it
-            # was a dead end: this said no and named a button on another tab
-            # that itself needs a box drawn on an image. Somebody who has just
-            # deleted the capture they thought was the reference has neither,
-            # and no way from here to anywhere.
-            #
-            # The artwork also does not live in the captured-images list. It is
-            # a flattened copy under library/references, so deleting the
-            # picture it came from leaves it exactly where it was, which is
-            # what makes this refusal read as a bug.
-            if not self._ask_replace_artwork(existing):
+
+        existing = reference_logic.reference_path(label)
+        if existing:
+            # Immutable, so this is a delete-and-redraw rather than an edit,
+            # and it says what that costs before anything happens.
+            if not self._ask_replace_reference(label):
                 return
-            self._reference_replaces_artwork = True
-        else:
-            self._reference_replaces_artwork = False
+
+        dialog = ReferenceSetupDialog(
+            label, capture=self._reference_frame,
+            images=list_images(self.label_id), parent=self)
+        if not dialog.exec() or not dialog.result:
+            return
+        self._save_reference(label, dialog.result)
+
+    def _reference_frame(self):
+        """A freshly captured frame for the reference dialog, or None.
+
+        Saved into the dataset like any other capture -- a photograph of the
+        label is training data whatever else it is also used for.
+        """
         if self.last_raw is None:
-            QMessageBox.information(
+            return None
+        self.capture_frame(save_adjusted=bool(
+            getattr(self, "capture_adjusted_default", False)))
+        last = getattr(self, "_last_capture_path", None)
+        return Path(last) if last and Path(last).exists() else None
+
+    def _save_reference(self, label, result: dict) -> None:
+        """Write the artwork and the regions the dialog came back with.
+
+        Both together, or neither. The regions are fractions of the outline
+        that produced the artwork, so a run that saved one without the other
+        would leave a label whose regions refer to a picture that does not
+        exist.
+        """
+        frame = cv2.imread(str(result.get("frame", "")))
+        if frame is None:
+            QMessageBox.warning(
                 self, "Capture Reference",
-                "No frame yet. Open the live preview, frame the label, and try again.")
+                f"Could not re-read the photograph:\n{result.get('frame')}")
+            return
+        x, y, w, h = (int(round(v)) for v in result.get("outline") or [0, 0, 0, 0])
+        x, y = max(0, x), max(0, y)
+        crop = frame[y:y + h, x:x + w]
+        if crop.size == 0:
+            QMessageBox.warning(
+                self, "Capture Reference",
+                "The outline did not enclose any of the photograph.")
             return
 
-        adjusted = bool(getattr(self, "capture_adjusted_default", False))
-        self.capture_frame(save_adjusted=adjusted)
-        # Unlike a burst capture, this one exists to be drawn on, so the preview
-        # stops and the frame is opened.
-        self.close_camera()
-        last = getattr(self, "_last_capture_path", None)
-        if last is not None and Path(last).exists():
-            self._load_image_path(Path(last))
-        # Armed rather than modal: the operator still has to say where the label
-        # is, and a dialog sitting over the canvas is the worst possible place
-        # to ask for that.
-        self._awaiting_reference_box = True
-        self._refresh_reference_prompt()
-        self.status.showMessage(
-            "Reference captured. Draw the label's box, adjust it, then press "
-            "Use This Box.", 10000)
+        path = imageio.save_reference(self.label_id, crop)
+        updated = labels_mod.LabelDef.from_dict({
+            **label.to_dict(),
+            "codes": result["codes"],
+            "text_fields": result["text_fields"],
+            "anchor_region": result["anchor_region"],
+            # One reference, not a growing list: the label has exactly one
+            # coordinate system and keeping the old paths around invites
+            # something to pick the wrong one.
+            "reference_images": [str(path)],
+            "reference_source": str(result.get("frame", "")),
+            "variable_data": bool(label.variable_data or result["anchor_region"]),
+        })
+        self.library.add(updated, replace=True)
+        persistence.save_library(self.library)
+        self.library = persistence.load_library()
 
-    def _reference_box_drawn(self) -> bool:
-        """True when an armed reference capture now has its label box."""
-        if not getattr(self, "_awaiting_reference_box", False):
-            return False
-        label = self.library.get(self.label_id) if self.label_id else None
-        if label is None:
-            self._awaiting_reference_box = False
-            return False
-        return any(self._box_is_active_label(b) for b in self.canvas.boxes)
+        count = len(result["codes"]) + len(result["text_fields"])
+        self._refresh_labels()
+        self._refresh_active_label_panel()
+        self._refresh_images()
+        self.status.showMessage(
+            f"{self.label_id}: reference image saved with {count} region(s)",
+            8000)
+
 
     def _box_is_active_label(self, box) -> bool:
         """Is this canvas box the label that is currently open?
@@ -5637,84 +5651,6 @@ class MainWindow(QMainWindow):
             return label_id == self.label_id
         return str(getattr(box, "label", "") or "") == self.label_id
 
-    def _ask_replace_artwork(self, existing: str) -> bool:
-        """Offer the way forward, and say why the refusal looked wrong.
-
-        Its own method so it can be stubbed: a modal built here rather than
-        through QMessageBox's static helpers does not see them monkeypatched,
-        and a test that expects the old refusal blocks on it forever.
-        """
-        box = QMessageBox(self)
-        box.setWindowTitle("Capture Reference")
-        box.setIcon(QMessageBox.Question)
-        box.setText(
-            f"'{self.label_id}' already has artwork.\n\n"
-            f"{existing}\n\n"
-            f"It is a flattened copy kept outside the captured images, so "
-            f"deleting the picture it was made from does not remove it.\n\n"
-            f"Its read-regions are stored as fractions of that outline. "
-            f"Replacing it re-flattens from a box you draw next, and the "
-            f"regions are carried over onto the new artwork to be checked.")
-        # Named for what they do. "Yes" against a paragraph about replacing
-        # artwork is a button whose meaning has to be reconstructed from the
-        # text above it every time it is read.
-        replace = box.addButton("Replace the artwork", QMessageBox.AcceptRole)
-        keep = box.addButton("Keep it", QMessageBox.RejectRole)
-        box.setDefaultButton(keep)
-        box.exec()
-        return box.clickedButton() is replace
-
-    def _refresh_reference_prompt(self) -> None:
-        """Show what the reference capture is waiting for, if anything.
-
-        Three states, and the middle one is the one that was missing: armed and
-        waiting for a box, armed with a box that can still be adjusted, and not
-        armed at all.
-        """
-        armed = bool(getattr(self, "_awaiting_reference_box", False))
-        has_box = armed and self._reference_box_drawn()
-        for name in ("reference_confirm_btn", "reference_cancel_btn"):
-            button = getattr(self, name, None)
-            if button is not None:
-                button.setVisible(armed)
-        confirm = getattr(self, "reference_confirm_btn", None)
-        if confirm is not None:
-            confirm.setEnabled(has_box)
-        if not hasattr(self, "guidance_label"):
-            return
-        if not armed:
-            self.guidance_label.setText(
-                "OBB labels: drag to draw, then adjust the four corner handles.")
-        elif has_box:
-            self.guidance_label.setText(
-                f"Reference capture \u2014 adjust the {self.label_id} corners "
-                f"until the box follows the label exactly, then press Use This "
-                f"Box. Regions are stored as fractions of this outline.")
-        else:
-            self.guidance_label.setText(
-                f"Reference capture \u2014 draw the {self.label_id} box around "
-                f"the whole label. You can adjust it before committing.")
-
-    def _confirm_reference_box(self) -> None:
-        """The operator says the outline is right. Flatten it and go."""
-        if not self._reference_box_drawn():
-            QMessageBox.information(
-                self, "Capture Reference",
-                f"Draw the {self.label_id} box around the whole label first.")
-            return
-        replace = bool(getattr(self, "_reference_replaces_artwork", False))
-        self._disarm_reference_capture()
-        self.define_read_regions(replace=replace)
-
-    def _cancel_reference_capture(self) -> None:
-        self._disarm_reference_capture()
-        self.status.showMessage(
-            "Reference capture cancelled. The image is still in the dataset.", 6000)
-
-    def _disarm_reference_capture(self) -> None:
-        self._awaiting_reference_box = False
-        self._reference_replaces_artwork = False
-        self._refresh_reference_prompt()
     def _save_test_settings(self) -> None:
         """Persist the Model Test tab so nothing is re-entered next launch."""
         if not hasattr(self, "test_model_edit"):
@@ -7058,136 +6994,6 @@ class MainWindow(QMainWindow):
             # A live view must not die because a label was edited.
             pass
 
-    def place_regions_on_canvas(self) -> None:
-        """Fill in the active label's read-regions on every matching box.
-
-        Runs after a draw, so the barcode and text areas appear the moment the
-        label's corners exist -- the whole point of storing them as fractions of
-        the label. Purely visual until Save, and a single Undo step.
-        """
-        label = self.library.get(self.label_id) if self.label_id else None
-        if label is None or not label.regions():
-            return
-        placed = 0
-        if hasattr(self.canvas, "push_undo_snapshot"):
-            self.canvas.push_undo_snapshot()
-        for box in self.canvas.boxes:
-            if not self._box_is_active_label(box):
-                continue
-            payload = box.to_dict()
-            # overwrite: this is the act of saying "make this box match the
-            # library". Without it every region already on the box is kept, so
-            # a region deleted from the label stays on screen and in the
-            # sidecar for good -- there is no other way to get rid of one.
-            # Hand-nudged regions are not reference-placed and survive.
-            ann_logic.apply_reference_regions(payload, label, overwrite=True)
-            box.label_id = self.label_id
-            box.regions = payload.get("regions", [])
-            placed += len(box.regions)
-        self.canvas.update()
-        self.status.showMessage(
-            f"Placed {placed} read-region(s) from {self.label_id}'s artwork", 5000)
-
-    def define_read_regions(self, *, replace: bool = False) -> None:
-        """Draw this label's read-regions, on artwork it keeps for good.
-
-        A label gets its artwork once. The first time, the box on screen is
-        flattened straight-on and kept; from then on this opens that same
-        artwork, and drawing on a different capture is refused.
-
-        The refusal matters because regions are fractions of the label. Flatten
-        a second shot whose outline is drawn even slightly differently and every
-        region on the label moves, quietly, against images that were already
-        reviewed. Replacing artwork is a deliberate act -- ``replace=True``,
-        behind a confirmation -- not a side effect of pressing the same button
-        again on a different image.
-        """
-        label = self.library.get(self.label_id) if self.label_id else None
-        if label is None:
-            QMessageBox.information(
-                self, "Read-Regions",
-                "Open a label first -- read-regions belong to a label, not to an image.")
-            return
-
-        existing = self._existing_artwork(label)
-        if existing is not None and not replace:
-            # Already has artwork: edit the regions on it rather than making
-            # new artwork out of whatever happens to be on screen.
-            self._open_region_editor(label, existing)
-            return
-
-        box = self._label_box_for_regions(label)
-        if box is None:
-            return
-
-        frame = self.last_raw
-        if frame is None and self.current_image_path:
-            frame = cv2.imread(str(self.current_image_path))
-        if frame is None:
-            QMessageBox.information(
-                self, "Read-Regions",
-                "Open one of this label's images and draw its box first. The box is "
-                "what gets flattened into the artwork you draw regions on.")
-            return
-
-        flattened = imageio.rectify_quad(frame, box.to_dict().get("points") or [],
-                                         out_width=900)
-        if flattened is None:
-            QMessageBox.warning(
-                self, "Read-Regions",
-                "That box could not be flattened -- its corners are collinear or "
-                "too small. Redraw it around the whole label and try again.")
-            return
-
-        reference = imageio.save_reference(self.label_id, flattened)
-        self._open_region_editor(label, str(reference),
-                                 source=str(self.current_image_path or ""))
-
-    def _existing_artwork(self, label) -> str | None:
-        """This label's artwork, if it has any that is still on disk.
-
-        A reference whose file has gone is treated as none: recovering from a
-        deleted file is not the same act as replacing artwork that exists, and
-        should not need a confirmation.
-        """
-        for reference in label.reference_images:
-            if reference and Path(reference).is_file():
-                return str(reference)
-        return None
-
-    def replace_label_artwork(self) -> None:
-        """Deliberately re-flatten this label's artwork from the current box.
-
-        Needed when the artwork itself changes -- a new print revision, a
-        materially better shot. The existing regions are carried over and shown
-        on the new artwork so they can be checked, because the one thing that
-        silently breaks here is an outline drawn differently from last time.
-        """
-        label = self.library.get(self.label_id) if self.label_id else None
-        if label is None:
-            QMessageBox.information(self, "Replace Artwork", "Open a label first.")
-            return
-        if self._existing_artwork(label) is None:
-            # Nothing to replace: this is just the first definition.
-            self.define_read_regions()
-            return
-
-        drawn = len(label.regions())
-        reply = QMessageBox.question(
-            self, "Replace Artwork",
-            f"'{self.label_id}' already has artwork, and {drawn} region(s) are "
-            "positioned on it.\n\n"
-            "Replacing it re-flattens the artwork from the box on this image. "
-            "Regions are fractions of the label, so if you outline it even "
-            "slightly differently than last time, every one of them moves -- "
-            "against images that were already reviewed.\n\n"
-            "The existing regions are carried over and shown on the new artwork "
-            "so you can check them.\n\nReplace it?",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
-        )
-        if reply != QMessageBox.Yes:
-            return
-        self.define_read_regions(replace=True)
     def _label_box_for_regions(self, label):
         """The on-canvas box to flatten: the selection, else the only candidate."""
         candidates = [b for b in self.canvas.boxes
@@ -7217,66 +7023,6 @@ class MainWindow(QMainWindow):
             f"There are {len(candidates)} {self.label_id} boxes on this image. Click the "
             "one to define regions on, then try again.")
         return None
-
-    def _open_region_editor(self, label, reference: str, source: str = "") -> None:
-        """Run the region editor against ``reference`` and save what was drawn."""
-        from .region_editor import RegionEditorDialog
-
-        dialog = RegionEditorDialog(
-            reference,
-            [c.to_dict() if hasattr(c, "to_dict") else dict(c.__dict__) for c in label.codes],
-            [dict(t.__dict__) for t in label.text_fields],
-            list(label.anchor_region),
-            parent=self,
-        )
-        if not dialog.exec():
-            return
-
-        drawn = dialog.result_regions()
-        updated = labels_mod.LabelDef.from_dict({
-            **label.to_dict(),
-            "codes": drawn["codes"],
-            "text_fields": drawn["text_fields"],
-            "anchor_region": drawn["anchor_region"],
-            # A flattened capture is a better reference than vendor artwork: it
-            # is this label, under this line's lighting, through this lens.
-            "reference_images": [reference] + [
-                r for r in label.reference_images if r != reference],
-            "reference_source": source or label.reference_source,
-            "variable_data": bool(label.variable_data or drawn["anchor_region"]),
-        })
-        self.library.add(updated, replace=True)
-        persistence.save_library(self.library)
-        self.library = persistence.load_library()
-
-        count = len(drawn["codes"]) + len(drawn["text_fields"]) + \
-            (1 if drawn["anchor_region"] else 0)
-        self._refresh_active_label_panel()
-        self._refresh_regions_button()
-        self.place_regions_on_canvas()
-        # Which image is the reference just changed. Without this the list keeps
-        # marking the old one and sorting the new one down among the captures,
-        # until some unrelated action happens to refresh it.
-        self._refresh_images()
-        self.status.showMessage(
-            f"Saved {count} read-region(s) on {self.label_id}. They now apply to "
-            "every image of it.", 8000)
-
-    def edit_read_regions(self) -> None:
-        """Open this label's regions on the artwork it already has."""
-        label = self.library.get(self.label_id) if self.label_id else None
-        if label is None:
-            QMessageBox.information(self, "Read-Regions", "Open a label first.")
-            return
-        existing = self._existing_artwork(label)
-        if existing is None:
-            QMessageBox.information(
-                self, "Read-Regions",
-                f"'{self.label_id}' has no artwork yet.\n\n"
-                "Open one of its images, draw the label box, then use "
-                "Define Regions -- the box gets flattened into the artwork.")
-            return
-        self._open_region_editor(label, existing)
 
     def _update_box_count(self) -> None:
         """Refresh the on-canvas tallies, and follow through on a reference capture.
@@ -7308,12 +7054,6 @@ class MainWindow(QMainWindow):
         # summary is refreshed by save/review/delete/capture and label changes
         # instead of walking every sidecar on each box draw or nudge.
 
-        # A reference capture waits for the operator to say the box is right.
-        # It used to open the region editor the instant a box existed, which is
-        # the moment the mouse comes up on the first rough drag -- so the one
-        # outline that every read-region is measured against was whatever the
-        # drag happened to produce, with no chance to touch the handles.
-        self._refresh_reference_prompt()
     def clear_boxes_unsaved(self) -> None:
         """Clear the editable canvas only; never overwrite or delete saved JSON."""
         if not self.canvas.boxes:
