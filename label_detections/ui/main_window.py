@@ -100,6 +100,7 @@ from label_detections.core import dataset_health
 from label_detections.core import storage as storage_mod
 from label_detections.ui import novelty as novelty_ui
 from label_detections.core import code_reader
+from label_detections.core import text_reader
 from label_detections.core import class_stats
 from label_detections.core import persistence
 from label_detections.core import imageio
@@ -2446,6 +2447,27 @@ class MainWindow(QMainWindow):
         code_row.addWidget(self.code_test_btn)
         cv_.addLayout(code_row)
 
+        self.live_read_text_check = QCheckBox("Verify the printed text")
+        self.live_read_text_check.setChecked(bool(
+            (load_test_settings() or {}).get("read_text", False)))
+        self.live_read_text_check.stateChanged.connect(
+            lambda _s: self._save_test_settings())
+        self.live_read_text_check.setToolTip(
+            "Read the part number printed on each detected label and check it "
+            "against the label library.\n\n"
+            "The same job as the code check, for labels whose code the camera "
+            "cannot resolve. A barcode packs the part number into 95 narrow "
+            "bars; the printed text spells it out across three times the width "
+            "with characters ten times as tall. Where the camera has to take in "
+            "a whole battery, the text is very often readable when the code is "
+            "not.\n\n"
+            "It runs only where the code check came back without an answer. A "
+            "decoded code is checksummed and this is not, so it never overrules "
+            "one.\n\n"
+            "Needs a text region drawn on the artwork (Define Regions), its "
+            "policy set, and the printed part number as its pattern.")
+        cv_.addWidget(self.live_read_text_check)
+
         rate_row = QHBoxLayout()
         self.live_rate_spin = QDoubleSpinBox()
         self.live_rate_spin.setRange(0.5, 60.0)
@@ -2620,6 +2642,9 @@ class MainWindow(QMainWindow):
             identity_floor=float(self.live_floor_spin.value()),
             novelty_debug=bool(self.live_novelty_debug_check.isChecked()),
             read_codes=bool(self.live_read_codes_check.isChecked()),
+            read_text=bool(self.live_read_text_check.isChecked()),
+            **dict(zip(("text_fields", "text_expected"),
+                       text_reader.library_snapshot(self.library))),
             **dict(zip(("code_specs", "code_patterns"),
                        code_reader.library_snapshot(self.library))),
             # The camera is already open by this point, so the warm-up can use
@@ -5712,6 +5737,9 @@ class MainWindow(QMainWindow):
                 "read_codes": (bool(self.live_read_codes_check.isChecked())
                                if hasattr(self, "live_read_codes_check")
                                else False),
+                "read_text": (bool(self.live_read_text_check.isChecked())
+                              if hasattr(self, "live_read_text_check")
+                              else False),
                 "max_infer_rate": (float(self.live_rate_spin.value())
                                    if hasattr(self, "live_rate_spin") else 6.7),
                 "hide_saved_labels": bool(self.test_hide_saved_labels_check.isChecked()),
@@ -7837,11 +7865,13 @@ class MainWindow(QMainWindow):
                 f"to read against.")
             return
         specs = code_reader.specs_from(label)
-        if not code_logic.demanded(specs):
+        from label_detections.core import text_read as _text_logic
+        if (not code_logic.demanded(specs)
+                and not _text_logic.demanded(text_reader.fields_from(label))):
             QMessageBox.information(
                 self, "Test Code Read",
-                f"'{label_id}' declares no code for inspection, so there is "
-                f"nothing to read.\n\nSource: {source}\n\n"
+                f"'{label_id}' declares neither a code nor a text field for "
+                f"inspection, so there is nothing to read.\n\nSource: {source}\n\n"
                 f"Open that label, draw its code region and set the policy to "
                 f"must_decode first.")
             return

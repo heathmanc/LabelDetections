@@ -129,7 +129,8 @@ class InferenceWorker(QObject):
                  crop_px: int = 224, margin: float = 0.06,
                  identity_floor: float = 0.55, warm_shape=None,
                  novelty_debug: bool = False, read_codes: bool = False,
-                 code_specs=None, code_patterns=None):
+                 code_specs=None, code_patterns=None, read_text: bool = False,
+                 text_fields=None, text_expected=None):
         super().__init__()
         self._path = str(model_path)
         self._imgsz = int(imgsz)
@@ -176,6 +177,15 @@ class InferenceWorker(QObject):
         # in that time, so decoding it on every one of ~340 frames is 339
         # warps and decodes for an answer already in hand.
         self._code_cache: dict[int, object] = {}
+        # Reading the printed part number, for labels whose code the camera
+        # cannot resolve. Same job as the code check and the same verdicts;
+        # what differs is that there is no checksum behind it, so it leans on
+        # matching the enrolled set rather than on trusting the characters.
+        self._text_fields = dict(text_fields or {})
+        self._text_expected = dict(text_expected or {})
+        self._text_on = bool(read_text)
+        self._text_note = ""
+        self._text_cache: dict[int, object] = {}
         # Where Ultralytics actually ran, asked once after the first inference.
         self._device_checked = False
 
@@ -249,6 +259,7 @@ class InferenceWorker(QObject):
         if self._classifier is not None:
             self._load_novelty()
         self._load_codes()
+        self._load_text()
         # Build Ultralytics' predictor HERE, on this thread, before any frame
         # arrives. It is created lazily on the first predict/track call, and
         # setting it up runs select_device -> torch.cuda.set_device.
@@ -277,7 +288,8 @@ class InferenceWorker(QObject):
         # front of the camera happens to be enrolled, and the run where they
         # stop being is the run where nobody remembers which it was.
         note = "".join(f"\n{line}" for line in
-                       (self._novelty_note, self._code_note) if line)
+                       (self._novelty_note, self._code_note, self._text_note)
+                       if line)
         self.loaded.emit(
             f"Loaded {which}: {self._path}\n{self._device_report()}{note}")
 
@@ -727,6 +739,87 @@ class InferenceWorker(QObject):
                                 f"a detection called one of those rests on the "
                                 f"classifier alone")
 
+    def _load_text(self) -> None:
+        """Bring up text verification, and say plainly whether it can run."""
+        if not self._text_on:
+            self._text_note = ""
+            return
+        from ..core import text_reader
+
+        ok, reason = text_reader.available()
+        if not ok:
+            self._text_on = False
+            self._text_note = f"text check OFF: {reason}"
+            return
+        verifiable = sorted(self._text_expected)
+        if not verifiable:
+            self._text_on = False
+            self._text_note = (
+                "text check OFF: no label says what its printed text should "
+                "read, so reading it could not tell right from wrong")
+            return
+        self._text_note = (f"text: {len(verifiable)} label(s) verifiable "
+                           f"({', '.join(verifiable[:4])}"
+                           f"{', ...' if len(verifiable) > 4 else ''})")
+        unchecked = [i for i in sorted(self._text_fields)
+                     if i not in self._text_expected]
+        if unchecked:
+            self._text_note += f"; NOT verifiable: {', '.join(unchecked)}"
+
+    def _verify_text(self, frame, results, named):
+        """Read the printed part number where a code could not settle it.
+
+        Runs after the code check and only where that came back without an
+        answer -- unreadable, or nothing declared. A decoded code is
+        checksummed and this is not, so it never overrules one; it covers the
+        case the code cannot reach, which on a camera that must see the whole
+        battery is most of them.
+        """
+        if not self._text_on:
+            return named
+        from ..core import text_read as text_logic
+        from ..core import text_reader
+        from ..core import live_detect as live_logic
+
+        quads = self._detection_quads(results)
+        track_ids = self._detection_track_ids(results)
+        out = []
+        for index, entry in enumerate(named):
+            name, conf = entry[0], entry[1]
+            note = entry[2] if len(entry) > 2 else ""
+            proposed = entry[3] if len(entry) > 3 else name
+            # Only where nothing has identified it yet. "code ok" and "WRONG
+            # CODE" are both answers, and a checksummed one outranks this.
+            settled = any(mark in note for mark in ("code ok", "WRONG CODE"))
+            fields = self._text_fields.get(proposed) or []
+            if (settled or not proposed or proposed == live_logic.UNKNOWN
+                    or not text_logic.demanded(fields)):
+                out.append(entry)
+                continue
+
+            track_id = track_ids[index] if index < len(track_ids) else None
+            cached = self._text_cache.get(track_id) if track_id is not None else None
+            if cached is not None and cached.label_id == proposed:
+                verdict = cached
+            else:
+                quad = quads[index] if index < len(quads) else None
+                reads = text_reader.read_label(frame, quad, fields)
+                verdict = text_logic.verdict(proposed, fields, reads,
+                                             self._text_expected)
+                if track_id is not None and verdict.state != text_logic.UNREADABLE:
+                    self._text_cache[track_id] = verdict
+
+            resolved = text_logic.resolve(proposed, verdict)
+            mark = text_logic.plate_note(verdict, proposed)
+            # The code's own note is dropped when text answered instead: two
+            # verdicts on one plate is a sentence nobody can read at a glance.
+            keep = note if not mark else " ".join(
+                x for x in (note.replace("no code", "").strip(), mark) if x)
+            out.append((resolved, conf, keep.strip(), proposed))
+        if len(self._text_cache) > 256:
+            self._text_cache.clear()
+        return out
+
     def _verify_codes(self, frame, results, named):
         """Read each detection's printed code and let it outrank the classifier.
 
@@ -951,7 +1044,8 @@ class InferenceWorker(QObject):
                 out.append(named[i] if i < len(named)
                            else (logic.UNKNOWN, 0.0, ""))
                 i += 1
-        return self._verify_codes(frame, results, out)
+        return self._verify_text(frame, results,
+                                 self._verify_codes(frame, results, out))
 
 
     @Slot()

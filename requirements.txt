@@ -12,4 +12,11 @@ pypylon>=3.0
 # Code reading. zxing-cpp covers 1D, QR, DataMatrix, Aztec and PDF417 in one
 # library; pylibdmtx is the fallback for beaten-up DataMatrix it refuses.
 zxing-cpp>=2.2
+
+# Reading the printed part number, for labels whose code the camera cannot
+# resolve -- on a view wide enough to take in a whole battery, a barcode's
+# narrowest bar lands below what any decoder recovers while the text beside it
+# is still comfortable. Self-contained wheels with the models bundled, and no
+# system binary to install alongside.
+rapidocr-onnxruntime>=1.3
 pylibdmtx>=0.1.10
