@@ -305,12 +305,6 @@ class TrainingMetricsChart(QWidget):
 
 class MainWindow(QMainWindow):
 
-    # Emitted to hand the live worker a frame. A signal rather than a call:
-    # the worker lives on another thread, and Qt only queues across threads
-    # for signal-slot connections. A direct call runs on the caller's thread,
-    # which is what put inference inside the display tick.
-    infer_requested = Signal(object)
-
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle(APP_TITLE)
@@ -2449,7 +2443,8 @@ class MainWindow(QMainWindow):
             if not self._camera_is_live():
                 return
 
-        from PySide6.QtCore import QThread
+        import threading
+
         from .live_detect import InferenceWorker
 
         self._live_rolling = live_logic.Rolling()
@@ -2471,7 +2466,6 @@ class MainWindow(QMainWindow):
         if hasattr(self.canvas, "clear_model_test_overlays"):
             self.canvas.clear_model_test_overlays()
 
-        self._live_thread = QThread(self)
         self._live_tracking = self.live_track_check.isChecked()
         classifier_path = (self.live_classifier_edit.text().strip()
                            if hasattr(self, "live_classifier_edit") else "")
@@ -2483,13 +2477,17 @@ class MainWindow(QMainWindow):
             # The camera is already open by this point, so the warm-up can use
             # the size the live path will actually hand over.
             warm_shape=(self.last_raw.shape if self.last_raw is not None else None))
-        self._live_worker.moveToThread(self._live_thread)
-        # Queued, because the worker is on another thread by the line above.
-        self.infer_requested.connect(self._live_worker.infer)
+        # A plain thread with no Qt event loop, deliberately. See
+        # InferenceWorker.submit: a QThread runs a Windows message pump, and
+        # CUDA calls made from inside one deadlocked on this hardware. Signals
+        # still travel back out of it -- that direction needs an event loop at
+        # the receiving end, and the GUI thread has one.
         self._live_worker.loaded.connect(self._on_live_loaded)
         self._live_worker.failed.connect(self._on_live_failed)
         self._live_worker.result.connect(self._on_live_result)
-        self._live_thread.started.connect(self._live_worker.load)
+        self._live_thread = threading.Thread(
+            target=self._live_worker.run_forever,
+            name="LabelVisionInference", daemon=True)
         self._live_thread.start()
 
         self.live_start_btn.setEnabled(False)
@@ -2501,29 +2499,21 @@ class MainWindow(QMainWindow):
         thread = getattr(self, "_live_thread", None)
         worker = getattr(self, "_live_worker", None)
         if worker is not None:
-            # Before anything else: a start after this one would otherwise wire
-            # a second worker to the same signal while this one stayed
-            # connected, and emitting to a worker whose thread has gone is not
-            # survivable.
-            try:
-                self.infer_requested.disconnect(worker.infer)
-            except (RuntimeError, TypeError):
-                pass
             worker.stop()
         finished = True
         if thread is not None:
-            thread.quit()
             # Bounded: a stuck inference must not hang the window on close.
             # A long first inference plus CUDA teardown can exceed a few
             # seconds, so this is generous rather than snappy.
             # Short, because a worker that has not finished by now is not
-            # going to. This is the other half of what a stuck worker felt
-            # like: Stop froze the window for ten seconds and looked as dead as
-            # the thing it was trying to stop. The orphan path below already
-            # handles a thread that outlives the request, safely -- it keeps
-            # the references so nothing frees a model under a live forward
-            # pass -- so waiting longer buys nothing but a frozen window.
-            finished = bool(thread.wait(2000))
+            # going to. Stop used to freeze the window for ten seconds and look
+            # as dead as the thing it was trying to stop. The orphan path below
+            # already handles a thread that outlives the request, safely -- it
+            # keeps the references so nothing frees a model under a live
+            # forward pass -- so waiting longer buys nothing but a frozen
+            # window.
+            thread.join(2.0)
+            finished = not thread.is_alive()
         if finished:
             self._live_thread = None
             self._live_worker = None
@@ -2635,7 +2625,7 @@ class MainWindow(QMainWindow):
         # new frame exists. Unthreaded live backends pace themselves by
         # blocking in read(); an unthreaded video *file* does not, but there is
         # no camera there to overrun, only a decoder.
-        self.infer_requested.emit(self._live_frame)
+        self._live_worker.submit(self._live_frame)
 
     def start_hang_watch(self, threshold_s: float = hang_watch.DEFAULT_THRESHOLD_S,
                          path: Path | None = None) -> Path:

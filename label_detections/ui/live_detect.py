@@ -145,6 +145,10 @@ class InferenceWorker(QObject):
         self._model = None
         self._classifier = None
         self._stopping = False
+        # One frame deep, newest wins. The busy flag upstream already prevents
+        # a backlog; this makes it structural rather than a convention.
+        import queue as _queue
+        self._queue = _queue.Queue(maxsize=1)
         # Reported once, not once per frame: a failure that repeats at the
         # camera's rate buries every other message in the log.
         self._stage2_failed = False
@@ -395,15 +399,61 @@ class InferenceWorker(QObject):
         return line
 
     @Slot(object)
-    @Slot(object)
-    def infer(self, frame) -> None:
-        """Run one frame. Silently drops it if the model never loaded.
+    def submit(self, frame) -> None:
+        """Hand a frame to the worker thread. Never blocks the caller.
 
-        A slot, and invoked through a signal, so Qt queues it onto this
-        worker's own thread. Called directly it would run on the caller's --
-        which is how a 66 ms inference came to sit inside the display tick and
-        pin the preview to 1/66th of a second.
+        A queue rather than a queued signal, and the thread is a plain
+        threading.Thread rather than a QThread, because of where four py-spy
+        dumps put the hang.
+
+        QThread emits started() at the top of run(), BEFORE exec(). So load()
+        and its warm-up ran outside the event loop, and every CUDA call in them
+        completed. infer() arrived as a queued slot INSIDE exec() -- and
+        QThread::exec on Windows runs a QEventDispatcherWin32, which owns a
+        hidden window and pumps Windows messages. A blocking CUDA call made
+        from inside a message-pump dispatch, on a WDDM GPU that is also driving
+        the desktop, is a known deadlock shape: the driver can need that thread
+        to pump while the thread is sitting inside the driver.
+
+        Every observation fits that and nothing else did. It is also why the
+        camera reader -- a plain thread, no pump, no window -- has never had
+        this problem, and why each fix only moved the hang to the next CUDA
+        call rather than removing it.
+
+        So this thread has no Qt event loop at all. Results still travel back
+        as Qt signals, which is safe in that direction: the GUI thread has the
+        event loop, and delivering to it is what event loops are for.
         """
+        if self._stopping:
+            return
+        try:
+            self._queue.put_nowait(frame)
+        except Exception:
+            # Full: a frame is already waiting. Dropping the newer one would
+            # show older boxes, so replace it.
+            try:
+                self._queue.get_nowait()
+                self._queue.put_nowait(frame)
+            except Exception:
+                pass
+
+    def run_forever(self) -> None:
+        """Load, then take frames off the queue until asked to stop.
+
+        The whole life of this thread, with no event loop anywhere in it.
+        """
+        self.load()
+        while not self._stopping:
+            try:
+                frame = self._queue.get(timeout=0.2)
+            except Exception:
+                continue
+            if frame is None or self._stopping:
+                break
+            self.infer(frame)
+
+    def infer(self, frame) -> None:
+        """Run one frame. Silently drops it if the model never loaded."""
         if self._model is None or self._stopping or frame is None:
             return
         args = {"imgsz": self._imgsz, "conf": self._conf, "verbose": False}
@@ -646,3 +696,7 @@ class InferenceWorker(QObject):
         only does after the thread has actually finished.
         """
         self._stopping = True
+        try:
+            self._queue.put_nowait(None)      # wake the loop out of its wait
+        except Exception:
+            pass

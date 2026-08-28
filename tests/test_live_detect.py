@@ -179,21 +179,12 @@ def _window():
 def _watch_infer(win, sink: list):
     """Collect the frames the pump submits.
 
-    It emits rather than calls now -- inference lives on the worker's own
-    thread, and Qt only queues across threads for signal-slot connections -- so
-    the frame is watched on the signal, not on a stubbed method.
-
-    Any previous watcher is dropped first: the window is shared across this
-    module, and a connection left behind would keep filling an earlier test's
-    list.
+    submit() is an ordinary call again: the worker runs on a plain thread with
+    a queue, not a QThread with an event loop, so there is no signal in the
+    path to watch.
     """
-    previous = getattr(win, "_test_infer_watcher", None)
-    if previous is not None:
-        # Disconnect the exact slot: a bare disconnect() warns when nothing is
-        # connected, and PySide6 warns rather than raising.
-        win.infer_requested.disconnect(previous)
-    win._test_infer_watcher = sink.append
-    win.infer_requested.connect(sink.append)
+    win._live_worker = type(
+        "StubWorker", (), {"submit": lambda _s, f: sink.append(f)})()
 
 
 def _label(win, label_id="live_sp", ):
@@ -265,7 +256,6 @@ def test_nothing_is_handed_to_the_model_while_it_is_busy():
     handed = []
     win._live_thread = object()          # pretend it is running
     win._live_loaded = True              # ...and that the model finished loading
-    win._live_worker = object()
     _watch_infer(win, handed)
     win._live_busy = True
     # Recent enough that the lost-result watchdog stays out of it, old enough
@@ -1230,7 +1220,6 @@ def test_no_frame_is_pumped_before_the_model_has_loaded():
     usually won to always lost."""
     win = _window()
     handed = []
-    win._live_worker = object()
     _watch_infer(win, handed)
     win._live_thread = object()
     win._live_loaded = False
@@ -1257,7 +1246,6 @@ def test_a_result_that_never_arrives_does_not_freeze_the_view():
     back but a restart."""
     win = _window()
     handed = []
-    win._live_worker = object()
     _watch_infer(win, handed)
     win._live_thread = object()
     win._live_loaded = True
@@ -1354,7 +1342,6 @@ def test_the_inference_rate_is_a_setting_and_governs_the_pump():
     second and destabilised a camera that had been fine."""
     win = _window()
     handed = []
-    win._live_worker = object()
     _watch_infer(win, handed)
     win._live_thread = object()
     win._live_loaded = True
@@ -1452,7 +1439,6 @@ def test_a_threaded_camera_frame_is_not_copied_twice():
     that draws the preview -- more time than the model now takes."""
     win = _window()
     handed = []
-    win._live_worker = object()
     _watch_infer(win, handed)
     win._live_thread = object()
     win._live_loaded = True
@@ -1734,55 +1720,53 @@ def test_the_timer_retunes_to_the_camera_that_showed_up():
 # --- inference is off the display tick --------------------------------------
 
 @ui
-def test_the_frame_reaches_the_worker_on_the_workers_own_thread():
-    """The whole point. A direct call ran inference inside the display tick, so
-    the preview was pinned to 1/(tick + inference) -- 10/s against a camera
-    delivering 17. Qt only queues across threads for signal-slot connections,
-    so this checks the connection really is one."""
-    from PySide6.QtCore import QObject, QThread, Signal, Slot
+def test_the_worker_runs_on_a_plain_thread_with_no_qt_event_loop():
+    """The whole point of the rework. QThread emits started() before exec(),
+    so load() and its warm-up ran outside the event loop and their CUDA calls
+    completed, while infer() arrived as a queued slot inside exec() -- where
+    QEventDispatcherWin32 owns a hidden window and pumps Windows messages --
+    and every CUDA call from there deadlocked on a WDDM GPU.
 
-    class Recorder(QObject):
-        done = Signal()
+    A plain thread has no pump and no window, which is why the camera reader
+    beside it has never had the problem."""
+    from pathlib import Path
 
-        def __init__(self):
-            super().__init__()
-            self.thread_name = ""
+    from label_detections.ui.live_detect import InferenceWorker
 
-        @Slot(object)
-        def infer(self, _frame):
-            self.thread_name = QThread.currentThread().objectName() or str(
-                id(QThread.currentThread()))
-            self.done.emit()
+    source = (Path(__file__).resolve().parent.parent / "label_detections" /
+              "ui" / "main_window.py").read_text()
+    assert "QThread(self)" not in source, "inference is back on a QThread"
+    assert "threading.Thread(\n            target=self._live_worker.run_forever" in source
 
-    win = _window()
-    thread = QThread()
-    thread.setObjectName("worker-thread")
-    worker = Recorder()
-    worker.moveToThread(thread)
-    thread.start()
+    # And the worker offers the loop the thread runs, not a slot Qt delivers.
+    assert hasattr(InferenceWorker, "run_forever")
+    assert not hasattr(InferenceWorker.submit, "__slots__")
 
-    finished = []
-    worker.done.connect(lambda: finished.append(True))
-    previous = getattr(win, "_test_infer_watcher", None)
-    if previous is not None:
-        win.infer_requested.disconnect(previous)
-        win._test_infer_watcher = None
-    win.infer_requested.connect(worker.infer)
-    try:
-        gui_thread = str(id(QThread.currentThread()))
-        win.infer_requested.emit(np.zeros((4, 4, 3), np.uint8))
-        deadline = time.monotonic() + 5.0
-        while not finished and time.monotonic() < deadline:
-            QApplication.processEvents()
-            thread.eventDispatcher() and time.sleep(0.005)
-        assert finished, "the worker never received the frame"
-        assert worker.thread_name == "worker-thread", (
-            f"inference ran on {worker.thread_name}, not the worker's thread "
-            f"(the GUI thread is {gui_thread})")
-    finally:
-        win.infer_requested.disconnect(worker.infer)
-        thread.quit()
-        thread.wait(3000)
+
+@ui
+def test_the_queue_keeps_the_newest_frame_not_the_stalest():
+    """One deep. If a frame is already waiting, showing the older one would
+    put stale boxes on a live view."""
+    from label_detections.ui.live_detect import InferenceWorker
+
+    worker = InferenceWorker("d.pt", 640, 0.4, None, track=False)
+    worker.submit("first")
+    worker.submit("second")
+    assert worker._queue.qsize() == 1
+    assert worker._queue.get_nowait() == "second"
+
+
+@ui
+def test_submitting_never_blocks_the_caller():
+    """It is called from the display tick; blocking there is the thing this
+    whole change exists to stop."""
+    from label_detections.ui.live_detect import InferenceWorker
+
+    worker = InferenceWorker("d.pt", 640, 0.4, None, track=False)
+    started = time.perf_counter()
+    for i in range(200):
+        worker.submit(i)
+    assert (time.perf_counter() - started) < 0.5
 
 
 @ui
@@ -1816,34 +1800,17 @@ def test_the_result_uses_the_frame_and_scale_it_was_submitted_with():
 
 
 @ui
-def test_stopping_unwires_the_worker_so_a_restart_does_not_double_up():
-    """Left connected, a second start would wire another worker alongside one
-    whose thread has gone, and emitting to that is not survivable."""
-    win = _window()
-    received = []
+def test_stopping_wakes_the_worker_out_of_its_wait():
+    """The loop blocks on a queue. Without something to wake it, Stop would
+    wait out the timeout on every stop."""
+    from label_detections.ui.live_detect import InferenceWorker
 
-    class Worker:
-        def infer(self, frame):
-            received.append(frame)
-
-        def stop(self):
-            pass
-
-    worker = Worker()
-    win._live_worker = worker
-    win._live_thread = None
-    win.infer_requested.connect(worker.infer)
-    try:
-        win.infer_requested.emit(np.zeros((2, 2, 3), np.uint8))
-        assert len(received) == 1
-
-        win.stop_live_detect()
-
-        win.infer_requested.emit(np.zeros((2, 2, 3), np.uint8))
-        assert len(received) == 1, "still wired to the stopped worker"
-    finally:
-        win._live_worker = None
-        win._live_thread = None
+    worker = InferenceWorker("d.pt", 640, 0.4, None, track=False)
+    worker.stop()
+    assert worker._stopping is True
+    # A sentinel is waiting, so the loop returns at once rather than sitting
+    # out its poll interval.
+    assert worker._queue.get_nowait() is None
 
 
 # --- the predictor is built at load, not on the first frame -----------------
