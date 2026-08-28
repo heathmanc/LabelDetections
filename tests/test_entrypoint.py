@@ -67,3 +67,17 @@ if __name__ == "__main__":
                 print(f"FAIL {name}")
                 traceback.print_exc()
     raise SystemExit(1 if failures else 0)
+
+
+def test_the_launcher_takes_ultralytics_offline_before_it_is_imported():
+    """A py-spy dump of a live session showed an Ultralytics telemetry thread
+    stuck in an SSL handshake. It is not why anything hung, but a tool running
+    production hardware should not have a thread whose job is to phone home.
+
+    Order matters: YOLO_OFFLINE is read by ultralytics.utils at import time.
+    """
+    source = (Path(__file__).resolve().parent.parent / "main.py").read_text()
+    offline = source.index('YOLO_OFFLINE')
+    imported = source.index('from label_detections')
+    assert offline < imported, (
+        "the switch is set after the import that reads it")

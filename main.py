@@ -46,6 +46,15 @@ try:
 except Exception:
     pass
 
+# Ultralytics posts anonymised usage events to its own endpoint on a background
+# thread. A py-spy dump of this application showed that thread sitting in an SSL
+# handshake, which is what it looks like on a line with no route out: a thread
+# that exists to phone home, blocked, in a tool running production hardware.
+# It is not why anything hung, and it is not something to find out about from a
+# stack dump either. YOLO_OFFLINE is Ultralytics' own switch (utils.is_online),
+# read at import, so it must be set before the first ultralytics import.
+os.environ.setdefault("YOLO_OFFLINE", "True")
+
 # Ultralytics pulls in matplotlib. Force the headless Agg backend before any
 # import can pick a GUI one: packaged builds exclude tkinter, so a TkAgg
 # default would fail at import time. Harmless when running from source -- this
