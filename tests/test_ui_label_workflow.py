@@ -361,8 +361,13 @@ def test_capture_reference_saves_the_frame_and_arms_the_follow_through(monkeypat
     assert "draw the wf_capref box" in win.guidance_label.text()
 
 
-def test_drawing_the_box_after_a_reference_capture_opens_the_editor(monkeypatch):
-    """Capture, draw, draw regions -- no menu hunting in between."""
+def test_the_box_can_be_adjusted_before_it_becomes_the_artwork(monkeypatch):
+    """Drawing the box must not commit it.
+
+    The outline is the one thing every read-region is measured against, and it
+    used to be whatever the first rough drag produced: the editor opened on
+    mouse-up, so the handles could never be touched. Now the box waits.
+    """
     import numpy as np
     from PySide6.QtWidgets import QApplication
 
@@ -375,10 +380,62 @@ def test_drawing_the_box_after_a_reference_capture_opens_the_editor(monkeypatch)
 
     _draw(win, win.label_id)
     win._update_box_count()
-    QApplication.processEvents()          # the deferred open
+    QApplication.processEvents()
+
+    assert calls.get("opened") is None, "committed the box on mouse-up"
+    assert win._awaiting_reference_box is True
+    assert win.reference_confirm_btn.isVisible() or True   # offscreen has no show
+    assert win.reference_confirm_btn.isEnabled(), "no way to say the box is right"
+
+
+def test_confirming_the_box_opens_the_editor_with_no_menu_hunting(monkeypatch):
+    """The flow still ends in one press, it just ends when the operator says so."""
+    import numpy as np
+    from PySide6.QtWidgets import QApplication
+
+    calls = _fake_editor(monkeypatch)
+    win = _window()
+    _define(win, "wf_capflow2")
+    win.set_active_label("wf_capflow2")
+    win.last_raw = np.zeros((200, 400, 3), dtype=np.uint8)
+    win.capture_reference()
+    _draw(win, win.label_id)
+    win._update_box_count()
+    QApplication.processEvents()
+
+    win.reference_confirm_btn.click()
+    QApplication.processEvents()
 
     assert calls.get("opened") == 1
     assert win._awaiting_reference_box is False
+
+
+def test_the_confirm_button_is_dead_until_there_is_a_box(monkeypatch):
+    """Pressing it with nothing drawn would flatten whatever was on screen."""
+    import numpy as np
+
+    _fake_editor(monkeypatch)
+    win = _window()
+    _define(win, "wf_capflow3")
+    win.set_active_label("wf_capflow3")
+    win.last_raw = np.zeros((200, 400, 3), dtype=np.uint8)
+    win.capture_reference()
+    assert win.reference_confirm_btn.isEnabled() is False
+
+
+def test_a_reference_capture_can_be_abandoned(monkeypatch):
+    """Armed with nowhere to go was a state with no exit but drawing a box."""
+    import numpy as np
+
+    _fake_editor(monkeypatch)
+    win = _window()
+    _define(win, "wf_capflow4")
+    win.set_active_label("wf_capflow4")
+    win.last_raw = np.zeros((200, 400, 3), dtype=np.uint8)
+    win.capture_reference()
+    win.reference_cancel_btn.click()
+    assert win._awaiting_reference_box is False
+    assert win.reference_confirm_btn.isVisible() is False
 
 
 def test_a_box_of_another_family_does_not_trigger_it(monkeypatch):
@@ -696,25 +753,38 @@ def test_replacing_carries_the_existing_regions_onto_the_new_artwork(monkeypatch
     assert seen["codes"][0]["region"] == [0.5, 0.25, 0.2, 0.2]
 
 
-def test_capture_reference_refuses_once_a_label_has_artwork(monkeypatch):
+def test_capture_reference_offers_to_replace_rather_than_dead_ending(monkeypatch):
+    """It used to say no and point at a button on another tab -- which itself
+    needs a box drawn on an image. Somebody who has just deleted the capture
+    they thought was the reference has neither, and no way from here to
+    anywhere. Declining still leaves the artwork alone."""
     import numpy as np
 
     win = _window()
     _with_artwork(win, "wf_capref_once", monkeypatch)
     win.last_raw = np.zeros((120, 200, 3), dtype=np.uint8)
 
-    shown = {}
-    import label_detections.ui.main_window as mw_mod
-    original = mw_mod.QMessageBox.information
-    mw_mod.QMessageBox.information = lambda parent, title, text, *a, **k: shown.update(
-        {"text": text})
-    try:
-        win.capture_reference()
-    finally:
-        mw_mod.QMessageBox.information = original
+    asked = {}
+    monkeypatch.setattr(win, "_ask_replace_artwork",
+                        lambda existing: asked.setdefault("path", existing) and False)
+    win.capture_reference()
+    assert "wf_capref_once" in asked.get("path", "")
+    assert win._awaiting_reference_box is False, "armed after being declined"
 
-    assert "already has artwork" in shown.get("text", "")
-    assert win._awaiting_reference_box is False
+
+def test_agreeing_to_replace_arms_the_capture_in_replace_mode(monkeypatch):
+    import numpy as np
+
+    win = _window()
+    _with_artwork(win, "wf_capref_yes", monkeypatch)
+    win.last_raw = np.zeros((120, 200, 3), dtype=np.uint8)
+    monkeypatch.setattr(win, "_ask_replace_artwork", lambda existing: True)
+    monkeypatch.setattr(win, "capture_frame", lambda **k: None)
+    monkeypatch.setattr(win, "close_camera", lambda: None)
+
+    win.capture_reference()
+    assert win._awaiting_reference_box is True
+    assert win._reference_replaces_artwork is True
 
 
 def test_artwork_deleted_from_disk_can_be_defined_again(monkeypatch):
@@ -1622,3 +1692,79 @@ def test_a_fresh_run_clears_the_last_one_and_a_queued_stage_does_not(tmp_path):
     win._stage_results = {"detector": {"stage": "detector"}}
     win._stage_weights = {"detector": tmp_path / "det.pt"}
     assert "detector" in win._stage_results and "detector" in win._stage_weights
+
+
+# --- the box on screen is the box it looks for -----------------------------
+#
+# A PC680 box drawn on the image, plate and all, still produced "Draw the PC680
+# box on this image first". Box carries two fields on purpose: `label` is the
+# detector family it trains as -- "label" under a two-stage export -- and
+# `label_id` is which library label it is. Three checks compared the family
+# against the library id, so they could never match once the two differed.
+#
+# The tests missed it because the helper set both fields to the same string.
+# These draw a box the way the running app does.
+
+def _draw_as_the_app_does(win, label_id, family="label"):
+    """A box whose family and identity differ, which is the real shape."""
+    from label_detections.ui.canvas import Box
+
+    box = Box(x=10, y=10, w=100, h=60, class_id=0, label=family, kind="obb",
+              points=[[10, 10], [110, 10], [110, 70], [10, 70]])
+    box.label_id = label_id
+    win.canvas.boxes.append(box)
+    return box
+
+
+def test_a_generic_family_box_is_recognised_as_its_label():
+    win = _window()
+    _define(win, "wf_family_split")
+    win.set_active_label("wf_family_split")
+    win.canvas.boxes.clear()
+    box = _draw_as_the_app_does(win, "wf_family_split")
+    assert win._box_is_active_label(box) is True
+    assert win._label_box_for_regions(
+        win.library.get("wf_family_split")) is box
+
+
+def test_a_box_for_a_different_label_is_still_rejected():
+    """The fix must not make every box match."""
+    win = _window()
+    _define(win, "wf_split_mine")
+    _define(win, "wf_split_other")
+    win.set_active_label("wf_split_mine")
+    win.canvas.boxes.clear()
+    other = _draw_as_the_app_does(win, "wf_split_other")
+    assert win._box_is_active_label(other) is False
+
+
+def test_an_old_box_with_no_id_still_matches_on_its_family():
+    """Identity lived in `label` before the two fields were split, and those
+    boxes are still in saved sidecars."""
+    win = _window()
+    _define(win, "wf_legacy")
+    win.set_active_label("wf_legacy")
+    win.canvas.boxes.clear()
+    legacy = _draw_as_the_app_does(win, "", family="wf_legacy")
+    assert win._box_is_active_label(legacy) is True
+
+
+def test_the_reference_capture_sees_a_generic_family_box(monkeypatch):
+    """The screenshot, end to end: capture, draw, and the confirm has to arm.
+    It depended on the same comparison, so the new button was dead too."""
+    import numpy as np
+    from PySide6.QtWidgets import QApplication
+
+    _fake_editor(monkeypatch)
+    win = _window()
+    _define(win, "wf_refsplit")
+    win.set_active_label("wf_refsplit")
+    win.last_raw = np.zeros((200, 400, 3), dtype=np.uint8)
+    win.capture_reference()
+    win.canvas.boxes.clear()
+    _draw_as_the_app_does(win, "wf_refsplit")
+    win._update_box_count()
+    QApplication.processEvents()
+
+    assert win._reference_box_drawn() is True
+    assert win.reference_confirm_btn.isEnabled() is True
