@@ -220,3 +220,71 @@ def test_no_rung_ever_returns_a_different_code():
                     image = fringed(image, strength)
                 for read in cr.decode(image):
                     assert read.text.endswith(CODE), read.text
+
+
+# --- measuring the region rather than arguing about it ----------------------
+#
+# "The region is in the wrong place" and "the region is right and its crop will
+# not read" produce the same symptom and need opposite responses. The decoder
+# reports where it found the code, which settles it -- and hands back the
+# numbers to type in.
+
+class _Spec:
+    policy = "must_decode"
+    pattern = f"^{CODE}$"
+    role, symbology = "serial", "upca"
+    quiet_zone_mm = code_width_mm = 0.0
+
+    def __init__(self, region):
+        self.region = list(region)
+
+
+def _scene(region):
+    """A label with the barcode at a known place, inside a frame."""
+    label = np.full((517, 1600, 3), 235, np.uint8)
+    bars = cv2.resize(render(module_px=3, height=90), (242, 90))
+    label[120:210, 1340:1582] = bars
+    frame = np.full((900, 2200, 3), 200, np.uint8)
+    frame[200:717, 300:1900] = label
+    quad = [[300, 200], [1900, 200], [1900, 717], [300, 717]]
+    return cr.diagnose(frame, quad, [_Spec(region)])
+
+
+def test_a_region_over_the_code_reads_and_says_nothing_about_placement():
+    report = _scene([0.838, 0.232, 0.151, 0.174])
+    text = cr.diagnosis_text(report)
+    assert "READS" in text
+    assert "WRONG PLACE" not in text
+
+
+def test_a_region_in_the_wrong_place_is_told_where_the_code_actually_is():
+    """The useful half: not just that it is wrong, but the numbers to enter."""
+    report = _scene([0.30, 0.232, 0.151, 0.174])
+    text = cr.diagnosis_text(report)
+    assert "WRONG PLACE" in text
+    assert "found this code at 0.8" in text, text
+    assert "Put those numbers in the region" in text
+
+
+def test_the_measured_position_is_close_to_the_truth():
+    """It is being handed to an operator to type in, so it has to be right."""
+    report = _scene([0.30, 0.232, 0.151, 0.174])
+    text = cr.diagnosis_text(report)
+    found = text.split("found this code at ")[1].split(" (")[0]
+    x, y, w, h = (float(v) for v in found.split(","))
+    assert 1340 / 1600 - 0.02 < x < 1340 / 1600 + 0.03
+    assert 120 / 517 - 0.02 < y < 120 / 517 + 0.03
+    assert 0.10 < w < 0.17 and 0.12 < h < 0.22
+
+
+def test_a_correctly_placed_region_that_will_not_read_is_not_blamed_on_placement():
+    """The two are indistinguishable from the outside and need opposite fixes.
+    Redrawing a region that was already right is pure wasted work."""
+    report = _scene([0.838, 0.232, 0.151, 0.174])
+    # Force the region crop to fail while leaving the whole-label read intact.
+    for entry in report["regions"]:
+        entry["reads"], entry["how"] = [], ""
+    text = cr.diagnosis_text(report)
+    assert "IN THE RIGHT PLACE" in text
+    assert "redrawing it is not the fix" in text
+    assert "WRONG PLACE" not in text

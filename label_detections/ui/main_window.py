@@ -72,6 +72,7 @@ from label_detections.core.imageio import (
 from label_detections.core.storage import (
     DATA_DIR,
     EXPORT_DIR,
+    safe_token,
     dataset_folder,
     image_label_json_path,
     label_folder,
@@ -7948,10 +7949,47 @@ class MainWindow(QMainWindow):
         area.setWidget(inner)
         outer.addWidget(area, 1)
         buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        save = buttons.addButton("Save crops...", QDialogButtonBox.ActionRole)
+        save.setToolTip(
+            "Write these exact crops to disk as PNGs.\n\n"
+            "A barcode that will not read is a question about pixels, and a "
+            "screenshot of a scaled preview is not those pixels. This saves "
+            "what the decoder was actually handed.")
+        save.clicked.connect(lambda: self._save_code_crops(report))
         buttons.rejected.connect(dialog.reject)
         buttons.accepted.connect(dialog.accept)
         outer.addWidget(buttons)
         dialog.exec()
+
+    def _save_code_crops(self, report: dict) -> None:
+        """Write the diagnostic's crops out, losslessly.
+
+        PNG, deliberately: the question is what the bars look like, and JPEG
+        invents exactly the kind of artefact around fine vertical detail that
+        this is trying to diagnose.
+        """
+        folder = DATA_DIR / "code_reads"
+        folder.mkdir(parents=True, exist_ok=True)
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        written = []
+        for index, entry in enumerate(report.get("regions") or []):
+            crop = entry.get("crop")
+            if crop is not None and getattr(crop, "size", 0):
+                role = str(getattr(entry["spec"], "role", "") or index)
+                path = folder / f"{stamp}_{safe_token(self.label_id)}_{safe_token(role)}.png"
+                cv2.imwrite(str(path), crop)
+                written.append(path)
+        whole = (report.get("whole") or {}).get("crop")
+        if whole is not None and getattr(whole, "size", 0):
+            path = folder / f"{stamp}_{safe_token(self.label_id)}_whole.png"
+            cv2.imwrite(str(path), whole)
+            written.append(path)
+        if not written:
+            QMessageBox.information(self, "Save crops", "There was nothing to save.")
+            return
+        QMessageBox.information(
+            self, "Save crops",
+            "Saved:\n" + "\n".join(str(p) for p in written))
 
     def _build_novelty_profile(self) -> None:
         """Measure where each enrolled label sits, so the rest can be refused."""

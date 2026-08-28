@@ -46,6 +46,9 @@ class Read:
     """One decoded symbol."""
     text: str = ""
     symbology: str = ""
+    # Where the decoder found it, [x0, y0, x1, y1] in the image it was given.
+    # Empty when the decoder did not say.
+    box: list = field(default_factory=list)
 
     def __bool__(self) -> bool:
         return bool(self.text)

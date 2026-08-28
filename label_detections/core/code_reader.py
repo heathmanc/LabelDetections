@@ -77,8 +77,30 @@ def _read_once(module, image, **options) -> list[logic.Read]:
         if getattr(result, "valid", True) is False:
             continue
         out.append(logic.Read(text=text,
-                              symbology=str(getattr(result, "format", ""))))
+                              symbology=str(getattr(result, "format", "")),
+                              box=_position_of(result)))
     return out
+
+
+def _position_of(result) -> list[float]:
+    """``[x0, y0, x1, y1]`` of a decoded symbol, or ``[]``.
+
+    The decoder knows where it found the code. That turns "is the region in the
+    right place" from an argument into a measurement -- and one the operator can
+    act on, because the answer is the numbers to type into the region.
+    """
+    pos = getattr(result, "position", None)
+    if pos is None:
+        return []
+    xs, ys = [], []
+    for corner in ("top_left", "top_right", "bottom_right", "bottom_left"):
+        point = getattr(pos, corner, None)
+        try:
+            xs.append(float(point.x))
+            ys.append(float(point.y))
+        except Exception:
+            return []
+    return [min(xs), min(ys), max(xs), max(ys)] if xs else []
 
 
 def _ladder(module, image):
@@ -128,6 +150,21 @@ def _ladder(module, image):
         yield "greyscale, upscaled", bigger, fixed
     except Exception:
         pass
+    # Downscaling, which sounds backwards and is not. INTER_AREA averages, so
+    # it low-passes away sensor noise and the colour moire that sits at the bar
+    # pitch, while a code only needs 2-3 px per module to be read. Observed on
+    # a real label: the whole-label crop decoded at 2.5 px per module having
+    # been shrunk to fit a cap, while the native-resolution crop of the same
+    # bars at 3.3 px per module did not.
+    for factor in (0.6, 0.4):
+        try:
+            smaller = cv2.resize(grey, None, fx=factor, fy=factor,
+                                 interpolation=cv2.INTER_AREA)
+            if min(smaller.shape[:2]) >= 12:
+                yield f"greyscale, downscaled x{factor:g}", smaller, fixed
+                yield f"downscaled x{factor:g}", smaller, {}
+        except Exception:
+            pass
     yield "red channel", image[:, :, 2], fixed
 
 
@@ -289,7 +326,8 @@ def diagnose(frame, quad, specs) -> dict:
 
     for spec in logic.demanded(specs):
         region = list(getattr(spec, "region", None) or [])
-        entry = {"spec": spec, "crop": None, "reads": [], "note": "", "how": ""}
+        entry = {"spec": spec, "crop": None, "reads": [], "note": "",
+                 "how": "", "placed_right": None}
         if len(region) < 4:
             entry["note"] = "no region drawn, so the whole label is searched"
             out["regions"].append(entry)
@@ -355,6 +393,33 @@ def diagnosis_text(report: dict) -> str:
         logic.matches(pattern, text)
         for r in (whole.get("reads") or []) for text in r.candidates()
         for pattern in wanted)
+    # Where the code actually is, as fractions of the label. The whole-label
+    # crop IS the label, so the decoder's own coordinates convert straight
+    # across -- which settles the placement question by measurement instead of
+    # argument, and hands back the numbers to type into the region.
+    measured = ""
+    if whole_is_the_same_code and whole.get("crop") is not None:
+        crop = whole["crop"]
+        height, width = crop.shape[:2]
+        for read in whole.get("reads") or []:
+            if not read.box or not any(
+                    logic.matches(pattern, text)
+                    for text in read.candidates() for pattern in wanted):
+                continue
+            x0, y0, x1, y1 = read.box
+            measured = (f"{x0 / width:.3f}, {y0 / height:.3f}, "
+                        f"{(x1 - x0) / width:.3f}, {(y1 - y0) / height:.3f}")
+            for entry in regions:
+                declared = list(getattr(entry["spec"], "region", None) or [])
+                if len(declared) < 4:
+                    continue
+                entry["placed_right"] = (
+                    declared[0] < x1 / width
+                    and declared[0] + declared[2] > x0 / width
+                    and declared[1] < y1 / height
+                    and declared[1] + declared[3] > y0 / height)
+            break
+
     if wanted and got_whole and not whole_is_the_same_code:
         got_whole = False
         found = ", ".join(f"{r.text} [{r.symbology}]"
@@ -383,17 +448,31 @@ def diagnosis_text(report: dict) -> str:
                 f"marginal -- readable today, and the first thing to fail when "
                 f"the print, the focus or the lighting drifts. More pixels "
                 f"across the bars is the durable fix.")
+    elif got_whole and any(e.get("placed_right") for e in regions):
+        lines.append(
+            "THE REGION IS IN THE RIGHT PLACE, AND ITS CROP WILL NOT READ.\n\n"
+            f"The decoder found this code at {measured} (x, y, w, h as "
+            f"fractions of the label), which overlaps the region as drawn. So "
+            f"redrawing it is not the fix.\n\n"
+            "What differs between the two crops is how each was made. The whole "
+            "label is capped in size, so it was shrunk on the way out -- and "
+            "shrinking averages pixels, which quietly removes sensor noise and "
+            "the colour moire that sits at the bar pitch. The region is cropped "
+            "at full resolution, which keeps all of it. More pixels is not "
+            "always a better picture of a barcode, and the decoder now tries "
+            "shrinking the region too.")
     elif got_whole:
         lines.append(
             "THE REGION IS LANDING IN THE WRONG PLACE. The code is legible in "
             "this frame -- the whole label read it -- but the crop taken from "
-            "the region did not contain it.\n\n"
-            "The region is a fraction of the label, and at runtime it is mapped "
-            "onto the DETECTOR's box, not the outline the artwork was flattened "
-            "from. If those two differ, or the detector's box is oriented the "
-            "other way round, the region lands somewhere else on the label. "
-            "Redraw the region with a wider margin around the code, or draw the "
-            "artwork outline to match what the detector actually produces.")
+            "the region did not contain it."
+            + (f"\n\nThe decoder found this code at {measured} (x, y, w, h as "
+               f"fractions of the label). Put those numbers in the region and it "
+               f"will crop the right area." if measured else "")
+            + "\n\nThe region is a fraction of the label, and at runtime it is "
+              "mapped onto the DETECTOR's box rather than the outline the "
+              "artwork was flattened from. Where those differ, the region lands "
+              "somewhere else on the label.")
     else:
         lines.append(
             "THIS CODE IS NOT DECODING ANYWHERE -- not from the region, and not "
