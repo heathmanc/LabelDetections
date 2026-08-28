@@ -2479,7 +2479,10 @@ class MainWindow(QMainWindow):
             model_path, int(self.test_imgsz_spin.value()),
             float(self.test_conf_spin.value()), self._model_test_device_arg(),
             track=self._live_tracking, classifier_path=classifier_path,
-            crop_px=int(self.live_crop_spin.value()))
+            crop_px=int(self.live_crop_spin.value()),
+            # The camera is already open by this point, so the warm-up can use
+            # the size the live path will actually hand over.
+            warm_shape=(self.last_raw.shape if self.last_raw is not None else None))
         self._live_worker.moveToThread(self._live_thread)
         # Queued, because the worker is on another thread by the line above.
         self.infer_requested.connect(self._live_worker.infer)

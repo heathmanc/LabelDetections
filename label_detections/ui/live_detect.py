@@ -127,7 +127,7 @@ class InferenceWorker(QObject):
                  track: bool = True, tracker: str = "bytetrack.yaml",
                  classifier_path: str = "",
                  crop_px: int = 224, margin: float = 0.06,
-                 identity_floor: float = 0.55):
+                 identity_floor: float = 0.55, warm_shape=None):
         super().__init__()
         self._path = str(model_path)
         self._imgsz = int(imgsz)
@@ -139,6 +139,9 @@ class InferenceWorker(QObject):
         self._crop_px = int(crop_px)
         self._margin = float(margin)
         self._identity_floor = float(identity_floor)
+        # The shape of a real camera frame, so the warm-up exercises the size
+        # the live path will hand over rather than a convenient small square.
+        self._warm_shape = tuple(warm_shape) if warm_shape else None
         self._model = None
         self._classifier = None
         self._stopping = False
@@ -238,27 +241,36 @@ class InferenceWorker(QObject):
         self.loaded.emit(f"Loaded {which}: {self._path}\n{self._device_report()}")
 
     def _warm_up(self) -> None:
-        """One inference on a blank frame, to build the predictor.
+        """One inference here, made as close to the live call as it can be.
 
-        Through the same call the live path uses, so the code being warmed is
-        the code that will run -- with persist off, so no track state from a
-        blank frame carries into the first real one.
+        Identical on purpose, and it was not before. The first version warmed
+        with a blank 640x640 and persist=False, and that succeeded on this
+        thread -- then the first real frame, 5496x3672 with persist=True,
+        stopped inside a CUDA device switch and never came back. Two
+        differences between a call that works and a call that hangs is one too
+        many to reason about.
 
-        Failure here is reported, not raised: a warmup that cannot run is worth
-        saying out loud, and the first real frame may still work.
+        So: the camera's real frame size, and the same persist the live path
+        uses. If the hang follows the frame size it now happens HERE, during
+        load, where the window is still live and Stop still works. If it does
+        not, the difference is something about the frame that arrives rather
+        than the frame itself, which is a far more specific thing to chase.
+
+        Failure is reported, not raised: the first real frame may still work.
         """
         if self._model is None:
             return
         import numpy as np
 
-        size = max(32, int(self._imgsz))
-        blank = np.zeros((size, size, 3), dtype=np.uint8)
+        shape = self._warm_shape or (max(32, int(self._imgsz)),
+                                     max(32, int(self._imgsz)), 3)
+        blank = np.zeros(shape, dtype=np.uint8)
         args = {"imgsz": self._imgsz, "conf": self._conf, "verbose": False}
         if self._device is not None:
             args["device"] = self._device
         try:
             if self._track:
-                self._model.track(blank, persist=False, tracker=self._tracker,
+                self._model.track(blank, persist=True, tracker=self._tracker,
                                   **args)
             else:
                 self._model.predict(blank, **args)

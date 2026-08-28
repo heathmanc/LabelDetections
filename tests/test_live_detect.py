@@ -1873,15 +1873,37 @@ def test_loading_builds_the_predictor_rather_than_leaving_it_to_frame_one():
             calls.append(("predict", getattr(frame, "shape", None)))
             return []
 
-    worker = InferenceWorker("d.pt", 640, 0.4, None, track=True)
+    worker = InferenceWorker("d.pt", 640, 0.4, None, track=True,
+                             warm_shape=(3672, 5496, 3))
     worker._model = FakeModel()
     worker._warm_up()
 
     assert calls, "load left the predictor to be built by the first real frame"
     kind, shape, persist = calls[0]
     assert kind == "track", "warmed through a different call than the live path uses"
-    assert shape == (640, 640, 3)
-    assert persist is False, "a blank frame started a track that would persist"
+    # The camera's real frame size and the live path's persist, so that a call
+    # which works here and hangs there differs in nothing that was chosen.
+    assert shape == (3672, 5496, 3), "warmed on a convenient small square"
+    assert persist is True, "warmed with a different persist than the live call"
+
+
+@ui
+def test_the_warmup_falls_back_to_a_square_when_no_frame_has_arrived():
+    from label_detections.ui.live_detect import InferenceWorker
+
+    shapes = []
+
+    class FakeModel:
+        task = "obb"
+
+        def predict(self, frame, **kw):
+            shapes.append(frame.shape)
+            return []
+
+    worker = InferenceWorker("d.pt", 640, 0.4, None, track=False)
+    worker._model = FakeModel()
+    worker._warm_up()
+    assert shapes == [(640, 640, 3)]
 
 
 @ui
