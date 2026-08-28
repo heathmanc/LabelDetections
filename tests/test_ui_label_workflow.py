@@ -1358,3 +1358,86 @@ def test_it_does_not_ask_again_once_confirmed(monkeypatch):
         assert win._confirm_assist_download() is True
     finally:
         save_test_settings(settings)
+
+
+def test_the_assist_turns_itself_off_once_a_box_lands():
+    """The next thing anyone does after an outline is check it, and checking it
+    means dragging a corner -- which an armed canvas would swallow as another
+    outline request."""
+    win = _window()
+    _armed(win, "wf_assist_oneshot")
+    win._assistant = _FakeAssistant()
+
+    win._outline_at(60.0, 50.0)
+
+    assert len(win.canvas.boxes) == 1
+    assert win.canvas.assist_mode is False
+    assert win.assist_btn.isChecked() is False
+    # And the canvas takes handle drags again rather than reporting clicks.
+    assert win.canvas.drawing_enabled is True
+
+
+def test_the_outline_model_can_be_changed_from_the_labeling_panel():
+    """It was only reachable by editing a settings file, which is the same as
+    not being reachable."""
+    from label_detections.ui.segment_assist import DEFAULT_MODEL
+
+    win = _window()
+    assert win._assist_model_name() == DEFAULT_MODEL
+
+    index = win.assist_model_combo.findData("sam2.1_t.pt")
+    assert index >= 0, "the picker should offer SAM 2.1 tiny"
+    win._assistant = object()                     # something is loaded
+    win.assist_model_combo.setCurrentIndex(index)
+
+    assert win._assist_model_name() == "sam2.1_t.pt"
+    # The loaded model is dropped, or the next click would use the old one.
+    assert win._assistant is None
+    win.assist_model_combo.setCurrentIndex(
+        win.assist_model_combo.findData(DEFAULT_MODEL))
+
+
+def test_a_typed_checkpoint_path_is_taken_as_given():
+    """The list is what is worth suggesting, not what is allowed."""
+    from label_detections.ui.segment_assist import DEFAULT_MODEL
+
+    win = _window()
+    try:
+        win.assist_model_combo.setEditText(r"C:\models\my_sam.pt")
+        assert win._assist_model_name() == r"C:\models\my_sam.pt"
+    finally:
+        win.assist_model_combo.setCurrentIndex(
+            win.assist_model_combo.findData(DEFAULT_MODEL))
+
+
+def test_the_selected_image_row_is_filled_not_marked_with_a_sliver():
+    """Styling QListWidget at all turns off the native selection paint. Without
+    an explicit rule the current row showed as a sliver at its left edge, which
+    in a long list is invisible -- and saying which file is being edited is what
+    the list is for."""
+    win = _window()
+    style = win.styleSheet()
+    assert "QListWidget::item:selected" in style
+    assert "QListWidget::item:selected:!active" in style, (
+        "an unfocused list must stay highlighted -- the canvas has focus while "
+        "you label, not the list")
+
+
+def test_the_current_image_is_the_selected_row():
+    win = _window()
+    _define(win, "wf_row_select")
+    win.set_active_label("wf_row_select")
+    first = _capture(win, "wf_row_select", "row_a.jpg")
+    second = _capture(win, "wf_row_select", "row_b.jpg")
+    win._refresh_images(force=True)
+
+    win._load_image_path(first)
+    win._select_image_in_list()
+    chosen = win.image_list.currentItem()
+    assert chosen is not None
+    assert win._image_name_from_list_item(chosen) == first.name
+    assert chosen.isSelected() is True
+
+    win._load_image_path(second)
+    win._select_image_in_list()
+    assert win._image_name_from_list_item(win.image_list.currentItem()) == second.name

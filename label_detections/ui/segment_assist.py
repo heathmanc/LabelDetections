@@ -7,9 +7,9 @@ model-loading routine.
 MobileSAM by default. The job is a printed rectangle of high-contrast paper on
 a battery casing, which is an easy segmentation target -- the difference
 between MobileSAM and full SAM here is a corner or two, against a 40 MB
-download instead of 360 MB and roughly an order of magnitude in time. Any
-checkpoint Ultralytics' SAM class accepts can be named instead
-(``sam2.1_t.pt``, ``sam_b.pt``); nothing below assumes which.
+download instead of 360 MB and roughly an order of magnitude in time. The
+Outline picker on the labeling panel changes it: anything in KNOWN_MODELS, or
+a path to a local checkpoint. Nothing below assumes which.
 
 This never runs on the line. It runs while somebody is labeling at a desk, so
 it is allowed to be slow in a way the live path never is.
@@ -21,6 +21,32 @@ from pathlib import Path
 from ..core import segment_assist as geometry
 
 DEFAULT_MODEL = "mobile_sam.pt"
+
+# What the picker offers. Not what it allows -- a path to a local checkpoint is
+# typed in -- so this is the list worth suggesting, cheapest first. The notes
+# are sizes because that is the only number an operator can act on before
+# trying one.
+KNOWN_MODELS = (
+    ("mobile_sam.pt", "~40 MB · fastest, the default"),
+    ("sam2.1_t.pt", "~160 MB · SAM 2.1 tiny"),
+    ("sam2.1_s.pt", "~185 MB · SAM 2.1 small"),
+    ("sam2.1_b.pt", "~325 MB · SAM 2.1 base"),
+    ("sam_b.pt", "~360 MB · original SAM base"),
+    ("sam_l.pt", "~1.2 GB · original SAM large"),
+    ("FastSAM-s.pt", "~24 MB · YOLO-based, roughest"),
+    ("FastSAM-x.pt", "~140 MB · YOLO-based"),
+)
+
+
+def model_class_for(model_path: str) -> str:
+    """Which Ultralytics class loads this checkpoint.
+
+    FastSAM is not in SAM's build map, so ``SAM("FastSAM-s.pt")`` fails on a
+    name the picker offers. One rule here rather than a special case at the
+    call site, and it is by name because that is all there is to go on before
+    the file exists.
+    """
+    return "FastSAM" if "fastsam" in str(model_path).lower() else "SAM"
 
 
 class AssistUnavailable(RuntimeError):
@@ -48,14 +74,16 @@ class SegmentAssistant:
     def load(self) -> None:
         if self._model is not None:
             return
+        loader = model_class_for(self.model_path)
         try:
-            from ultralytics import SAM
+            import ultralytics
+            cls = getattr(ultralytics, loader)
         except Exception as exc:  # pragma: no cover - depends on the install
             raise AssistUnavailable(
                 "Ultralytics is not installed in this environment, so the "
                 f"outline assistant cannot run.\n\n{exc}") from exc
         try:
-            self._model = SAM(self.model_path)
+            self._model = cls(self.model_path)
         except Exception as exc:
             # A named checkpoint downloads on first use; a path that does not
             # exist never will, and the two failures need different answers.

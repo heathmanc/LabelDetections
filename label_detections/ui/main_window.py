@@ -2712,6 +2712,46 @@ class MainWindow(QMainWindow):
 
     # --- one-click outlining ---------------------------------------------
 
+    def _build_assist_model_combo(self):
+        """The segmentation model Click to Outline uses.
+
+        Here rather than on the Test Models tab: it is used by the button two
+        rows below it, and a model setting a tab away from the thing it drives
+        is a setting nobody finds. Editable, because the list is the checkpoints
+        worth suggesting and not the ones that are allowed -- a local .pt path
+        works too.
+        """
+        from .segment_assist import KNOWN_MODELS
+        self.assist_model_combo = QComboBox()
+        self.assist_model_combo.setEditable(True)
+        for name, note in KNOWN_MODELS:
+            self.assist_model_combo.addItem(f"{name}   {note}", name)
+        current = self._assist_model_name()
+        index = self.assist_model_combo.findData(current)
+        if index >= 0:
+            self.assist_model_combo.setCurrentIndex(index)
+        else:
+            self.assist_model_combo.setEditText(current)
+        self.assist_model_combo.setToolTip(
+            "Which segmentation model Click to Outline prompts.\n\n"
+            "Bigger is more exact at the corners and slower to run; the "
+            "default is sized for a printed label on a battery, which is an "
+            "easy target. Each downloads once on first use.\n\n"
+            "A path to a local checkpoint can be typed in instead.")
+        self.assist_model_combo.currentIndexChanged.connect(
+            lambda _i: self._assist_model_changed())
+        self.assist_model_combo.lineEdit().editingFinished.connect(
+            self._assist_model_changed)
+        return self.assist_model_combo
+
+    def _assist_model_changed(self) -> None:
+        """Drop the loaded model so the next click loads the chosen one."""
+        self._assistant = None
+        self._save_test_settings()
+        self._refresh_assist_button()
+        self.status.showMessage(
+            f"Click to Outline will use {self._assist_model_name()}.", 5000)
+
     def _refresh_assist_button(self) -> None:
         """Say what the button will do and what it needs, before it is pressed."""
         if not hasattr(self, "assist_btn"):
@@ -2720,6 +2760,10 @@ class MainWindow(QMainWindow):
         self.assist_btn.setToolTip(
             "Outline a label by clicking on it once, instead of dragging its "
             "four corners.\n\n"
+            "One outline per press: as soon as the box lands, the canvas goes "
+            "back to normal so you can drag a corner without arming another "
+            "one.\n\n"
+            "The model is the SAM box two rows above.\n\n"
             "A segmentation model traces the label's actual pixels and the "
             "tightest tilted rectangle around them becomes the box -- fitted "
             "to real edges rather than to where your eye put them.\n\n"
@@ -2762,6 +2806,16 @@ class MainWindow(QMainWindow):
 
     def _assist_model_name(self) -> str:
         from .segment_assist import DEFAULT_MODEL
+        combo = getattr(self, "assist_model_combo", None)
+        if combo is not None:
+            # The data when a listed model is picked, the typed text when a
+            # path was entered -- the display text carries a trailing note.
+            chosen = combo.currentData()
+            typed = combo.currentText().strip()
+            if chosen and typed.startswith(str(chosen)):
+                return str(chosen)
+            if typed:
+                return typed
         try:
             saved = str((load_test_settings() or {}).get("assist_model", "") or "")
         except Exception:
@@ -2777,8 +2831,8 @@ class MainWindow(QMainWindow):
             self.assist_btn.setChecked(enabled)
         if enabled:
             self.status.showMessage(
-                "Click to outline: click once on a label. Press again to turn off.",
-                8000)
+                "Click to outline: click once on a label. One outline, then "
+                "the canvas goes back to normal.", 8000)
         else:
             self.status.showMessage("Click to outline off.", 3000)
 
@@ -2853,8 +2907,13 @@ class MainWindow(QMainWindow):
         self.canvas.selected_handle_idx = None
         self.canvas.boxes_changed.emit()
         self.canvas.update()
+        # One use, then off. The next thing an operator does after an outline
+        # lands is check it, and checking it means dragging a corner -- which
+        # an armed canvas would swallow as another outline request.
+        self.set_outline_assist(False)
         self.status.showMessage(
-            f"Outlined {name}. Nudge a corner if it needs it, then Save.", 6000)
+            f"Outlined {name}. Drag a corner if it needs it, then Save. "
+            "Click to Outline again for the next one.", 7000)
 
     def _assist_frame(self):
         """The full-resolution image the outline is measured against.
@@ -3596,6 +3655,7 @@ class MainWindow(QMainWindow):
         form.setVerticalSpacing(5)
         form.addRow("Class", self.class_combo)
         form.addRow("Tool", self.tool_combo)
+        form.addRow("SAM", self._build_assist_model_combo())
 
         def button_row(*buttons: QPushButton) -> QHBoxLayout:
             row = QHBoxLayout()
@@ -3966,6 +4026,23 @@ class MainWindow(QMainWindow):
                 padding: 4px 6px;
                 color: #e5e7eb;
                 min-height: 24px;
+            }
+            /* Styling QListWidget at all turns off the native selection paint,
+               which left the current row marked by a sliver at its left edge --
+               invisible in a long list, and the list exists to say which file
+               is being edited. Rows are drawn explicitly from here on. */
+            QListWidget { outline: none; }
+            QListWidget::item {
+                padding: 4px 6px;
+                border-radius: 4px;
+                color: #cbd5e1;
+            }
+            QListWidget::item:hover { background: #1e293b; }
+            QListWidget::item:selected,
+            QListWidget::item:selected:!active,
+            QListWidget::item:selected:hover {
+                background: #1d4ed8;
+                color: #ffffff;
             }
             /* Styling a QSpinBox at all replaces the native step buttons with
                unstyled subcontrols that are tiny and nearly unclickable. Once
