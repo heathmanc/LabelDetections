@@ -127,7 +127,8 @@ class InferenceWorker(QObject):
                  track: bool = True, tracker: str = "bytetrack.yaml",
                  classifier_path: str = "",
                  crop_px: int = 224, margin: float = 0.06,
-                 identity_floor: float = 0.55, warm_shape=None):
+                 identity_floor: float = 0.55, warm_shape=None,
+                 novelty_debug: bool = False):
         super().__init__()
         self._path = str(model_path)
         self._imgsz = int(imgsz)
@@ -161,6 +162,7 @@ class InferenceWorker(QObject):
         self._novelty_note = ""
         self._embedder = None
         self._novelty_failed = False
+        self._novelty_debug = bool(novelty_debug)
         # Where Ultralytics actually ran, asked once after the first inference.
         self._device_checked = False
 
@@ -658,8 +660,24 @@ class InferenceWorker(QObject):
         if not enforced:
             self._novelty_note = ("novelty profile covers no class with enough "
                                   "crops to enforce")
-        else:
-            self._novelty_note = f"novelty: {len(enforced)} class(es) enforced"
+            return
+        self._novelty_note = f"novelty: {len(enforced)} class(es) enforced"
+        # The closest pair, every time it starts. A gap no wider than the
+        # radius beside it means the feature space has collapsed -- the model
+        # learned only what it needed to tell these classes apart, and it did
+        # not need much -- and nothing novel will be refused however the
+        # radius is set. That is worth reading at the start of a shift rather
+        # than inferring from a shift's worth of wrong ids.
+        close = nv.tightest(self._novelty)
+        if close is not None:
+            name, other, gap, radius = close
+            self._novelty_note += (f"; closest pair {name}/{other} {gap:.3f} "
+                                   f"apart, radius {radius:.3f}")
+            if gap < radius * 2.0:
+                self._novelty_note += (
+                    " -- TOO CLOSE: the classes nearly overlap, so a label it "
+                    "was never taught will land inside one of them. More "
+                    "classes and more crops per class are what widen this.")
 
     def _reject_unknown(self, named, crops_used):
         """Replace any identity whose crop does not sit where its class sits.
@@ -672,6 +690,7 @@ class InferenceWorker(QObject):
         """
         if self._novelty is None or self._embedder is None:
             return named
+
         vectors = self._embedder.take()
         if len(vectors) != crops_used:
             if not self._novelty_failed:
@@ -688,10 +707,20 @@ class InferenceWorker(QObject):
         out = []
         for (name, conf), vec in zip(named, vectors):
             if name == logic.UNKNOWN:
-                out.append((name, conf))
+                out.append((name, conf, ""))
                 continue
             verdict = self._novelty.verdict(name, vec)
-            out.append((name, conf) if verdict.known else (logic.UNKNOWN, conf))
+            # How far out, as a multiple of the class's own radius. Under 1.0
+            # is inside. Always shown on a rejection -- a refusal with no
+            # reason on it cannot be told from a bug -- and on everything else
+            # only when asked for, because the whole point of the number is to
+            # answer "why did that one get through", and that question is not
+            # being asked on most shifts.
+            note = f"nov {verdict.ratio:.2f}x" if verdict.radius else ""
+            if verdict.known:
+                out.append((name, conf, note if self._novelty_debug else ""))
+            else:
+                out.append((logic.UNKNOWN, conf, note))
         return out
 
     def _identify(self, frame, results):

@@ -2350,6 +2350,26 @@ class MainWindow(QMainWindow):
         floor_row.addWidget(self.live_floor_spin, 1)
         cv_.addLayout(floor_row)
 
+        self.live_novelty_debug_check = QCheckBox("Show novelty distance on every box")
+        self.live_novelty_debug_check.setChecked(bool(
+            (load_test_settings() or {}).get("novelty_debug", False)))
+        self.live_novelty_debug_check.stateChanged.connect(
+            lambda _s: self._save_test_settings())
+        self.live_novelty_debug_check.setToolTip(
+            "Adds 'nov 0.31x' to each plate: how far the crop sits from the "
+            "centre of the label it was named as, as a multiple of that "
+            "label's own radius. Under 1.00 is inside and accepted; over 1.00 "
+            "is refused and reads 'unknown'.\n\n"
+            "For answering one question: why did that one get through. A label "
+            "that was never enrolled reading 0.20x means the profile is not "
+            "loose, the feature space is flat -- the classifier only learned "
+            "what it needed to tell the enrolled labels apart, and with few "
+            "enough classes that is almost nothing, so everything lands in the "
+            "same small blob. More classes and more crops per class are what "
+            "fix that; no threshold does.\n\n"
+            "A refusal always shows its distance whether this is on or not.")
+        cv_.addWidget(self.live_novelty_debug_check)
+
         rate_row = QHBoxLayout()
         self.live_rate_spin = QDoubleSpinBox()
         self.live_rate_spin.setRange(0.5, 60.0)
@@ -2522,6 +2542,7 @@ class MainWindow(QMainWindow):
             track=self._live_tracking, classifier_path=classifier_path,
             crop_px=int(self.live_crop_spin.value()),
             identity_floor=float(self.live_floor_spin.value()),
+            novelty_debug=bool(self.live_novelty_debug_check.isChecked()),
             # The camera is already open by this point, so the warm-up can use
             # the size the live path will actually hand over.
             warm_shape=(self.last_raw.shape if self.last_raw is not None else None))
@@ -5495,6 +5516,9 @@ class MainWindow(QMainWindow):
                 "identity_floor": (float(self.live_floor_spin.value())
                                    if hasattr(self, "live_floor_spin")
                                    else live_logic.DEFAULT_IDENTITY_FLOOR),
+                "novelty_debug": (bool(self.live_novelty_debug_check.isChecked())
+                                  if hasattr(self, "live_novelty_debug_check")
+                                  else False),
                 "max_infer_rate": (float(self.live_rate_spin.value())
                                    if hasattr(self, "live_rate_spin") else 6.7),
                 "hide_saved_labels": bool(self.test_hide_saved_labels_check.isChecked()),

@@ -550,7 +550,13 @@ def apply_identities(items: list[dict], identities) -> list[dict]:
     if not identities or len(identities) != len(items):
         return items
     out = []
-    for item, (name, conf) in zip(items, identities):
+    for item, identity in zip(items, identities):
+        name, conf = identity[0], identity[1]
+        # An optional third element: what the novelty profile made of the crop.
+        # Carried through to the plate because a rejection nobody can see the
+        # reason for is indistinguishable from a bug, and so is a rejection
+        # that should have happened and did not.
+        note = identity[2] if len(identity) > 2 else ""
         merged = dict(item)
         merged["detector_name"] = item.get("name", "")
         merged["name"] = name
@@ -572,6 +578,9 @@ def apply_identities(items: list[dict], identities) -> list[dict]:
         # for, and "unknown 1.00" reads as certainty about the wrong thing.
         merged["label"] = (f"unknown  box {box:.2f}" if name == UNKNOWN
                            else f"{name} {conf:.2f}  box {box:.2f}")
+        if note:
+            merged["novelty"] = note
+            merged["label"] += f"  {note}"
         out.append(merged)
     return out
 

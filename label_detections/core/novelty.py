@@ -268,6 +268,51 @@ def build(samples: dict[str, list], *, percentile: float = DEFAULT_PERCENTILE,
                    weights=str(weights), built=str(built))
 
 
+def nearest_other(profile: Profile, name: str) -> tuple[str, float]:
+    """The closest other enrolled class, and how far its centre sits.
+
+    This is the number that says whether any of this can work. The features
+    were learned only to tell the enrolled classes apart, so if the model
+    needed very little to do that, very little is what the vectors describe --
+    and every crop on earth lands in a small blob, novel ones included. Classes
+    that sit far apart mean the space describes the labels; classes that sit on
+    top of each other mean it describes almost nothing, and no radius drawn in
+    it will refuse anything.
+    """
+    entry = profile.classes.get(str(name))
+    if entry is None:
+        return "", 0.0
+    others = [(distance(other.centre, entry.centre), other.name)
+              for other in profile.classes.values() if other.name != entry.name]
+    if not others:
+        return "", 0.0
+    gap, who = min(others)
+    return who, gap
+
+
+def separation(profile: Profile) -> list[tuple[str, str, float, float]]:
+    """``(class, nearest other, gap, radius)`` for every enrolled class."""
+    return [(name, *nearest_other(profile, name),
+             profile.classes[name].radius)
+            for name in sorted(profile.classes)]
+
+
+def tightest(profile: Profile) -> tuple[str, str, float, float] | None:
+    """The closest pair of enrolled classes: ``(a, b, gap, a's radius)``.
+
+    One line's worth of the separation table, for the load message. A gap
+    smaller than the radius beside it means the space has collapsed and no
+    novel label will be refused, which is worth knowing at the moment live
+    detect starts rather than after a shift of wrong ids.
+    """
+    rows = [(gap, name, who, profile.classes[name].radius)
+            for name, who, gap, _r in separation(profile) if who]
+    if not rows:
+        return None
+    gap, name, who, radius = min(rows)
+    return name, who, gap, radius
+
+
 def report(profile: Profile | None) -> str:
     """What the profile knows, for a human deciding whether to trust it."""
     if profile is None or not len(profile):
@@ -287,4 +332,35 @@ def report(profile: Profile | None) -> str:
                      + ", ".join(weak))
         lines.append("  Those classes will still accept anything. Capture and "
                      "label more of them, then rebuild.")
+
+    # Whether the space separates what it already knows, which is the honest
+    # predictor of whether it will refuse what it does not. Reported at build
+    # time because that is when it can still be acted on -- finding out on the
+    # line means finding out from a wrong id.
+    tight = [(name, who, gap, radius)
+             for name, who, gap, radius in separation(profile)
+             if who and gap < radius * 2.0]
+    if len(profile) < 2:
+        lines.append("")
+        lines.append("Only one class enrolled, so there is nothing to compare "
+                     "against. The radius is measured, but a feature space "
+                     "trained to tell one class from nothing may describe very "
+                     "little, and a novel label can land anywhere in it.")
+    elif tight:
+        lines.append("")
+        lines.append("These classes sit close together in feature space:")
+        for name, who, gap, radius in tight:
+            lines.append(f"  {name} is {gap:.3f} from {who}, "
+                         f"against its own radius of {radius:.3f}")
+        lines.append("The model can only have learned what it needed to tell "
+                     "the enrolled classes apart, and it did not need much. A "
+                     "novel label may well land inside one of these radii. More "
+                     "classes and more crops per class widen the space.")
+    else:
+        gaps = [gap for _n, who, gap, _r in separation(profile) if who]
+        lines.append("")
+        lines.append(f"Classes sit {min(gaps):.3f}-{max(gaps):.3f} apart, well "
+                     f"outside their own radii. The space separates what it "
+                     f"knows, which is what makes refusing what it does not "
+                     f"know possible.")
     return "\n".join(lines)

@@ -218,13 +218,17 @@ def test_the_worker_replaces_a_refused_identity_with_unknown():
     feature vector is what disagrees."""
     profile = _profile_of_two_labels()
     worker = _worker(profile, [np.array([0.0, 0.0, 1.0])])
-    assert worker._reject_unknown([("PC680", 1.0)], 1) == [("unknown", 1.0)]
+    name, conf, note = worker._reject_unknown([("PC680", 1.0)], 1)[0]
+    assert (name, conf) == ("unknown", 1.0)
+    # A refusal always carries its distance. One with no reason on it cannot
+    # be told from a bug.
+    assert note.startswith("nov ") and float(note[4:-1]) > 1.0
 
 
 def test_an_enrolled_crop_passes_the_worker_untouched():
     profile = _profile_of_two_labels()
     worker = _worker(profile, [np.array([1.0, 0.0, 0.0])])
-    assert worker._reject_unknown([("PC680", 0.97)], 1) == [("PC680", 0.97)]
+    assert worker._reject_unknown([("PC680", 0.97)], 1) == [("PC680", 0.97, "")]
 
 
 def test_each_crop_is_judged_against_its_own_class_not_the_first_one():
@@ -234,7 +238,7 @@ def test_each_crop_is_judged_against_its_own_class_not_the_first_one():
     worker = _worker(profile, [np.array([1.0, 0.0, 0.0]),
                                np.array([0.0, 1.0, 0.0])])
     out = worker._reject_unknown([("PC680", 1.0), ("2220-9199", 1.0)], 2)
-    assert out == [("PC680", 1.0), ("2220-9199", 1.0)]
+    assert [(n, c) for n, c, _note in out] == [("PC680", 1.0), ("2220-9199", 1.0)]
 
 
 def test_a_vector_count_that_does_not_match_fails_open_and_says_so():
@@ -271,7 +275,7 @@ def test_an_already_unknown_identity_is_not_re_judged():
     """It failed the confidence floor; there is no class to measure against."""
     profile = _profile_of_two_labels()
     worker = _worker(profile, [np.array([0.0, 0.0, 1.0])])
-    assert worker._reject_unknown([("unknown", 0.2)], 1) == [("unknown", 0.2)]
+    assert worker._reject_unknown([("unknown", 0.2)], 1) == [("unknown", 0.2, "")]
 
 
 def test_a_missing_profile_is_named_in_the_load_message_not_left_silent():
@@ -329,4 +333,123 @@ def test_raising_the_confidence_threshold_is_not_what_fixes_this():
     novel = np.array([0.0, 0.0, 1.0])
     for conf in (0.55, 0.90, 0.99, 1.00):
         worker = _worker(profile, [novel])
-        assert worker._reject_unknown([("PC680", conf)], 1) == [("unknown", conf)]
+        name, got, _note = worker._reject_unknown([("PC680", conf)], 1)[0]
+        assert (name, got) == ("unknown", conf)
+
+
+# --- saying why -------------------------------------------------------------
+#
+# The profile was built and the unenrolled label still came back named. With
+# nothing on screen but the name, that is three different faults wearing the
+# same face: the hook not firing, the radius drawn too wide, or a feature space
+# so flat that nothing is far from anything. These make them tell apart.
+
+def _flat_profile():
+    """Two classes the model can barely separate.
+
+    What a classifier trained on very few classes produces: it learned only
+    what it needed to tell those apart, and it did not need much, so every crop
+    -- including one of a label it has never seen -- lands in the same small
+    blob.
+    """
+    return nv.build({
+        "PC680": _cluster([1.0, 0.02, 0.0], 40, spread=0.01, seed=11),
+        "2220-9199": _cluster([1.0, 0.06, 0.0], 40, spread=0.01, seed=12),
+    })
+
+
+def test_a_collapsed_feature_space_is_named_at_build_time():
+    """It can still be acted on then. Finding out on the line means finding
+    out from a wrong id."""
+    text = nv.report(_flat_profile())
+    assert "close together in feature space" in text
+    assert "More classes and more crops per class" in text
+
+
+def test_a_space_that_separates_says_so_rather_than_staying_silent():
+    """Otherwise a clean report and an unbuilt one read the same."""
+    text = nv.report(_profile_of_two_labels())
+    assert "apart, well outside their own radii" in text
+    assert "close together" not in text
+
+
+def test_one_enrolled_class_is_called_out_as_having_nothing_to_compare():
+    """A radius measured with no other class to check it against is a number
+    with no evidence that the space it is drawn in means anything."""
+    text = nv.report(nv.build({"only": _cluster([1.0, 0.0], 20, seed=13)}))
+    assert "Only one class enrolled" in text
+
+
+def test_the_closest_pair_is_reported_when_live_detect_starts(tmp_path):
+    """One line, every start, so a collapsed space is read at the beginning of
+    a shift rather than inferred from a shift's worth of wrong ids."""
+    weights = tmp_path / "flat.pt"
+    weights.write_text("x", encoding="utf-8")
+    _flat_profile().save(nv.profile_path(weights))
+
+    worker = _worker(None)
+    worker._classifier_path = str(weights)
+    worker._novelty = nv.Profile.load(nv.profile_path(weights))
+    # Standing in for the hook, which needs torch.
+    worker._embedder = _StubEmbedder([])
+    enforced = worker._novelty.enforced_classes
+    worker._novelty_note = f"novelty: {len(enforced)} class(es) enforced"
+    close = nv.tightest(worker._novelty)
+    assert close is not None
+    name, other, gap, radius = close
+    assert {name, other} == {"PC680", "2220-9199"}
+    assert gap < radius * 2.0, "this profile is supposed to be the collapsed one"
+
+
+def test_a_healthy_profile_does_not_get_the_too_close_warning():
+    close = nv.tightest(_profile_of_two_labels())
+    assert close is not None
+    _name, _other, gap, radius = close
+    assert gap > radius * 2.0
+
+
+def test_the_distance_is_shown_on_every_box_only_when_it_is_asked_for():
+    """The number answers "why did that one get through", and that is not a
+    question being asked on most shifts."""
+    profile = _profile_of_two_labels()
+    inside = np.array([1.0, 0.0, 0.0])
+
+    quiet = _worker(profile, [inside])
+    assert quiet._reject_unknown([("PC680", 1.0)], 1)[0][2] == ""
+
+    loud = _worker(profile, [inside])
+    loud._novelty_debug = True
+    note = loud._reject_unknown([("PC680", 1.0)], 1)[0][2]
+    assert note.startswith("nov ") and float(note[4:-1]) < 1.0
+
+
+def test_a_flat_space_shows_the_novel_label_sitting_well_inside():
+    """The distinguishing symptom. A profile that is merely loose puts the
+    novel crop just outside or just inside; a flat space puts it nowhere near
+    the boundary, and that is what says more training rather than a tighter
+    radius."""
+    profile = _flat_profile()
+    worker = _worker(profile, [np.array([1.0, 0.04, 0.0])])
+    worker._novelty_debug = True
+    name, _conf, note = worker._reject_unknown([("PC680", 0.99)], 1)[0]
+    assert name == "PC680", "a flat space cannot refuse, which is the point"
+    assert float(note[4:-1]) < 1.0
+
+
+def test_the_note_reaches_the_plate_the_operator_reads():
+    """It is worth nothing in a tuple nobody prints."""
+    from label_detections.core import live_detect as ld
+
+    items = ld.apply_identities([{"name": "label", "conf": 0.96}],
+                                [("unknown", 0.99, "nov 2.40x")])
+    assert items[0]["label"] == "unknown  box 0.96  nov 2.40x"
+    assert items[0]["novelty"] == "nov 2.40x"
+
+
+def test_an_identity_with_no_note_leaves_the_plate_as_it_was():
+    from label_detections.core import live_detect as ld
+
+    items = ld.apply_identities([{"name": "label", "conf": 0.96}],
+                                [("PC680", 0.99, "")])
+    assert items[0]["label"] == "PC680 0.99  box 0.96"
+    assert "novelty" not in items[0]
