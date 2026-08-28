@@ -4197,6 +4197,22 @@ class MainWindow(QMainWindow):
                which left the current row marked by a sliver at its left edge --
                invisible in a long list, and the list exists to say which file
                is being edited. Rows are drawn explicitly from here on. */
+            /* Unstyled, this rendered as a bare native strip in a themed dark
+               window, so the only thing anyone could read was the label -- and
+               that said "47 of 100" with no units. */
+            QProgressBar {
+                background: #0b1220;
+                border: 1px solid #334155;
+                border-radius: 6px;
+                height: 22px;
+                text-align: center;
+                color: #e5e7eb;
+            }
+            QProgressBar::chunk {
+                background: #2563eb;
+                border-radius: 5px;
+                margin: 1px;
+            }
             QListWidget { outline: none; }
             QListWidget::item {
                 padding: 4px 6px;
@@ -7531,7 +7547,7 @@ class MainWindow(QMainWindow):
         like a whole one to everything downstream, and there is no partial
         export worth keeping.
         """
-        from PySide6.QtWidgets import QProgressDialog
+        from PySide6.QtWidgets import QProgressBar, QProgressDialog
 
         dialog = QProgressDialog(f"{title}...", "", 0, 100, self)
         dialog.setWindowTitle(title)
@@ -7539,6 +7555,15 @@ class MainWindow(QMainWindow):
         dialog.setWindowModality(Qt.WindowModal)
         dialog.setMinimumDuration(0)
         dialog.setAutoClose(False)
+        dialog.setMinimumWidth(460)
+        # The percentage belongs on the bar, where a percentage is expected.
+        # The label underneath then has room to say what is being counted --
+        # "47 of 100" with no units was two numbers and no meaning.
+        bar = QProgressBar(dialog)
+        bar.setRange(0, 100)
+        bar.setFormat("%p%")
+        bar.setTextVisible(True)
+        dialog.setBar(bar)
         dialog.setValue(0)
         QApplication.processEvents()
 
@@ -7547,7 +7572,8 @@ class MainWindow(QMainWindow):
         def progress(done: int, total: int, message: str) -> None:
             pct = int(round(100.0 * done / total)) if total else 100
             dialog.setValue(max(0, min(100, pct)))
-            dialog.setLabelText(f"{title}\n{done} of {total}\n{message}")
+            dialog.setLabelText(
+                f"{title}\n{done:,} of {total:,} images\n{message}")
             # Repainting on every frame of a few thousand costs more than the
             # copy does. Twenty times a second is smooth and nearly free.
             now = time.perf_counter()

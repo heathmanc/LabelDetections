@@ -809,3 +809,26 @@ def test_progress_is_optional(tmp_path):
     _dataset("prog_export_none", images=3)
     entries = yolo_export.collect_entries("prog_export_none", True)
     assert yolo_export.write_dataset(tmp_path / "ds2", entries, task="obb").exists()
+
+
+def test_the_two_stage_export_counts_images_not_percent(tmp_path):
+    """It used to rescale each half to 0-100, so the dialog read "47 of 100" --
+    two numbers and no units. Both halves now count the same thing."""
+    from label_detections.core import classify_export
+
+    _dataset("prog_two_stage", images=4)
+    seen = []
+    classify_export.export_two_stage(
+        task="obb", reviewed_only=True, library=None, out=tmp_path,
+        progress=lambda done, total, msg: seen.append((done, total, msg)))
+
+    assert seen
+    totals = {t for _d, t, _m in seen}
+    assert len(totals) == 1, f"the total moved between halves: {totals}"
+    total = totals.pop()
+    assert total != 100, "still reporting a percentage rather than images"
+    dones = [d for d, _t, _m in seen]
+    assert dones == sorted(dones), "progress went backwards between the halves"
+    assert dones[-1] <= total
+    # The second half picks up where the first left off rather than restarting.
+    assert max(dones) > total / 2

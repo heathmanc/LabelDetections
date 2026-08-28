@@ -170,18 +170,6 @@ def write_crop_dataset(out: Path, entries: list[dataset_logic.Entry], *,
     return out
 
 
-def _scaled(fn):
-    """Turn a (done, total, msg) callback into one reporting a 0-100 fraction."""
-    if fn is None:
-        return None
-
-    def report(done: int, total: int, message: str) -> None:
-        fraction = (done / total) if total else 1.0
-        fn(int(round(fraction * 100)), 100, message)
-
-    return report
-
-
 def export_crops(entries, *, out: Path | None = None, **kwargs) -> Path:
     return write_crop_dataset(out or (EXPORT_DIR / "all_labels_classify"),
                               entries, **kwargs)
@@ -221,19 +209,23 @@ def export_two_stage(*, task: str = "obb", reviewed_only: bool = True,
         )
 
     base = out or EXPORT_DIR
-    # Two datasets, one bar: the halves are reported as one run because the
-    # operator pressed one button, and a bar that fills and restarts reads as
-    # a job that finished and then started again.
-    def half(offset: int, span: float):
-        if progress is None:
-            return None
-        return lambda done, total, message: progress(
-            offset + int(span * done), 100, message)
+    # Two datasets, one run: the operator pressed one button, and a bar that
+    # fills and restarts reads as a job that finished and then started again.
+    # Reported in real images rather than a rescaled percentage, so the count
+    # under the bar means the same thing here as in every other export.
+    detect_total = len(entries)
+    combined_total = detect_total * 2          # each entry is copied, then cropped
+    state = {"offset": 0}
+
+    def half(done: int, _total: int, message: str) -> None:
+        if progress is not None:
+            progress(state["offset"] + done, combined_total, message)
 
     detect_dir = yolo_export.write_dataset(
         base / f"two_stage_detect_{task}", entries, task=task,
         split_train=split_train, seed=seed, reviewed_only=reviewed_only,
-        library=library, class_mode="generic", progress=_scaled(half(0, 0.5)))
+        library=library, class_mode="generic",
+        progress=(half if progress is not None else None))
     if size is None:
         from . import scale_report
         # crop_for_identity, NOT recommend_crop. recommend_crop asks whether a
@@ -243,9 +235,11 @@ def export_two_stage(*, task: str = "obb", reviewed_only: bool = True,
         # crops while every report recommended 320, two rules disagreeing about
         # one number in one pipeline.
         size = scale_report.crop_for_identity(scale_report.measure(entries))
+    state["offset"] = detect_total
     classify_dir = write_crop_dataset(
         base / "two_stage_classify", entries, size=int(size), margin=margin,
-        split_train=split_train, seed=seed, progress=_scaled(half(50, 0.5)))
+        split_train=split_train, seed=seed,
+        progress=(half if progress is not None else None))
     return detect_dir, classify_dir
 
 
