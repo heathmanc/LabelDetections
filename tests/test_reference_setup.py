@@ -214,3 +214,52 @@ def test_nothing_is_written_until_the_last_step_finishes(photo):
     assert dialog.result is None
     dialog.reject()
     assert dialog.result is None
+
+
+# --- the photograph has to survive ------------------------------------------
+#
+# A frame shot inside this window was going nowhere: the dialog read it off the
+# camera and only the flattened artwork was kept. That threw away the one image
+# worth going back to when a region looks wrong, and nothing was left for the
+# image list to mark as the reference -- so after saving, no reference appeared
+# in the list at all.
+
+def test_the_result_carries_the_photograph_not_just_the_artwork(photo, monkeypatch):
+    monkeypatch.setattr(QMessageBox, "question",
+                        staticmethod(lambda *a, **k: QMessageBox.Yes))
+    dialog = _through_outline(photo)
+    dialog._finish_clicked()
+    assert dialog.result["frame"] is not None
+    assert dialog.result["artwork"] is not None
+
+
+def test_an_image_already_in_the_dataset_is_named_rather_than_copied(photo,
+                                                                     monkeypatch):
+    """Saving it again would put a second copy of the same picture in the
+    dataset and leave the list marking whichever one was newer."""
+    monkeypatch.setattr(QMessageBox, "question",
+                        staticmethod(lambda *a, **k: QMessageBox.Yes))
+    dialog = _through_outline(photo)
+    dialog._finish_clicked()
+    assert dialog.result["source_path"] == str(photo)
+
+
+def test_a_freshly_shot_frame_has_no_source_path_so_it_gets_saved(monkeypatch):
+    """Empty is the signal to the caller that this photograph is not on disk
+    anywhere yet."""
+    monkeypatch.setattr(QMessageBox, "question",
+                        staticmethod(lambda *a, **k: QMessageBox.Yes))
+    live = _frame()
+    dialog = _through_outline(frames=lambda: live)
+    dialog._finish_clicked()
+    assert dialog.result["source_path"] == ""
+    assert dialog.result["frame"] is not None
+
+
+def test_going_back_to_the_camera_forgets_where_the_frame_came_from(photo):
+    """Otherwise a re-shot frame would be recorded as the old file."""
+    dialog = _through_outline(photo)
+    assert dialog.source_path == str(photo)
+    dialog._go_back()
+    dialog._go_back()
+    assert dialog.source_path == ""

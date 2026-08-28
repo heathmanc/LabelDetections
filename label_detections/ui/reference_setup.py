@@ -64,6 +64,12 @@ class ReferenceSetupDialog(QDialog):
         self.result: dict | None = None
         self.frame = None                # the raw photograph, BGR
         self.artwork = None              # the rectified label, BGR
+        # Set when the photograph came from an image already in the dataset.
+        # Empty means it was just shot and the caller has to keep it: the
+        # photograph the artwork was flattened from is the one to go back to
+        # when a region looks wrong, and it is a perfectly good training image
+        # of the label besides.
+        self.source_path = ""
 
         label_id = str(getattr(label, "label_id", "") or "label")
         self.setWindowTitle(f"Reference image for {label_id}")
@@ -170,6 +176,7 @@ class ReferenceSetupDialog(QDialog):
                 "this label's captured images below.")
             return
         self.frame = taken.copy()
+        self.source_path = ""
         self.preview.set_frame(self.frame)
         self._go_next()
 
@@ -212,6 +219,7 @@ class ReferenceSetupDialog(QDialog):
 
                 chosen = self.image_combo.currentData()
                 self.frame = cv2.imread(str(chosen)) if chosen else None
+                self.source_path = str(chosen) if self.frame is not None else ""
             if self.frame is None:
                 self.problem.setText(
                     "Capture a frame, or pick one of this label's images.")
@@ -265,6 +273,7 @@ class ReferenceSetupDialog(QDialog):
             # Back to the camera means taking another photograph, so the frame
             # goes: keeping it would show a still while the shutter is offered.
             self.frame = None
+            self.source_path = ""
             self.stack.setCurrentIndex(FRAME_PAGE)
         self._show_page()
 
@@ -319,7 +328,8 @@ class ReferenceSetupDialog(QDialog):
                 QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
             if answer != QMessageBox.Yes:
                 return
-        self.result = {"artwork": self.artwork,
+        self.result = {"artwork": self.artwork, "frame": self.frame,
+                       "source_path": self.source_path,
                        "quad": list(self.outline_canvas.quad), **drawn}
         self.accept()
 

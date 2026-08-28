@@ -5587,6 +5587,29 @@ class MainWindow(QMainWindow):
         if accepted:
             self._save_reference(label, dialog.result)
 
+    def _keep_reference_photo(self, result: dict) -> str:
+        """Make sure the photograph the artwork came from is in the dataset.
+
+        A frame shot inside the reference window was going nowhere: the dialog
+        read it straight off the camera and only the flattened artwork was
+        kept. That threw away the one image worth going back to when a region
+        looks wrong -- and a photograph of the label is training data whatever
+        else it is also used for.
+
+        An image that was already in the dataset is left where it is.
+        """
+        existing = str(result.get("source_path") or "")
+        if existing:
+            return existing
+        frame = result.get("frame")
+        if frame is None or getattr(frame, "size", 0) == 0:
+            return ""
+        try:
+            raw, _adjusted = imageio.save_capture(self.label_id, frame)
+        except Exception:
+            return ""
+        return str(raw) if raw else ""
+
     def _save_reference(self, label, result: dict) -> None:
         """Write the artwork and the regions the dialog came back with.
 
@@ -5603,6 +5626,7 @@ class MainWindow(QMainWindow):
             return
 
         path = imageio.save_reference(self.label_id, artwork)
+        source = self._keep_reference_photo(result)
         updated = labels_mod.LabelDef.from_dict({
             **label.to_dict(),
             "codes": result["codes"],
@@ -5612,6 +5636,12 @@ class MainWindow(QMainWindow):
             # coordinate system and keeping the old paths around invites
             # something to pick the wrong one.
             "reference_images": [str(path)],
+            # Which capture the artwork came from. The image list pins and
+            # marks it: it is the shot every region is a fraction of, and the
+            # one to go back to when a region looks wrong -- but it is also
+            # usually the first shot taken, so a newest-first list buries it a
+            # row deeper with every capture after it.
+            "reference_source": source,
             "variable_data": bool(label.variable_data or result["anchor_region"]),
         })
         self.library.add(updated, replace=True)
