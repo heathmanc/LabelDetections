@@ -972,12 +972,59 @@ def test_slow_inference_on_cpu_says_so_and_stops_there():
     assert "TensorRT" not in cpu, "no point suggesting TensorRT to a CPU"
 
 
-def test_slow_inference_on_gpu_suggests_the_gpu_causes():
+def test_a_slow_model_is_told_it_is_the_model():
+    """Only when the breakdown says so. This advice acts on the detector's own
+    forward pass and on nothing else."""
     r = ld.Rolling()
     for i in range(5):
         r.record(0.130, now=100 + i * 0.14)
-    gpu = ld.slow_hint(r, "Device: CUDA available (RTX 5090); model on cuda:0")
+    gpu = ld.slow_hint(r, "Device: CUDA available (RTX 5090); model on cuda:0",
+                       {"preprocess": 4.0, "inference": 120.0, "postprocess": 3.0})
     assert "TensorRT" in gpu and "image size" in gpu
+
+
+def test_a_fast_detector_inside_a_slow_call_is_not_blamed():
+    """The screenshot that prompted this: preprocess 3, inference 7,
+    postprocess 2 -- 12 ms of a 71 ms call -- and the readout recited "check
+    the image size, export to TensorRT" at the one part already fast."""
+    r = ld.Rolling()
+    for i in range(5):
+        r.record(0.071, now=100 + i * 0.10)
+    hint = ld.slow_hint(r, "model on cuda:0",
+                        {"preprocess": 3.0, "inference": 7.0, "postprocess": 2.0,
+                         "stage2": 50.0, "readout": 4.0})
+    # It may still mention TensorRT for the *classifier* -- that is where the
+    # time is. What must not appear is the detector-side advice.
+    assert "Cost rises with the square" not in hint, "advised on the fast part"
+    assert "Most of it is the model itself" not in hint
+    assert "detector is only 12 ms" in hint
+    assert "Stage 2 is 50 ms" in hint
+
+
+def test_time_outside_every_phase_is_named():
+    """A breakdown that adds to 12 next to a total of 71 is the most useful
+    thing on the readout, and it used to be invisible."""
+    r = ld.Rolling()
+    for i in range(5):
+        r.record(0.071, now=100 + i * 0.10)
+    hint = ld.slow_hint(r, "model on cuda:0",
+                        {"preprocess": 3.0, "inference": 7.0, "postprocess": 2.0,
+                         "stage2": 1.0, "readout": 1.0})
+    assert "outside every phase measured" in hint
+
+
+def test_the_phase_line_shows_what_it_cannot_account_for():
+    line = ld.phase_line(
+        {"preprocess": 3.0, "inference": 7.0, "postprocess": 2.0,
+         "stage2": 50.0, "readout": 4.0}, total_ms=71.0)
+    assert "stage2 50" in line and "readout 4" in line
+    assert "other 5" in line
+
+
+def test_the_phase_line_says_nothing_extra_when_it_adds_up():
+    line = ld.phase_line({"preprocess": 3.0, "inference": 7.0,
+                          "postprocess": 2.0}, total_ms=12.0)
+    assert "other" not in line
 
 
 def test_a_fast_model_is_not_lectured():

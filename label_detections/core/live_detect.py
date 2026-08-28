@@ -515,43 +515,88 @@ def rate_line(display_fps: float, camera_fps: float, rolling: "Rolling",
     return "  |  ".join(parts)
 
 
-def slow_hint(rolling: "Rolling", device_line: str) -> str:
-    """Why inference might be taking as long as it is."""
+def slow_hint(rolling: "Rolling", device_line: str, speed: dict | None = None) -> str:
+    """Why inference might be taking as long as it is.
+
+    Reads the phase breakdown before saying anything. The version this replaces
+    did not, and so recited "check the image size, export to TensorRT" at a
+    detector doing 12 ms of a 71 ms call -- advice about the one part that was
+    already fast. It even claimed the total covered the detector only, when the
+    total is the whole call, stage 2 included.
+    """
     if not rolling.mean_ms or rolling.mean_ms < SLOW_INFER_MS:
         return ""
-    on_cpu = ("NO CUDA" in device_line) or ("model on cpu" in device_line.lower())
-    lines = [f"", f"{rolling.mean_ms:.0f} ms per inference is slow. "]
-    if on_cpu:
+    total = rolling.mean_ms
+    lines = ["", f"{total:.0f} ms per inference is slow."]
+
+    if ("NO CUDA" in device_line) or ("model on cpu" in device_line.lower()):
         lines.append("  - This is running on the CPU. That alone explains it; "
                      "everything else is secondary.")
-    else:
+        return "\n".join(lines)
+
+    speed = speed or {}
+    detector = sum(float(speed.get(k, 0.0))
+                   for k in ("preprocess", "inference", "postprocess"))
+    stage2 = float(speed.get("stage2", 0.0))
+    readout = float(speed.get("readout", 0.0))
+    other = max(0.0, total - detector - stage2 - readout)
+
+    # Whatever is actually largest, named first. Everything else is a guess.
+    if detector and detector < total * 0.5:
+        lines.append(f"  - The detector is only {detector:.0f} ms of that. "
+                     f"Image size and TensorRT act on this part, so neither "
+                     f"would help much here.")
+    if stage2 > total * 0.3:
+        lines.append(f"  - Stage 2 is {stage2:.0f} ms: cropping each detection "
+                     f"out of the full-resolution frame and classifying it. "
+                     f"More detections cost more. A smaller Stage 2 image size, "
+                     f"or a classifier exported to TensorRT, acts here.")
+    if readout > total * 0.3:
+        lines.append(f"  - Reading the results is {readout:.0f} ms. That is "
+                     f"where .cpu() forces a CUDA sync, so GPU work the "
+                     f"detector deferred is billed at this line.")
+    if other > total * 0.3:
+        lines.append(f"  - {other:.0f} ms is outside every phase measured -- "
+                     f"model call overhead, or the frame copy in front of it.")
+    if float(speed.get("inference", 0.0)) > total * 0.5:
         lines += [
-            "  - Check the image size: cost rises with its square, so 1664 is "
-            "~7x the work of 640.",
-            "  - A .pt runs through PyTorch every frame. Exporting the model to "
-            "TensorRT (yolo export format=engine half=True) typically gives 2-4x "
-            "on an RTX card, and Live Detect loads a .engine the same way.",
-            "  - A stage 2 classifier adds a pass per detection; the number "
-            "above covers the detector only.",
+            "  - Most of it is the model itself. Cost rises with the square of "
+            "the image size, so 1664 is ~7x the work of 640.",
+            "  - A .pt runs through PyTorch every frame. Exporting to TensorRT "
+            "(yolo export format=engine half=True) typically gives 2-4x on an "
+            "RTX card, and Live Detect loads a .engine the same way.",
         ]
+    if len(lines) == 2:
+        lines.append("  - No single phase dominates; the breakdown above is "
+                     "where to look.")
     return "\n".join(lines)
 
 
-def phase_line(speed: dict) -> str:
+def phase_line(speed: dict, total_ms: float = 0.0) -> str:
     """Where the milliseconds actually go, from Ultralytics' own timings.
 
     A single latency figure cannot distinguish a slow model from a slow resize
     in front of it, and on a 20 MP source those look identical from outside.
     The three phases separate them: preprocess is CPU work on the full frame,
-    inference is the GPU, postprocess is NMS and decoding.
+    inference is the GPU, postprocess is NMS and decoding. ``stage2`` and
+    ``readout`` are ours -- the classifier pass and the tensor conversion --
+    and ``other`` is whatever the measured total has left over, which is the
+    number that says the breakdown is not the whole story.
     """
     if not speed:
         return ""
-    order = ("preprocess", "inference", "postprocess")
+    order = ("preprocess", "inference", "postprocess", "stage2", "readout")
     parts = [f"{name} {float(speed[name]):.0f}" for name in order if name in speed]
     if not parts:
         return ""
     line = "   ms: " + "  ".join(parts)
+    # What none of the phases account for. Printed rather than left implicit:
+    # a breakdown that adds to 12 next to a total of 71 is the single most
+    # useful thing on this readout, and it was invisible.
+    if total_ms:
+        rest = float(total_ms) - sum(float(speed.get(k, 0.0)) for k in order)
+        if rest > 1.0:
+            line += f"  other {rest:.0f}"
 
     pre = float(speed.get("preprocess", 0.0))
     inf = float(speed.get("inference", 0.0))

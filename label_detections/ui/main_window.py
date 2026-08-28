@@ -2630,11 +2630,13 @@ class MainWindow(QMainWindow):
         rates += live_logic.throughput_note(
             self._live_rolling, interval,
             self.camera.read_fps() if hasattr(self.camera, "read_fps") else 0.0)
-        rates += live_logic.phase_line(self._live_speed)
+        rates += live_logic.phase_line(self._live_speed,
+                                       self._live_rolling.mean_ms)
         self.live_readout.setPlainText(
             rates + "\n" + self.live_readout.toPlainText()
             + live_logic.slow_hint(self._live_rolling,
-                                   getattr(self, "_live_device_line", "")))
+                                   getattr(self, "_live_device_line", ""),
+                                   self._live_speed))
         hint = live_logic.quiet_hint(
             self._live_empty, float(self.test_conf_spin.value()),
             int(self.test_imgsz_spin.value()),

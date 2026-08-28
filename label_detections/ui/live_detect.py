@@ -312,6 +312,10 @@ class InferenceWorker(QObject):
         # view sat on its placeholder with a model loaded and nothing to say.
         # A failed classifier now costs identities, not detections.
         identities = []
+        # Timed separately, because the readout was reporting a total that
+        # covered stage 2 next to a phase breakdown that did not -- so a
+        # detector doing 12 ms inside a 71 ms call looked like a slow detector.
+        stage2_started = time.perf_counter()
         try:
             identities = self._identify(frame, results)
         except Exception as exc:
@@ -321,15 +325,20 @@ class InferenceWorker(QObject):
                     f"Stage 2 failed, so boxes will have no identity: "
                     f"{type(exc).__name__}: {exc}\n\n"
                     f"Stage 1 detection continues.")
+        stage2_ms = (time.perf_counter() - stage2_started) * 1000.0
 
         # Everything torch-shaped is converted here, on this thread, before
-        # anything crosses back. The GUI never sees a tensor.
+        # anything crosses back. The GUI never sees a tensor. Timed too: the
+        # .cpu() calls in here force a CUDA sync, so any GPU work the detector
+        # deferred is billed at this line and nowhere else.
+        readout_started = time.perf_counter()
         try:
             from label_detections.core import live_detect as logic
             items = logic.apply_identities(extract_items(results), identities)
         except Exception as exc:
             self.failed.emit(f"Could not read the results: {type(exc).__name__}: {exc}")
             return
+        readout_ms = (time.perf_counter() - readout_started) * 1000.0
         # Ultralytics already times its own three phases and we were throwing
         # the numbers away. "120 ms" is not actionable; "preprocess 95,
         # inference 8, postprocess 3" says immediately that the GPU is idle and
@@ -366,6 +375,10 @@ class InferenceWorker(QObject):
                          if isinstance(v, (int, float))}
         except Exception:
             speed = {}
+        # Ours, alongside Ultralytics'. Named differently so nothing mistakes
+        # them for the library's own three.
+        speed["stage2"] = stage2_ms
+        speed["readout"] = readout_ms
         self.result.emit(items, time.perf_counter() - started, speed)
 
     def _detection_quads(self, results):
