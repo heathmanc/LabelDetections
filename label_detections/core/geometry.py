@@ -217,15 +217,28 @@ UNIT_QUAD: Quad = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]
 def homography_to_unit(quad: Quad) -> Matrix | None:
     """Image -> label space: flatten ``quad`` onto the unit square.
 
-    Feed it a label's four drawn corners and every coordinate inside it becomes
-    a fraction of that label, independent of angle, distance or resolution.
+    Feed it a label's four corners and every coordinate inside it becomes a
+    fraction of that label, independent of angle, distance or resolution.
+
+    The corners are ordered first, because this mapping is entirely a statement
+    about which corner is which. Fractions are measured from the top-left of
+    the artwork, so a quad whose corners arrive in another order maps them from
+    somewhere else -- and the region comes out the right SIZE in the wrong
+    PLACE, which looks like a drawing mistake rather than a convention
+    mismatch. Drawn boxes are already in this order; a detector's oriented box
+    is not.
     """
-    return homography_from_points(quad, UNIT_QUAD)
+    return homography_from_points(order_quad(quad), UNIT_QUAD)
 
 
 def homography_from_unit(quad: Quad) -> Matrix | None:
-    """Label space -> image. The inverse direction of the above."""
-    return homography_from_points(UNIT_QUAD, quad)
+    """Label space -> image. The inverse direction of the above.
+
+    Ordered for the same reason, and it has to be the same rule: these two are
+    inverses, and a pair of inverses that disagree about which corner is the
+    top-left silently stops round-tripping.
+    """
+    return homography_from_points(UNIT_QUAD, order_quad(quad))
 
 
 def place_unit_rect(quad: Quad, rect: list[float]) -> Quad | None:

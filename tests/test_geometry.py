@@ -254,3 +254,63 @@ def test_without_ordering_the_flatten_really_does_come_out_mirrored():
     assert not np.array_equal(raw, good)
     assert (raw.shape[1], raw.shape[0]) == (good.shape[0], good.shape[1]), (
         "the wide label should have flattened portrait without ordering")
+
+
+# --- the same convention, on the other half of the journey ------------------
+#
+# Ordering the corners inside rectify_quad fixed the flatten and left the
+# region placement still broken: the crop came out the right SIZE in the wrong
+# PLACE, which reads as a badly drawn region rather than a convention
+# mismatch. Fractions are measured from the top-left of the artwork, so the
+# unit-square mapping is entirely a statement about which corner is which.
+
+WIDE = [[0.0, 0.0], [1000.0, 0.0], [1000.0, 300.0], [0.0, 300.0]]
+FAR_RIGHT = [0.842, 0.239, 0.151, 0.197]        # where the PC680 barcode sits
+
+
+def test_a_region_lands_in_the_same_place_however_the_corners_arrive():
+    want = geo.place_unit_rect(WIDE, FAR_RIGHT)
+    assert want is not None
+    for name, quad in (
+        ("anticlockwise", [[0, 0], [0, 300], [1000, 300], [1000, 0]]),
+        ("starts top-right", [[1000, 0], [1000, 300], [0, 300], [0, 0]]),
+        ("starts bottom-right", [[1000, 300], [0, 300], [0, 0], [1000, 0]]),
+    ):
+        assert geo.place_unit_rect(quad, FAR_RIGHT) == want, name
+
+
+def test_the_region_really_does_move_without_ordering():
+    """Proves the fix is not decorative. Unordered, a barcode region pinned to
+    the right-hand end of the label lands in the middle of it -- which is what
+    the failing crop showed: 'BATTERY' and 'ODS-A' instead of the bars."""
+    corners = geo.rect_corners(*FAR_RIGHT)
+    unordered = geo.map_quad(
+        geo.homography_from_points(geo.UNIT_QUAD,
+                                   [[1000, 0], [1000, 300], [0, 300], [0, 0]]),
+        corners)
+    xs = [x for x, _ in unordered]
+    assert max(xs) < 800, "expected the region to land short of where it belongs"
+    want_xs = [x for x, _ in geo.place_unit_rect(WIDE, FAR_RIGHT)]
+    assert min(want_xs) > 800
+
+
+def test_the_two_directions_stay_inverses():
+    """They are used as a pair -- image into label space and back -- and a pair
+    that disagrees about which corner is the top-left stops round-tripping."""
+    tilted = [[1000, 300], [0, 300], [0, 0], [1000, 0]]     # deliberately odd
+    to_unit = geo.homography_to_unit(tilted)
+    from_unit = geo.homography_from_unit(tilted)
+    assert to_unit is not None and from_unit is not None
+    for point in ([250.0, 90.0], [700.0, 40.0], [10.0, 290.0]):
+        u = geo.apply_homography(to_unit, *point)
+        back = geo.apply_homography(from_unit, *u)
+        assert back[0] == pytest.approx(point[0], abs=1e-6)
+        assert back[1] == pytest.approx(point[1], abs=1e-6)
+
+
+def test_a_drawn_box_places_regions_exactly_where_it_always_did():
+    """Every saved region is a fraction of a canonically-ordered box, so this
+    change must not move a single one of them."""
+    corners = geo.rect_corners(*FAR_RIGHT)
+    direct = geo.map_quad(geo.homography_from_points(geo.UNIT_QUAD, WIDE), corners)
+    assert geo.place_unit_rect(WIDE, FAR_RIGHT) == direct
