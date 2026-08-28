@@ -347,13 +347,48 @@ def test_a_classification_run_gets_only_the_keys_it_honours():
     assert kwargs["erasing"] == 0.0
 
     detect = t.augment_kwargs({"task": "obb"})
-    assert set(detect) == {"mosaic", "scale", "fliplr"}
+    assert set(detect) == {"mosaic", "scale", "fliplr", "close_mosaic"}
 
 
 def test_what_the_operator_typed_wins_over_the_default():
     kwargs = t.augment_kwargs({"task": "detect", "mosaic": 0.6, "scale": 0.45,
                                "fliplr": 0.5})
-    assert kwargs == {"mosaic": 0.6, "scale": 0.45, "fliplr": 0.5}
+    assert kwargs == {"mosaic": 0.6, "scale": 0.45, "fliplr": 0.5,
+                      "close_mosaic": t.DEFAULT_CLOSE_MOSAIC}
+
+
+def test_nothing_is_closed_when_nothing_was_open():
+    """The trainer fires its "Closing dataloader mosaic" on the epoch count
+    alone -- it never asks whether mosaic was on -- so at mosaic=0 it announced
+    closing something that was never open, and rebuilt the transforms and reset
+    the loader to set four values that already held."""
+    assert t.augment_kwargs({"task": "obb", "mosaic": 0.0})["close_mosaic"] == 0
+    assert "close_mosaic=0" in t.build_train_command("yolo", {
+        "task": "obb", "model": "m.pt", "data": "d.yaml", "imgsz": 736,
+        "batch": 16, "epochs": 100, "patience": 50, "workers": 8})
+
+
+def test_mosaic_still_closes_when_mosaic_is_on():
+    """Turning it off wholesale would leave a mosaic run finishing on tiled
+    images, which is the thing close_mosaic exists to prevent."""
+    kwargs = t.augment_kwargs({"task": "obb", "mosaic": 1.0})
+    assert kwargs["close_mosaic"] == t.DEFAULT_CLOSE_MOSAIC
+    assert t.augment_kwargs({"task": "obb", "mosaic": 1.0,
+                             "close_mosaic": 25})["close_mosaic"] == 25
+
+
+def test_close_mosaic_reaches_the_frozen_worker_as_an_int():
+    argv = t.build_worker_train_command("app.exe", {
+        "task": "obb", "model": "m.pt", "data": "d.yaml", "imgsz": 736,
+        "batch": 16, "epochs": 100, "patience": 50, "workers": 8,
+        "mosaic": 1.0})
+    parsed = t.parse_worker_args([a for a in argv if "=" in a])
+    assert parsed["close_mosaic"] == 10 and isinstance(parsed["close_mosaic"], int)
+
+
+def test_a_classification_run_never_gets_close_mosaic():
+    """Its dataset has no close_mosaic to call, so the key is noise."""
+    assert "close_mosaic" not in t.augment_kwargs({"task": "classify"})
 
 
 def test_a_bad_value_falls_back_rather_than_reaching_the_trainer():

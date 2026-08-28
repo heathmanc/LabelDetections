@@ -99,6 +99,15 @@ AUGMENT_DEFAULTS = {
     "erasing": 0.0,
 }
 
+# Ultralytics turns mosaic off for the last N epochs so a run finishes on clean
+# images. The trainer fires that on the epoch count alone -- `if epoch ==
+# (self.epochs - self.args.close_mosaic)` -- and never asks whether mosaic was
+# ever on, so it announces "Closing dataloader mosaic" even at mosaic=0, and
+# rebuilds the transform pipeline and resets the loader to set four values that
+# already hold. Derived rather than exposed: with mosaic off there is nothing
+# for it to mean, and with mosaic on it must not be zero.
+DEFAULT_CLOSE_MOSAIC = 10
+
 # Which of them the task actually honours. Classification builds a torchvision
 # pipeline (see ultralytics.data.augment.classify_augmentations) that has no
 # mosaic at all, and only classification has erasing -- passing a key a task
@@ -119,6 +128,12 @@ def augment_kwargs(params: dict) -> dict:
             out[key] = float(value)
         except (TypeError, ValueError):
             out[key] = AUGMENT_DEFAULTS[key]
+    if "mosaic" in out:
+        try:
+            requested = int(params.get("close_mosaic", DEFAULT_CLOSE_MOSAIC))
+        except (TypeError, ValueError):
+            requested = DEFAULT_CLOSE_MOSAIC
+        out["close_mosaic"] = requested if out["mosaic"] > 0 else 0
     return out
 
 
@@ -171,11 +186,12 @@ def build_worker_train_command(exe: str, params: dict) -> list[str]:
 # explicitly rather than guessing from the text matters: a run name or project
 # path of "2024" would otherwise be coerced to an int and break path building,
 # and device="0" would stop being the string Ultralytics documents.
-_WORKER_INT_KEYS = frozenset({"imgsz", "batch", "epochs", "patience", "workers"})
+_WORKER_INT_KEYS = frozenset({"imgsz", "batch", "epochs", "patience", "workers",
+                              "close_mosaic"})
 _WORKER_BOOL_KEYS = frozenset({"resume"})
 # Augmentation values are floats. Without this they would reach train() as the
 # strings they travelled as, and "0.0" is not 0.0 to Ultralytics.
-_WORKER_FLOAT_KEYS = frozenset(AUGMENT_DEFAULTS)
+_WORKER_FLOAT_KEYS = frozenset(AUGMENT_DEFAULTS)  # close_mosaic is an int
 
 
 def parse_worker_args(argv: list[str]) -> dict:
