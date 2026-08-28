@@ -106,9 +106,10 @@ from label_detections.core import annotations as ann_logic
 from label_detections.core import augment as augment_logic
 from label_detections.core import dataset as dataset_logic
 from label_detections.core import live_detect as live_logic
+from label_detections.core import segment_assist
 from label_detections.version import APP_TITLE
 from label_detections.ui import wizards
-from label_detections.ui.canvas import ImageCanvas
+from label_detections.ui.canvas import Box, ImageCanvas
 
 
 class TrainingMetricsChart(QWidget):
@@ -337,6 +338,10 @@ class MainWindow(QMainWindow):
         # Set by Capture Reference: the next label box drawn opens the region
         # editor on it, so the whole flow is capture, draw, draw regions.
         self._awaiting_reference_box = False
+        # Built on the first click, not at startup: most sessions never press
+        # the button, and a launch that stalls on a download nobody asked for
+        # is worse than a first click that does.
+        self._assistant = None
         # Live detection: model on its own thread, overlays scaled from the
         # full-resolution frame it ran on down to the preview being displayed.
         self._live_thread = None
@@ -373,6 +378,7 @@ class MainWindow(QMainWindow):
 
         self.canvas = ImageCanvas()
         self.canvas.boxes_changed.connect(self._update_box_count)
+        self.canvas.assist_requested.connect(self._outline_at)
 
         self.label_list = QListWidget()
         self.label_list.itemDoubleClicked.connect(self._load_selected_label)
@@ -550,6 +556,14 @@ class MainWindow(QMainWindow):
 
         tools_menu.addSeparator()
 
+        assist_action = QAction("Click to outline (segmentation assist)", self)
+        assist_action.setShortcut("Ctrl+Shift+O")
+        assist_action.setToolTip(
+            "Outline a label by clicking on it once instead of dragging its "
+            "four corners.")
+        assist_action.triggered.connect(self._guarded(self.toggle_outline_assist))
+        tools_menu.addAction(assist_action)
+
         define_regions_action = QAction("Define read-regions from this image", self)
         define_regions_action.setShortcut("Ctrl+Shift+D")
         define_regions_action.triggered.connect(self._guarded(self.define_read_regions))
@@ -652,7 +666,7 @@ class MainWindow(QMainWindow):
             unreviewed_action, mark_reviewed_action, force_review_action,
             capture_action, auto_label_action, validate_action,
             prelabel_action, next_queue_action, shortcuts_action, regions_action,
-            build_queue_action,
+            build_queue_action, assist_action,
             define_regions_action, edit_regions_action, replace_artwork_action,
             variance_action, scale_action, live_detect_action, keep_frame_action,
             keep_json_action,
@@ -2696,6 +2710,167 @@ class MainWindow(QMainWindow):
 
         self._refresh_active_label_panel()
 
+    # --- one-click outlining ---------------------------------------------
+
+    def _refresh_assist_button(self) -> None:
+        """Say what the button will do and what it needs, before it is pressed."""
+        if not hasattr(self, "assist_btn"):
+            return
+        model = self._assist_model_name()
+        self.assist_btn.setToolTip(
+            "Outline a label by clicking on it once, instead of dragging its "
+            "four corners.\n\n"
+            "A segmentation model traces the label's actual pixels and the "
+            "tightest tilted rectangle around them becomes the box -- fitted "
+            "to real edges rather than to where your eye put them.\n\n"
+            f"Uses {model}, downloaded once on first use. It runs while you "
+            "are labeling, never on the line, so a second or two per click "
+            "costs nothing.\n\n"
+            "It finds a label; it does not read one. Which label this is "
+            "stays the classifier's job. (Ctrl+Shift+O)")
+        self.assist_btn.setEnabled(getattr(self, "current_image_path", None) is not None)
+
+    def _confirm_assist_download(self) -> bool:
+        """Ask once, before the first load, in case it means a download.
+
+        The load is inline, so a checkpoint that is not on disk yet freezes the
+        window while it arrives. One question the first time beats a window
+        that looks hung with no explanation. Remembered, so it is asked once
+        per install and never again.
+        """
+        try:
+            settings = load_test_settings() or {}
+        except Exception:
+            settings = {}
+        if settings.get("assist_confirmed"):
+            return True
+        model = self._assist_model_name()
+        reply = QMessageBox.question(
+            self, "Click to Outline",
+            f"Click-to-outline uses {model}.\n\n"
+            "If it is not already on this machine it downloads now -- tens of "
+            "megabytes, once -- and the window will not respond until it "
+            "finishes. After that it loads from disk in a moment.\n\n"
+            "Continue?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes,
+        )
+        if reply != QMessageBox.Yes:
+            return False
+        self._assist_confirmed = True
+        self._save_test_settings()
+        return True
+
+    def _assist_model_name(self) -> str:
+        from .segment_assist import DEFAULT_MODEL
+        try:
+            saved = str((load_test_settings() or {}).get("assist_model", "") or "")
+        except Exception:
+            saved = ""
+        return saved or DEFAULT_MODEL
+
+    def set_outline_assist(self, enabled: bool) -> None:
+        """Arm or disarm click-to-outline."""
+        enabled = bool(enabled)
+        if hasattr(self.canvas, "set_assist_mode"):
+            self.canvas.set_assist_mode(enabled)
+        if hasattr(self, "assist_btn") and self.assist_btn.isChecked() != enabled:
+            self.assist_btn.setChecked(enabled)
+        if enabled:
+            self.status.showMessage(
+                "Click to outline: click once on a label. Press again to turn off.",
+                8000)
+        else:
+            self.status.showMessage("Click to outline off.", 3000)
+
+    def toggle_outline_assist(self) -> None:
+        self.set_outline_assist(not getattr(self.canvas, "assist_mode", False))
+
+    def _outline_at(self, x: float, y: float) -> None:
+        """Turn one click into an oriented box on the canvas.
+
+        Runs inline, like Auto-label does, rather than on a worker thread. It
+        is one call somebody is waiting on with a wait cursor up, and this
+        codebase has already paid once for moving model work onto threads that
+        did not need it.
+        """
+        from .segment_assist import AssistUnavailable, SegmentAssistant
+
+        frame = self._assist_frame()
+        if frame is None:
+            QMessageBox.information(
+                self, "Click to Outline",
+                "Open one of this label's images first -- the outline is drawn "
+                "on the image, not on a live frame.")
+            return
+
+        if self._assistant is None:
+            if not self._confirm_assist_download():
+                self.set_outline_assist(False)
+                return
+            self._assistant = SegmentAssistant(
+                self._assist_model_name(), self._model_test_device_arg() or "")
+
+        # A checkpoint that is not on disk downloads on first use, and a wait
+        # cursor over "Outlining..." while 40 MB arrives reads as a hang.
+        first = not getattr(self._assistant, "is_loaded", lambda: True)()
+        self.status.showMessage(
+            f"Loading {self._assist_model_name()} -- downloads once on first "
+            "use, then this is instant." if first else "Outlining...",
+            20000 if first else 4000)
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        QApplication.processEvents()
+        try:
+            quad, why = self._assistant.outline(
+                frame, x, y, int(segment_assist.DEFAULT_ASSIST_PX))
+        except AssistUnavailable as exc:
+            QApplication.restoreOverrideCursor()
+            self.set_outline_assist(False)
+            QMessageBox.warning(self, "Click to Outline", str(exc))
+            return
+        finally:
+            if QApplication.overrideCursor() is not None:
+                QApplication.restoreOverrideCursor()
+
+        if why:
+            # Stays armed: the answer to a bad click is another click, and
+            # turning the mode off would make the operator re-arm to retry.
+            self.status.showMessage(why, 7000)
+            return
+
+        # Exactly what a hand-drawn box would carry: the class the operator has
+        # selected, and the identity only when the library actually holds it.
+        # The same rule as pre-labeling, because a box that arrives already
+        # named something the library does not know is a class nothing trains.
+        name = str(self.canvas.class_name or self.label_id or "")
+        box = Box(0, 0, 1, 1, int(self.canvas.class_id), name, "obb",
+                  [[float(px), float(py)] for px, py in quad])
+        if (name and name not in labels_mod.STRUCTURAL_CLASSES
+                and self.library.get(name) is not None):
+            box.label_id = name
+        self.canvas.push_undo_snapshot()
+        self.canvas.boxes.append(box)
+        self.canvas.selected_idx = len(self.canvas.boxes) - 1
+        self.canvas.selected_handle_idx = None
+        self.canvas.boxes_changed.emit()
+        self.canvas.update()
+        self.status.showMessage(
+            f"Outlined {name}. Nudge a corner if it needs it, then Save.", 6000)
+
+    def _assist_frame(self):
+        """The full-resolution image the outline is measured against.
+
+        Read from disk rather than reused from ``last_raw``: that attribute
+        also holds live camera frames, and the box has to be in the
+        coordinates the sidecar is written in, which are the file's. A JPEG
+        decode is nothing next to the segmentation that follows it.
+        """
+        if self.current_image_path is None:
+            return None
+        try:
+            return cv2.imread(str(self.current_image_path))
+        except Exception:
+            return None
+
     def _refresh_regions_button(self) -> None:
         """Say which of the two things the button will do, before it is pressed."""
         if not hasattr(self, "define_regions_btn"):
@@ -2757,6 +2932,7 @@ class MainWindow(QMainWindow):
         self.label_meta_label.setText(" · ".join(bits) or str(label.name or "—"))
 
         self._refresh_regions_button()
+        self._refresh_assist_button()
         statuses = list(persistence.dataset_statuses(label.label_id).values())
         self.label_progress_label.setText(
             review_logic.dataset_summary(
@@ -3371,6 +3547,14 @@ class MainWindow(QMainWindow):
         self.replace_artwork_btn = QPushButton("Replace Artwork...")
         self.replace_artwork_btn.clicked.connect(self.replace_label_artwork)
         replace_artwork_btn = self.replace_artwork_btn
+        # Checkable, not a one-shot: outlining is what somebody does a hundred
+        # and fifty times in a row, and re-arming between every image would
+        # give most of the saving back.
+        self.assist_btn = QPushButton("Click to Outline")
+        self.assist_btn.setCheckable(True)
+        self.assist_btn.toggled.connect(self.set_outline_assist)
+        assist_btn = self.assist_btn
+        self._refresh_assist_button()
         self._refresh_regions_button()
         regions_btn = QPushButton("Place Regions")
         regions_btn.setToolTip(
@@ -3395,7 +3579,7 @@ class MainWindow(QMainWindow):
         zplus = QPushButton("+")
         zplus.clicked.connect(self.canvas.zoom_in)
 
-        right_panel_buttons = (save, save_next, copy_prev, qa_btn,
+        right_panel_buttons = (save, save_next, copy_prev, qa_btn, assist_btn,
                                define_regions_btn, replace_artwork_btn, regions_btn,
                                delete, clear, clear_saved, zminus, zfit, zplus)
         for btn in right_panel_buttons:
@@ -3443,6 +3627,7 @@ class MainWindow(QMainWindow):
         v.addLayout(button_row(zminus, zfit, zplus))
         v.addLayout(button_row(save, save_next))
         v.addLayout(button_row(copy_prev, qa_btn))
+        v.addWidget(assist_btn)
         v.addLayout(button_row(define_regions_btn, regions_btn))
         v.addWidget(replace_artwork_btn)
         v.addLayout(button_row(delete, clear))
@@ -4654,6 +4839,10 @@ class MainWindow(QMainWindow):
         still. Capturing or opening a saved image ends live mode even though the
         Live Capture tab is still in front.
         """
+        if live and getattr(self.canvas, "assist_mode", False):
+            # Clicks do not reach the assistant in live mode anyway; leaving the
+            # button lit would be a mode that looks armed and is not.
+            self.set_outline_assist(False)
         if hasattr(self.canvas, "set_drawing_enabled"):
             self.canvas.set_drawing_enabled(not live)
         if hasattr(self, "mode_label"):
@@ -4806,6 +4995,12 @@ class MainWindow(QMainWindow):
                 "max_infer_rate": (float(self.live_rate_spin.value())
                                    if hasattr(self, "live_rate_spin") else 6.7),
                 "hide_saved_labels": bool(self.test_hide_saved_labels_check.isChecked()),
+                # Written even when unchanged so the key is discoverable: this
+                # is how somebody swaps in sam2.1_t.pt or sam_b.pt.
+                "assist_model": self._assist_model_name(),
+                "assist_confirmed": bool(getattr(self, "_assist_confirmed", False)
+                                         or (load_test_settings() or {}).get(
+                                             "assist_confirmed", False)),
             })
         except Exception:
             # Settings are a convenience; never let a write failure break testing.
@@ -5698,6 +5893,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Image", "Could not load image.")
             return
         self.current_image_path = path
+        self._refresh_assist_button()
         self.last_raw = cv2.imread(str(path))
         self.last_adjusted = self._adjust_frame(self.last_raw)
         self.canvas.set_frame(self.last_adjusted)

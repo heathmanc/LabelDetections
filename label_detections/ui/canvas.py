@@ -105,6 +105,10 @@ class Box:
 
 class ImageCanvas(QWidget):
     boxes_changed = Signal()
+    # Image-space coordinates of a click made while the outline assistant is
+    # armed. The canvas does not know what a segmentation model is; it only
+    # reports where somebody clicked.
+    assist_requested = Signal(float, float)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -130,6 +134,11 @@ class ImageCanvas(QWidget):
         # box drawn on a frame that is replaced 30 times a second belongs to no
         # image and cannot be saved against one.
         self.drawing_enabled = True
+        # While on, a plain left-click asks for an outline instead of starting
+        # a drag. A mode rather than a modifier because the point is to do it
+        # a hundred and fifty times in a row: Ctrl+click already selects, and
+        # Alt+drag already pans.
+        self.assist_mode = False
         self.zoom = 1.0
         self.pan_x = 0
         self.pan_y = 0
@@ -211,6 +220,21 @@ class ImageCanvas(QWidget):
         self._restore_snapshot(self._redo_stack.pop())
         return True
 
+    def set_assist_mode(self, enabled: bool) -> None:
+        """Arm or disarm one-click outlining.
+
+        The cursor changes because the same click does something else now, and
+        a mode with no visible sign of being on is a mode that gets left on.
+        """
+        self.assist_mode = bool(enabled)
+        if self.assist_mode:
+            self.setCursor(Qt.CrossCursor)
+        elif getattr(self, "drawing_enabled", True):
+            self.setCursor(Qt.ArrowCursor)
+        else:
+            self.setCursor(Qt.OpenHandCursor)
+        self.update()
+
     def set_drawing_enabled(self, enabled: bool) -> None:
         """Allow or block annotation. Pan and zoom are unaffected.
 
@@ -219,7 +243,10 @@ class ImageCanvas(QWidget):
         save it against. Capture first, then draw on the still.
         """
         self.drawing_enabled = bool(enabled)
-        self.setCursor(Qt.ArrowCursor if enabled else Qt.OpenHandCursor)
+        if getattr(self, "assist_mode", False) and enabled:
+            self.setCursor(Qt.CrossCursor)
+        else:
+            self.setCursor(Qt.ArrowCursor if enabled else Qt.OpenHandCursor)
         self.update()
 
     def set_annotation_kind(self, kind: str) -> None:
@@ -582,6 +609,12 @@ class ImageCanvas(QWidget):
         if event.button() != Qt.LeftButton:
             return
 
+        if self.assist_mode:
+            point = self._screen_to_image(pos)
+            if point is not None:
+                self.assist_requested.emit(float(point[0]), float(point[1]))
+            return
+
         if self._screen_to_image(pos) is not None:
             self.drawing = True
             self.start_pos = pos
@@ -803,6 +836,7 @@ class ImageCanvas(QWidget):
             p.fillRect(QRect(10, 10, 185, 24), QColor(0, 0, 0, 150))
             p.setPen(QColor(203, 213, 225))
             state = ("LIVE - capture before drawing" if self._blocked()
+                     else "CLICK TO OUTLINE" if self.assist_mode
                      else f"Tool {self.annotation_kind.upper()}")
             p.drawText(18, 28, f"Zoom {self.zoom:.2f}x | {state}")
 

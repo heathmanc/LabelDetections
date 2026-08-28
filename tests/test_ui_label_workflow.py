@@ -1193,3 +1193,168 @@ def test_marking_an_image_background_writes_a_reviewed_negative():
     # Reviewed, and by this tool -- an imported marker must not qualify.
     assert review_logic.annotation_reviewed(data) is True
     assert review_logic.annotation_status(data, "wf_background") == "background"
+
+
+# --- one click to an oriented box ------------------------------------------
+
+def _armed(win, label_id="wf_assist"):
+    _define(win, label_id)
+    win.set_active_label(label_id)
+    image = _capture(win, label_id, "assist.jpg")
+    win.canvas.clear_boxes()
+    win.set_outline_assist(True)
+    return image
+
+
+class _FakeAssistant:
+    """Stands in for the segmentation model: records the click, returns a quad."""
+
+    def __init__(self, quad=None, why=""):
+        self.quad = quad if quad is not None else [[10.0, 20.0], [110.0, 20.0],
+                                                   [110.0, 80.0], [10.0, 80.0]]
+        self.why = why
+        self.calls = []
+
+    def outline(self, frame, x, y, max_px):
+        self.calls.append((float(x), float(y), int(max_px)))
+        return ([], self.why) if self.why else (list(self.quad), "")
+
+
+def test_a_click_while_armed_becomes_an_obb_carrying_the_label_id():
+    win = _window()
+    _armed(win, "wf_assist_ok")
+    win._assistant = _FakeAssistant()
+
+    win._outline_at(60.0, 50.0)
+
+    assert len(win.canvas.boxes) == 1
+    box = win.canvas.boxes[0]
+    assert box.kind == "obb"
+    assert box.points == [[10.0, 20.0], [110.0, 20.0], [110.0, 80.0], [10.0, 80.0]]
+    # The identity comes with it: the recipe counts label ids, and re-typing
+    # one per box is the work this feature exists to remove.
+    assert box.label_id == "wf_assist_ok"
+    assert win._assistant.calls[0][:2] == (60.0, 50.0)
+    win.set_outline_assist(False)
+
+
+def test_the_canvas_reports_the_click_instead_of_starting_a_drag():
+    """The wiring the whole feature hangs on: while armed, a plain left-click
+    is a request to outline, not the first corner of a drag."""
+    from PySide6.QtCore import QPointF, Qt
+    from PySide6.QtGui import QMouseEvent
+
+    win = _window()
+    _armed(win, "wf_assist_click")
+    # Offscreen the window is never shown, so give the canvas a size and aim at
+    # the middle of where the image is actually drawn.
+    win.canvas.resize(400, 300)
+    win.canvas.fit_to_window()
+    target = win.canvas._target_rect()
+    centre = QPointF(target.center().x(), target.center().y())
+
+    seen = []
+    win.canvas.assist_requested.connect(lambda x, y: seen.append((x, y)))
+    try:
+        event = QMouseEvent(QMouseEvent.Type.MouseButtonPress, centre,
+                            Qt.LeftButton, Qt.LeftButton, Qt.NoModifier)
+        win.canvas.mousePressEvent(event)
+        assert len(seen) == 1
+        # The click reported image coordinates, not screen ones, and did not
+        # begin a drag.
+        assert seen[0] == pytest.approx((200.0, 100.0), abs=2)
+        assert win.canvas.drawing is False
+    finally:
+        win.set_outline_assist(False)
+
+
+def test_a_refused_outline_says_why_and_stays_armed():
+    """The answer to a bad click is another click. Dropping the mode would make
+    the operator re-arm to retry."""
+    win = _window()
+    _armed(win, "wf_assist_bad")
+    win._assistant = _FakeAssistant(why="That outlined most of the frame")
+
+    win._outline_at(5.0, 5.0)
+
+    assert win.canvas.boxes == []
+    assert "most of the frame" in win.status.currentMessage()
+    assert win.canvas.assist_mode is True
+    win.set_outline_assist(False)
+
+
+def test_the_outline_is_one_undo_step():
+    win = _window()
+    _armed(win, "wf_assist_undo")
+    win._assistant = _FakeAssistant()
+
+    win._outline_at(60.0, 50.0)
+    assert len(win.canvas.boxes) == 1
+    win.canvas.undo()
+    assert win.canvas.boxes == []
+    win.set_outline_assist(False)
+
+
+def test_opening_a_camera_drops_the_armed_mode():
+    """Clicks never reach the assistant in live mode, so a lit button would be
+    a mode that looks armed and is not."""
+    win = _window()
+    _armed(win, "wf_assist_live")
+    real = win.camera
+    try:
+        win.camera = _FakeCamera(True)
+        win._refresh_live_mode()
+        assert win.canvas.assist_mode is False
+        assert win.assist_btn.isChecked() is False
+    finally:
+        win.camera = real
+        win._refresh_live_mode()
+
+
+def test_the_first_outline_asks_before_it_may_download(monkeypatch):
+    """The load is inline, so a checkpoint that is not on disk yet freezes the
+    window while tens of megabytes arrive. I hit exactly that writing this: a
+    click with no stand-in reached the real model and hung the test run."""
+    import label_detections.ui.main_window as mw_mod
+    from label_detections.core.storage import save_test_settings, load_test_settings
+
+    win = _window()
+    _armed(win, "wf_assist_ask")
+    win._assistant = None
+    win._assist_confirmed = False
+    settings = dict(load_test_settings() or {})
+    save_test_settings({**settings, "assist_confirmed": False})
+
+    asked = {}
+    monkeypatch.setattr(
+        mw_mod.QMessageBox, "question",
+        staticmethod(lambda parent, title, text, *a, **k: (
+            asked.update({"text": text}) or mw_mod.QMessageBox.No)))
+    try:
+        win._outline_at(60.0, 50.0)
+        # Declined: nothing loaded, nothing drawn, and the mode is off rather
+        # than armed and silently doing nothing on every click.
+        assert win._assistant is None
+        assert win.canvas.boxes == []
+        assert win.canvas.assist_mode is False
+        assert "downloads now" in asked.get("text", "")
+    finally:
+        save_test_settings(settings)
+        win.set_outline_assist(False)
+
+
+def test_it_does_not_ask_again_once_confirmed(monkeypatch):
+    import label_detections.ui.main_window as mw_mod
+    from label_detections.core.storage import save_test_settings, load_test_settings
+
+    win = _window()
+    settings = dict(load_test_settings() or {})
+    save_test_settings({**settings, "assist_confirmed": True})
+    monkeypatch.setattr(
+        mw_mod.QMessageBox, "question",
+        staticmethod(lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("asked again after it was confirmed"))))
+    try:
+        assert win._confirm_assist_download() is True
+    finally:
+        save_test_settings(settings)
