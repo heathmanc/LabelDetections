@@ -1212,6 +1212,85 @@ def test_start_uses_the_field_without_a_test_run_first(monkeypatch):
     assert built.get("path") == "/nonexistent/detector.pt"
 
 
+# --- the two thresholds -----------------------------------------------------
+#
+# There are two, they gate different stages, and only one of them was on
+# screen. The visible one -- Confidence, on the Test Models tab -- is stage 1:
+# how sure the detector is that there is a label there. Stage 2's, how sure the
+# classifier is about which label it is, sat at 0.55 in the source with nothing
+# naming it, so raising the visible one to 0.90 changed a stage nobody meant to
+# change and left the other exactly where it was.
+
+@ui
+def test_the_stage_two_floor_reaches_the_worker(monkeypatch):
+    """It was never passed at all: the worker took an identity_floor argument
+    and the one caller never supplied one, so every run used the default."""
+    win = _window()
+    win.test_model_edit.setText("/nonexistent/detector.pt")
+    win.live_classifier_edit.setText("/nonexistent/classifier.pt")
+    win.live_floor_spin.setValue(0.80)
+
+    got = {}
+
+    class FakeWorker:
+        loaded = failed = result = None
+
+        def __init__(self, *a, **k):
+            got.update(k)
+            raise RuntimeError("stop before threading")
+
+    import label_detections.ui.live_detect as ld_ui
+    monkeypatch.setattr(ld_ui, "InferenceWorker", FakeWorker)
+    monkeypatch.setattr(win, "_camera_is_live", lambda: True)
+    try:
+        win.start_live_detect()
+    except RuntimeError:
+        pass
+    finally:
+        win._live_thread = None
+    assert got.get("identity_floor") == pytest.approx(0.80)
+
+
+@ui
+def test_the_two_thresholds_are_separate_settings():
+    """Moving one must not move the other: they gate different stages, and the
+    whole reason this is on screen is that they were being confused."""
+    win = _window()
+    win.test_conf_spin.setValue(0.90)
+    win.live_floor_spin.setValue(0.55)
+    assert win.test_conf_spin.value() == pytest.approx(0.90)
+    assert win.live_floor_spin.value() == pytest.approx(0.55)
+
+
+@ui
+def test_the_stage_two_floor_is_remembered_between_launches():
+    win = _window()
+    win.live_floor_spin.setValue(0.75)
+    win._save_test_settings()
+    from label_detections.core.storage import load_test_settings
+    assert load_test_settings().get("identity_floor") == pytest.approx(0.75)
+
+
+@ui
+def test_the_floor_starts_where_it_has_always_silently_been():
+    """Exposing a hidden setting must not also change it. Every install that
+    upgrades into this has no saved value, and it has to keep behaving exactly
+    as it did rather than quietly moving to whatever looks like a nice default.
+
+    A fresh window rather than the shared one, and the key removed first: this
+    is about what happens with nothing saved, which the shared window stopped
+    being able to show the moment another test saved something.
+    """
+    from label_detections.core.storage import load_test_settings, save_test_settings
+    from label_detections.ui.main_window import MainWindow
+
+    settings = dict(load_test_settings() or {})
+    settings.pop("identity_floor", None)
+    save_test_settings(settings)
+    assert MainWindow().live_floor_spin.value() == pytest.approx(
+        ld.DEFAULT_IDENTITY_FLOOR)
+
+
 @ui
 def test_the_live_tab_names_the_detector_it_will_use():
     """A required setting on another tab, with nothing on this one naming it,

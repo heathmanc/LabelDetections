@@ -2321,6 +2321,35 @@ class MainWindow(QMainWindow):
         crop_row.addWidget(self.live_crop_spin, 1)
         cv_.addLayout(crop_row)
 
+        floor_row = QHBoxLayout()
+        self.live_floor_spin = QDoubleSpinBox()
+        self.live_floor_spin.setRange(0.0, 1.0)
+        self.live_floor_spin.setSingleStep(0.05)
+        self.live_floor_spin.setDecimals(2)
+        self.live_floor_spin.setValue(float((load_test_settings() or {}).get(
+            "identity_floor", live_logic.DEFAULT_IDENTITY_FLOOR)))
+        self.live_floor_spin.valueChanged.connect(lambda _v: self._save_test_settings())
+        self.live_floor_spin.setToolTip(
+            "How sure stage 2 must be before its answer is used. Below this, "
+            "the box reads 'unknown' instead of a label id.\n\n"
+            "This is a DIFFERENT number from Confidence on the Test Models tab. "
+            "That one is stage 1: how sure the detector must be that there is a "
+            "label there at all. This one is stage 2: how sure the classifier "
+            "must be about which label it is. Both are in play on every box, "
+            "and they were not both visible -- this one was fixed at "
+            f"{live_logic.DEFAULT_IDENTITY_FLOOR:.2f} with nothing naming it.\n\n"
+            "What it catches: a crop the classifier is genuinely torn about -- "
+            "half cut off, motion blurred, caught at an angle.\n\n"
+            "What it does NOT catch: a label that was never enrolled. A "
+            "classifier can only answer with the classes it was trained on, so "
+            "it names the closest one it knows, and it does that at ~1.00. No "
+            "setting of this number separates that from a correct read, because "
+            "both produce the same number. The Novelty profile button is what "
+            "addresses that one.")
+        floor_row.addWidget(QLabel("Stage 2 identity floor"))
+        floor_row.addWidget(self.live_floor_spin, 1)
+        cv_.addLayout(floor_row)
+
         rate_row = QHBoxLayout()
         self.live_rate_spin = QDoubleSpinBox()
         self.live_rate_spin.setRange(0.5, 60.0)
@@ -2492,6 +2521,7 @@ class MainWindow(QMainWindow):
             float(self.test_conf_spin.value()), self._model_test_device_arg(),
             track=self._live_tracking, classifier_path=classifier_path,
             crop_px=int(self.live_crop_spin.value()),
+            identity_floor=float(self.live_floor_spin.value()),
             # The camera is already open by this point, so the warm-up can use
             # the size the live path will actually hand over.
             warm_shape=(self.last_raw.shape if self.last_raw is not None else None))
@@ -5462,6 +5492,9 @@ class MainWindow(QMainWindow):
                                if hasattr(self, "live_classifier_edit") else ""),
                 "crop_px": (int(self.live_crop_spin.value())
                             if hasattr(self, "live_crop_spin") else 224),
+                "identity_floor": (float(self.live_floor_spin.value())
+                                   if hasattr(self, "live_floor_spin")
+                                   else live_logic.DEFAULT_IDENTITY_FLOOR),
                 "max_infer_rate": (float(self.live_rate_spin.value())
                                    if hasattr(self, "live_rate_spin") else 6.7),
                 "hide_saved_labels": bool(self.test_hide_saved_labels_check.isChecked()),
