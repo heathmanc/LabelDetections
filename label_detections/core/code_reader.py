@@ -19,8 +19,6 @@ whole label, which works and costs more.
 """
 from __future__ import annotations
 
-import numpy as np
-
 from . import codes as logic
 from .geometry import place_unit_rect
 from .imageio import rectify_quad
@@ -83,53 +81,77 @@ def _read_once(module, image, **options) -> list[logic.Read]:
     return out
 
 
+def _ladder(module, image):
+    """The images and options to try, cheapest and most likely first.
+
+    Measured on rendered UPC-A symbols put through what this pipeline does to
+    them -- rectified from an angle, blurred by that resampling, and carrying
+    the colour fringing a Bayer sensor leaves on fine vertical bars. Each rung
+    earns its place by decoding cases the ones above it cannot:
+
+      * **as taken** reads every clean code, so a good part costs one call.
+      * **greyscale** is the big one. Handing zxing a BGR array lets it do its
+        own luminance conversion, and chroma noise across the bars survives
+        that; converting first, with proper luma weights, does not. Fringing
+        that fails outright on BGR reads on grey.
+      * **a fixed threshold** suits a cropped code. The default local-average
+        binarizer is built to find a code somewhere in a large scene with
+        uneven light, and on a crop that is almost entirely one code it adapts
+        to the bars themselves.
+      * **upscaling** gives the scanline more samples per bar. It invents no
+        detail, and it recovers blurred codes the binarizers miss.
+      * **one colour channel** is the last resort, for fringing bad enough that
+        even a luma mix carries it. A single channel never had the artefact.
+
+    Nothing here loosens what counts as a read: every rung still has to satisfy
+    the symbology's own checksum.
+    """
+    import cv2
+
+    fixed = {}
+    try:
+        fixed = {"binarizer": module.Binarizer.FixedThreshold}
+    except Exception:
+        pass
+
+    yield "as taken", image, {}
+    if getattr(image, "ndim", 2) != 3:
+        yield "fixed threshold", image, fixed
+        return
+
+    grey = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    yield "greyscale, fixed threshold", grey, fixed
+    yield "greyscale", grey, {}
+    try:
+        bigger = cv2.resize(grey, None, fx=2.0, fy=2.0,
+                            interpolation=cv2.INTER_CUBIC)
+        yield "greyscale, upscaled", bigger, fixed
+    except Exception:
+        pass
+    yield "red channel", image[:, :, 2], fixed
+
+
 def decode(image, detail: bool = False):
     """Every symbol in one image, trying harder as each attempt comes back empty.
 
-    A ladder rather than one call, because a tight crop of a printed code and a
-    whole label are different pictures and the decoder's defaults suit the
-    second.
+    See ``_ladder`` for what is tried and why each rung is there. Cost is paid
+    only on failure: a code that reads on the first attempt costs one call.
 
-    Measured on rectified barcodes at 2-4 px per module with the blur a
-    perspective warp leaves behind:
-
-      * the default local-average binarizer fails on every blurred case. It is
-        built for finding a code somewhere in a large scene with uneven light,
-        and on a crop that is almost entirely one code it adapts to the bars
-        themselves.
-      * a fixed threshold reads every one of those cases. A cropped code is a
-        small evenly-lit patch, which is exactly the picture a global threshold
-        wants.
-      * upscaling recovers blurred codes that both binarizers miss at 3-4 px
-        per module -- it invents no detail, but it gives the scanline more
-        samples per bar to work with.
-
-    Cost is only paid on failure: a code that reads on the first attempt costs
-    one call. ``detail`` returns ``(reads, how)`` so a diagnostic can say which
-    rung it took, since needing the last one is worth knowing before the print
-    or the optics drift any further.
+    ``detail`` returns ``(reads, how)`` so a diagnostic can say which rung it
+    took. That is worth surfacing -- a code that only reads on the last one is
+    readable today and the first thing to fail when the print, the focus or the
+    lighting drifts.
     """
     module, _reason = backend()
     if module is None or image is None or getattr(image, "size", 0) == 0:
         return ([], "") if detail else []
 
-    attempts = [("as taken", image, {})]
     try:
-        fixed = {"binarizer": module.Binarizer.FixedThreshold}
-        attempts.append(("fixed threshold", image, fixed))
+        rungs = list(_ladder(module, image))
     except Exception:
-        fixed = {}
-    try:
-        import cv2
+        rungs = [("as taken", image, {})]
 
-        big = cv2.resize(image, None, fx=2.0, fy=2.0,
-                         interpolation=cv2.INTER_CUBIC)
-        attempts.append(("2x upscale", big, fixed))
-        attempts.append(("2x upscale, default binarizer", big, {}))
-    except Exception:
-        pass
-
-    for how, candidate, options in attempts:
+    for how, candidate, options in rungs:
         reads = _read_once(module, candidate, **options)
         if reads:
             return (reads, how) if detail else reads
@@ -175,12 +197,11 @@ def region_margin(spec) -> float:
     """How far to grow a drawn region so the decoder gets its quiet zone.
 
     The drawn box follows the printed bars, because that is what an operator
-    can see to drag around. Decoders need the blank margin either side of them,
+    can see to drag around. Decoders want the blank margin either side of them,
     and how much is not a matter of taste -- the symbology specifies it, and
     for a small code it can be most of the symbol's own width again. A fixed
     guess is fine for a Code 128 across a battery face and far too tight for an
-    8 mm DataMatrix, where cropping inside the quiet zone means a good part
-    reading "no code".
+    8 mm DataMatrix, where cropping inside the quiet zone loses the read.
 
     So when the label declares its quiet zone and printed width, use them.
     ``_expand`` splits the margin either side of the region, so each side gets
@@ -323,6 +344,27 @@ def diagnosis_text(report: dict) -> str:
         else:
             lines.append(f"Whole label ({size}): nothing decoded")
 
+    # Did the whole label find THIS code, or just some other symbol on the
+    # label? A QR next to the barcode reads happily while the barcode does not,
+    # and treating that as "the code is legible" sends somebody to redraw a
+    # region that was already right. It is the distinction the first version of
+    # this got wrong.
+    wanted = [str(getattr(e["spec"], "pattern", "") or "") for e in regions]
+    wanted = [w for w in wanted if w]
+    whole_is_the_same_code = bool(wanted) and any(
+        logic.matches(pattern, text)
+        for r in (whole.get("reads") or []) for text in r.candidates()
+        for pattern in wanted)
+    if wanted and got_whole and not whole_is_the_same_code:
+        got_whole = False
+        found = ", ".join(f"{r.text} [{r.symbology}]"
+                          for r in whole.get("reads") or [])
+        lines.append("")
+        lines.append(f"NOTE: the whole label decoded {found}, which is a "
+                     f"different symbol -- not the code this label\'s pattern "
+                     f"describes. So it is no evidence that the code in "
+                     f"question is legible.")
+
     lines.append("")
     if got_region:
         lines.append("READS. Whatever comes back here is what the pattern is "
@@ -354,12 +396,17 @@ def diagnosis_text(report: dict) -> str:
             "artwork outline to match what the detector actually produces.")
     else:
         lines.append(
-            "NOTHING IS DECODING, from the region or the whole label. This is a "
-            "picture problem rather than a placement one: too few pixels across "
-            "the bars, out of focus, glare across the symbol, or the label at an "
-            "angle steep enough to close the bars up. Compare the pixel size "
-            "above against what the symbology needs -- a UPC-A wants about 190 "
-            "px across the bars.")
+            "THIS CODE IS NOT DECODING ANYWHERE -- not from the region, and not "
+            "from the whole label. That makes it a picture problem rather than "
+            "a placement one, so redrawing the region will not help.\n\n"
+            "Every fallback was tried: greyscale, a fixed threshold, upscaling, "
+            "and a single colour channel. What is left is the symbol itself. "
+            "Too few pixels across the bars (a UPC-A wants about 190 across the "
+            "symbol, and more once a warp has softened it), out of focus, glare, "
+            "a steep angle closing the bars up, or print quality. Compare the "
+            "crop above against those -- if the bars look clean to you at this "
+            "size, the next thing to check is whether they are clean at full "
+            "resolution rather than after the warp.")
     return "\n".join(lines)
 
 

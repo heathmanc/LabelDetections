@@ -163,3 +163,60 @@ def test_a_code_from_a_label_nobody_enrolled_is_refused():
     verdict = cd.verdict("PC680", [Spec()], reads, patterns)
     assert verdict.state == cd.CONTRADICTED
     assert cd.resolve("PC680", verdict) == cd.UNKNOWN
+
+
+# --- colour, which is what actually broke the real one ----------------------
+
+def fringed(image: np.ndarray, strength: int = 60) -> np.ndarray:
+    """Colour moire across fine vertical bars.
+
+    What a Bayer sensor does to a barcode: the bars are near the sampling
+    pitch of the colour filter, so the channels disagree about where each edge
+    is. It is visible as green and cyan tinting on what should be black.
+    """
+    out = image.astype(np.int16)
+    ramp = (np.sin(np.arange(out.shape[1]) * 1.7) * strength).astype(np.int16)
+    out[:, :, 1] += ramp
+    out[:, :, 0] -= ramp // 2
+    return np.clip(out, 0, 255).astype(np.uint8)
+
+
+def test_colour_fringing_defeats_a_raw_bgr_read():
+    """Stated so the greyscale rung cannot be deleted as belt-and-braces.
+    Handing zxing a BGR array lets it do its own luminance conversion, and the
+    chroma noise survives that."""
+    import zxingcpp
+
+    hard = fringed(cv2.GaussianBlur(render(height=140), (0, 0), 1.0))
+    assert not zxingcpp.read_barcodes(hard)
+    assert not zxingcpp.read_barcodes(
+        hard, binarizer=zxingcpp.Binarizer.FixedThreshold)
+
+
+def test_the_ladder_reads_a_fringed_code():
+    hard = fringed(cv2.GaussianBlur(render(height=140), (0, 0), 1.0))
+    reads, how = cr.decode(hard, detail=True)
+    assert reads and reads[0].text.endswith(CODE)
+    assert "grey" in how or "channel" in how
+
+
+@pytest.mark.parametrize("strength", [40, 70])
+def test_fringing_of_either_severity_still_reads(strength):
+    hard = fringed(cv2.GaussianBlur(render(module_px=4, height=140), (0, 0), 1.2),
+                   strength)
+    assert cr.decode(hard)
+
+
+def test_no_rung_ever_returns_a_different_code():
+    """Trying harder must never mean accepting more. Every rung still has to
+    satisfy the symbology's own checksum."""
+    for module_px in (2, 3, 4):
+        for blur in (0, 1.0, 1.6):
+            for strength in (0, 40, 70):
+                image = cv2.GaussianBlur(render(module_px=module_px, height=140),
+                                         (0, 0), blur) if blur else render(
+                                             module_px=module_px, height=140)
+                if strength:
+                    image = fringed(image, strength)
+                for read in cr.decode(image):
+                    assert read.text.endswith(CODE), read.text
