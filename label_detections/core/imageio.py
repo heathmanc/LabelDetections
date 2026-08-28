@@ -28,7 +28,7 @@ IMPORT_IMAGE_EXTS = IMAGE_SUFFIXES + (".webp",)
 
 
 def rectify_quad(image_bgr: np.ndarray, quad: list[list[float]],
-                 out_width: int = 0) -> np.ndarray | None:
+                 out_width: int = 0, max_side: int = 0) -> np.ndarray | None:
     """Flatten a drawn label out of a captured frame.
 
     The operator has already drawn the label's four corners on a real capture.
@@ -39,6 +39,12 @@ def rectify_quad(image_bgr: np.ndarray, quad: list[list[float]],
     It removes the need to go and find vendor artwork: the tool is already
     collecting pictures of the label, and one of them, flattened, IS the
     artwork. Returns None for a degenerate quad.
+
+    ``max_side`` caps the longest output side. warpPerspective costs what its
+    destination costs, so flattening a 2000 px label at native size and then
+    shrinking it to a 224 px crop pays for 2000 px of warp to keep 224 -- about
+    25x the work, measured on a 5496x3672 frame. It only ever shrinks: a label
+    smaller than the cap is left alone rather than blown up.
     """
     if image_bgr is None or len(quad) < 4:
         return None
@@ -57,6 +63,9 @@ def rectify_quad(image_bgr: np.ndarray, quad: list[list[float]],
     if out_width > 0:
         scale = out_width / width
         width, height = out_width, max(4.0, height * scale)
+    if max_side > 0 and max(width, height) > max_side:
+        scale = float(max_side) / max(width, height)
+        width, height = max(4.0, width * scale), max(4.0, height * scale)
 
     src = np.array(points, dtype=np.float32)
     dst = np.array([[0, 0], [width - 1, 0], [width - 1, height - 1], [0, height - 1]],

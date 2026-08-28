@@ -99,3 +99,69 @@ def test_degenerate_quad_returns_none_instead_of_raising():
     collapsed = [[0, 0], [0, 0], [0, 0], [0, 0]]
     assert geo.homography_to_unit(collapsed) is None
     assert geo.place_unit_rect(collapsed, [0.1, 0.1, 0.2, 0.2]) is None
+
+
+# --- flattening a label out of a full-resolution frame ----------------------
+
+def _big_frame_and_quad(label_w=2000, label_h=800, deg=21):
+    import math
+    import cv2
+    import numpy as np
+    frame = np.full((3672, 5496, 3), 60, np.uint8)
+    t = math.radians(deg)
+    c, s = math.cos(t), math.sin(t)
+    quad = [[2700 + x * c - y * s, 1800 + x * s + y * c]
+            for x, y in ((-label_w / 2, -label_h / 2), (label_w / 2, -label_h / 2),
+                         (label_w / 2, label_h / 2), (-label_w / 2, label_h / 2))]
+    cv2.fillPoly(frame, [np.array(quad, np.int32)], (230, 230, 225))
+    return frame, quad
+
+
+def test_capping_the_warp_shrinks_the_output_and_keeps_its_shape():
+    """warpPerspective costs what its destination costs, so flattening a
+    2000 px label at native size only to letterbox it down to 224 pays for
+    2000 px of warp to keep 224."""
+    from label_detections.core.imageio import rectify_quad
+
+    frame, quad = _big_frame_and_quad()
+    native = rectify_quad(frame, quad)
+    capped = rectify_quad(frame, quad, max_side=448)
+
+    assert max(native.shape[:2]) > 1900
+    assert max(capped.shape[:2]) == 448
+    # Aspect survives -- it is a real cue for the classifier, a tall trace tag
+    # against a wide spec plate.
+    native_aspect = native.shape[1] / native.shape[0]
+    capped_aspect = capped.shape[1] / capped.shape[0]
+    assert capped_aspect == pytest.approx(native_aspect, rel=0.02)
+
+
+def test_the_cap_never_enlarges_a_small_label():
+    """A 300 px label asked to fill 448 would be invented detail."""
+    from label_detections.core.imageio import rectify_quad
+
+    frame, quad = _big_frame_and_quad(label_w=300, label_h=120)
+    capped = rectify_quad(frame, quad, max_side=448)
+    assert max(capped.shape[:2]) == pytest.approx(300, abs=4)
+
+
+def test_no_cap_is_the_old_behaviour():
+    """Everything that stores artwork still gets the full-resolution flatten."""
+    from label_detections.core.imageio import rectify_quad
+
+    frame, quad = _big_frame_and_quad()
+    assert rectify_quad(frame, quad).shape == rectify_quad(frame, quad, max_side=0).shape
+
+
+def test_the_capped_crop_still_reads_the_same():
+    """The point of the crop is that a classifier can read what is printed on
+    it; a cheaper warp that blurred the print would be a false economy."""
+    import numpy as np
+    from label_detections.core.imageio import rectify_quad
+    from label_detections.core.classify_export import letterbox
+
+    frame, quad = _big_frame_and_quad()
+    native = letterbox(rectify_quad(frame, quad), 224)
+    capped = letterbox(rectify_quad(frame, quad, max_side=448), 224)
+    diff = np.abs(native.astype(np.int16) - capped.astype(np.int16))
+    assert diff.mean() < 4.0, "the cheaper warp changed the crop materially"

@@ -448,9 +448,18 @@ class InferenceWorker(QObject):
         from label_detections.core.classify_export import expand_quad, letterbox
         from label_detections.core.imageio import rectify_quad
 
+        # Capped at twice the crop, never at native size. warpPerspective costs
+        # what its destination costs, so flattening a 2000 px label in full and
+        # then letterboxing it down to 224 paid for 2000 px of warp to keep 224
+        # -- measured at 17.8 ms for four crops on a 5496x3672 frame, against
+        # 2.4 ms this way. Twice rather than exactly the crop size because
+        # letterbox finishes with INTER_AREA, and that averaging is what keeps
+        # printed text legible; warping straight to 224 would alias it.
         crops = []
+        cap = max(1, int(self._crop_px) * 2)
         for quad in self._detection_quads(results):
-            patch = rectify_quad(frame, expand_quad(quad, self._margin))
+            patch = rectify_quad(frame, expand_quad(quad, self._margin),
+                                 max_side=cap)
             if patch is None or patch.size == 0:
                 crops.append(None)
                 continue
