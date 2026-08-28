@@ -3682,60 +3682,86 @@ class MainWindow(QMainWindow):
                 # over, the frame decides -- by reading it and seeing which
                 # reading says what it should.
                 ann_logic.apply_reference_regions(
-                    box, label, flipped=self._label_is_flipped(box, label))
+                    box, label, turn=self._label_turn(box, label))
         return boxes
-    def _label_is_flipped(self, box: dict, label, frame=None) -> bool:
-        """Is this label presented upside down in this frame?
+    def _label_turn(self, box: dict, label, frame=None) -> int:
+        """Which quarter turn of this box's corners is the label's own reading.
 
-        Only asked where the library says it can be. A label with a fixed
-        rotation is never turned over, and the read this would cost is a read
-        for an answer already known.
+        The detector cannot say. Its oriented box reports an angle, but
+        Ultralytics puts ground-truth corners through ``cv2.minAreaRect`` when
+        it trains and regularises predictions into a quarter-turn range, so the
+        model is never shown which end of a label is its top. Proportion rules
+        out the quarter turns whose shape is wrong; the two that remain are the
+        same shape and differ by a half turn.
 
-        Decided by reading, because nothing else can decide it: four corners
-        are the same corners whichever way up the printing is. Whichever
-        orientation produces the code or text this label is supposed to carry
-        is the one it was presented in. Neither, and it stays upright -- the
-        regions then land where the geometry says, which is no worse than
-        before and visibly wrong rather than confidently wrong.
+        So it is settled by looking. The artwork is the label the right way up
+        by definition -- somebody drew its outline on it -- and flattening the
+        detection each way round and scoring it against that picture answers
+        directly, in about a millisecond, without reading anything. That last
+        part matters: the frames where this goes wrong are often the ones where
+        the print is too blurred or too small to read.
+
+        Reading is still better evidence where it works, so it settles what the
+        comparison leaves close, and only where the library says the label may
+        arrive turned over. Neither, and proportion's best guess stands.
+        """
+        from label_detections.core import artwork as artwork_logic
+        from label_detections.core import code_reader
+        from label_detections.core import geometry as geo
+
+        if frame is None:
+            frame = self.last_raw
+        quad = ann_logic.box_polygon(box)
+        aspect = reference_logic.aspect_of(label)
+        turns = geo.candidate_turns(quad, aspect)
+        if frame is None or len(quad) < 4:
+            return turns[0]
+
+        turn, score, margin = artwork_logic.best_turn(
+            frame, quad, artwork_logic.load(label), aspect=aspect,
+            region=label.match_region() if hasattr(label, "match_region") else ())
+        if artwork_logic.settled(score, margin):
+            return turn
+
+        if str(getattr(label, "rotation_policy", "") or "") in code_reader.FLIPPABLE:
+            read = self._read_turn(box, label, frame, turns)
+            if read is not None:
+                return read
+        return turns[0]
+
+    def _read_turn(self, box: dict, label, frame, turns) -> int | None:
+        """Which of these readings produces what the label is supposed to say.
+
+        The low-level readers, not ``read_label``: that one settles the quad
+        itself, which normalises the reading being tested straight back out and
+        reads the same way up twice.
         """
         from label_detections.core import code_reader, codes as code_logic
         from label_detections.core import geometry as geo
         from label_detections.core import text_read as text_logic, text_reader
 
-        if str(getattr(label, "rotation_policy", "") or "") not in code_reader.FLIPPABLE:
-            return False
-        if frame is None:
-            frame = self.last_raw
         quad = ann_logic.box_polygon(box)
-        if frame is None or len(quad) < 4:
-            return False
-
-        specs = code_reader.specs_from(label)
+        specs = code_logic.demanded(code_reader.specs_from(label))
         wanted = [p.lstrip("^").rstrip("$")
-                  for p in (getattr(spec, "pattern", "")
-                            for spec in code_logic.demanded(specs)) if p]
+                  for p in (getattr(spec, "pattern", "") for spec in specs) if p]
         fields = text_reader.fields_from(label)
         expected = text_logic.expected_for([label])
-        aspect = reference_logic.aspect_of(label)
-        for flipped in (False, True):
-            # The low-level readers, not read_label: read_label settles the
-            # quad itself, which normalises the choice being tested straight
-            # back out and reads the same way up twice.
-            settled = geo.oriented(quad, flipped, aspect)
+        settled = geo.order_quad(quad)
+        for turn in turns:
+            corners = geo.turn_quad(settled, turn)
             if wanted:
-                reads = code_reader.read_oriented(
-                    frame, settled, code_logic.demanded(specs))
+                reads = code_reader.read_oriented(frame, corners, specs)
                 if any(code_logic.matches(pattern, text)
                        for read in reads for text in read.candidates()
                        for pattern in wanted):
-                    return flipped
+                    return turn
             if expected and text_logic.demanded(fields):
-                reads = text_reader.read_oriented(frame, settled, fields)
+                reads = text_reader.read_oriented(frame, corners, fields)
                 joined = " ".join(read.text for read in reads)
                 _who, score, _runner = text_logic.best_match(joined, expected)
                 if score >= text_logic.MIN_SIMILARITY:
-                    return flipped
-        return False
+                    return turn
+        return None
 
     def _refresh_library_label(self) -> None:
         """Show the active library path, how it was chosen, and any pending change."""
@@ -5724,10 +5750,9 @@ class MainWindow(QMainWindow):
         So the library is re-read instead. Only regions placed from the
         reference are replaced; anything else on the box is left alone.
 
-        ``frame`` may be an image or a callable returning one, and is only ever
-        asked for when a label that may arrive turned over is actually present
-        -- reading a frame to decide which way up it was is not worth doing for
-        a label whose rotation is fixed.
+        ``frame`` may be an image or a callable returning one, and is asked for
+        once at most: deciding which way up a label was presented means looking
+        at the pixels, but only if there is a box here worth looking for.
         """
         pixels = frame
         asked = not callable(frame)
@@ -5749,12 +5774,10 @@ class MainWindow(QMainWindow):
             label = known[label_id]
             if label is None:
                 continue
-            flippable = (str(getattr(label, "rotation_policy", "") or "")
-                         in code_reader.FLIPPABLE)
-            flipped = self._label_is_flipped(box, label, _frame()) if flippable else False
             before = list(ann_logic.regions(box))
             ann_logic.apply_reference_regions(
-                box, label, overwrite=True, flipped=flipped)
+                box, label, overwrite=True,
+                turn=self._label_turn(box, label, _frame()))
             if ann_logic.regions(box) != before:
                 changed += 1
         return changed

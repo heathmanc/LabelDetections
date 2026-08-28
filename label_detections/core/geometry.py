@@ -116,9 +116,21 @@ def flip_quad(quad: Quad) -> Quad:
     it is decided by reading the label and seeing which one produces the
     expected code or text.
     """
+    return turn_quad(quad, 2)
+
+
+def turn_quad(quad: Quad, turn: int) -> Quad:
+    """The same four corners with the corner order rotated by ``turn`` quarters.
+
+    One quarter turn moves which pair of edges reads as the width; two is a
+    half turn, the label the other way up. Rotating the order never re-winds
+    the quad, so a clockwise quad stays clockwise and nothing comes out
+    mirrored.
+    """
     if len(quad) != 4:
         return list(quad)
-    return [list(quad[2]), list(quad[3]), list(quad[0]), list(quad[1])]
+    turn = int(turn) % 4
+    return [list(quad[(turn + i) % 4]) for i in range(4)]
 
 
 SQUARE_TOL = 1.15
@@ -161,19 +173,34 @@ def align_quad(quad: Quad, aspect: float) -> Quad:
     reading the label. Square-ish shapes are left alone: there is no proportion
     to match, so there is nothing to learn.
     """
+    return turn_quad(order_quad(quad), candidate_turns(quad, aspect)[0])
+
+
+def candidate_turns(quad: Quad, aspect: float) -> list[int]:
+    """Which quarter turns of an ordered quad could be the label's own reading.
+
+    Two of them when the label's proportions say which pair of edges is its
+    width: that pair, and the same pair a half turn round. Geometry cannot
+    choose between those two -- they are the same shape, and no arrangement of
+    four corners says which way up printing is -- so both come back, best guess
+    first, for something that can look at the pixels to decide.
+
+    All four when the shape decides nothing: no artwork to compare against, or
+    a label too square for its proportions to mean anything.
+    """
     settled = order_quad(quad)
     own = quad_aspect(settled)
-    if aspect <= 0 or own <= 0:
-        return settled
+    if (aspect <= 0 or own <= 0
+            or max(own, 1.0 / own) < SQUARE_TOL
+            or max(aspect, 1.0 / aspect) < SQUARE_TOL):
+        return [0, 1, 2, 3]
     if (own >= 1.0) == (aspect >= 1.0):
-        return settled
-    if max(own, 1.0 / own) < SQUARE_TOL or max(aspect, 1.0 / aspect) < SQUARE_TOL:
-        return settled
-    # Both +1 and +3 swap width for height and differ by 180 degrees. Start
-    # from whichever of them sits nearer the image's top-left, so the choice is
-    # repeatable, and let ``flipped`` carry the half-turn it cannot see.
-    first = 1 if (settled[1][0] + settled[1][1]) <= (settled[3][0] + settled[3][1]) else 3
-    return [list(settled[(first + i) % 4]) for i in range(4)]
+        return [0, 2]
+    # Both +1 and +3 swap width for height and differ by a half turn. Lead with
+    # whichever sits nearer the image's top-left, so a caller with nothing
+    # better to go on makes a repeatable choice.
+    return ([1, 3] if (settled[1][0] + settled[1][1]) <= (settled[3][0] + settled[3][1])
+            else [3, 1])
 
 
 def quad_centroid(quad: Quad) -> tuple[float, float]:

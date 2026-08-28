@@ -283,8 +283,6 @@ def test_opening_an_image_places_its_regions_from_the_library():
     """The regions on an image are derived from the library, not decisions
     stored on the image -- so a sidecar written before a field existed shows
     the field the moment it is opened, without anything being re-run."""
-    from label_detections.core import persistence
-
     win = _window()
     label = _label(win, "refann_onload")
     win._save_reference(label, _result())
@@ -318,3 +316,72 @@ def test_opening_an_image_leaves_a_stranger_alone():
     stranger = [b for b in win.canvas._snapshot_boxes()
                 if b.get("label_id") == "not_in_the_library"][0]
     assert not stranger.get("regions")
+
+
+# --- orientation resolved by looking at the label ----------------------------
+
+def _asymmetric():
+    """Artwork with a clearly different end from the other, so which way up it
+    was presented is answerable from the pixels alone."""
+    art = np.full((90, 300, 3), 235, np.uint8)
+    art[:, :90] = (30, 30, 30)
+    cv2.putText(art, "PC680", (110, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 0), 2)
+    return art
+
+
+def _photo_of(art, turns):
+    label = art.copy()
+    for _ in range(turns % 4):
+        label = cv2.rotate(label, cv2.ROTATE_90_CLOCKWISE)
+    h, w = label.shape[:2]
+    frame = np.full((h + 200, w + 200, 3), 175, np.uint8)
+    frame[100:100 + h, 100:100 + w] = label
+    quad = [[100.0, 100.0], [100.0 + w, 100.0],
+            [100.0 + w, 100.0 + h], [100.0, 100.0 + h]]
+    return frame, quad
+
+
+@pytest.mark.parametrize("turns", [0, 1, 2, 3])
+def test_the_window_works_out_which_way_up_from_the_artwork(turns):
+    """Not from the detector's angle, which reports the same number for all
+    four of these, and not from reading, which the label may not support."""
+    win = _window()
+    label_id = f"refann_turn_{turns}"
+    label = _label(win, label_id)
+    art = _asymmetric()
+    win._save_reference(label, _result(artwork=art, frame=_photo_of(art, 0)[0],
+                                       quad=_photo_of(art, 0)[1]))
+
+    label = win.library.get(label_id)
+    frame, quad = _photo_of(art, turns)
+    box = {"kind": "obb", "label": "spec_plate", "label_id": label_id,
+           "points": [list(p) for p in quad]}
+    assert win._label_turn(box, label, frame) == turns
+
+
+def test_the_field_lands_on_the_printing_whichever_way_up():
+    """The end of it: a region drawn over the part number on the artwork sits
+    over the part number on the image, at every quarter turn."""
+    from label_detections.core import annotations as ann
+
+    win = _window()
+    label = _label(win, "refann_lands")
+    art = _asymmetric()
+    upright, quad0 = _photo_of(art, 0)
+    # A field over the dark block, which is the end that is easy to check for.
+    field = dict(FIELD, region=[0.0, 0.0, 0.30, 1.0])
+    win._save_reference(label, _result(artwork=art, frame=upright, quad=quad0,
+                                       text_fields=[field]))
+    label = win.library.get("refann_lands")
+
+    for turns in (0, 1, 2, 3):
+        frame, quad = _photo_of(art, turns)
+        box = {"kind": "obb", "label": "spec_plate", "label_id": "refann_lands",
+               "points": [list(p) for p in quad]}
+        ann.apply_reference_regions(
+            box, label, overwrite=True, turn=win._label_turn(box, label, frame))
+        placed = ann.regions(box, "text")[0]["points"]
+        xs = [int(x) for x, _ in placed]
+        ys = [int(y) for _, y in placed]
+        patch = frame[min(ys) + 4:max(ys) - 4, min(xs) + 4:max(xs) - 4]
+        assert patch.mean() < 60, f"a quarter turn of {turns} missed the dark end"

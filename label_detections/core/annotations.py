@@ -211,7 +211,8 @@ def read_value(box: dict, role: str) -> str | None:
 
 # --- reference-anchored placement ------------------------------------------
 
-def place_label_regions(box: dict, label_def, flipped: bool = False) -> list[dict]:
+def place_label_regions(box: dict, label_def, flipped: bool = False,
+                        turn: int | None = None) -> list[dict]:
     """Sub-regions for a label, positioned from its library artwork.
 
     This is the shortcut that removes most hand drawing, at labeling time and at
@@ -227,10 +228,19 @@ def place_label_regions(box: dict, label_def, flipped: bool = False) -> list[dic
     the artwork's aspect is for: fractions of a landscape label laid onto a
     quad read as portrait come out rotated a quarter turn. See
     ``geometry.align_quad``.
+
+    ``turn`` is that question already answered -- by comparing the detection
+    against the reference artwork, or by reading it -- and says which quarter
+    turn of the corners is the label's own. Without one, proportion picks the
+    shape and ``flipped`` carries the half turn it cannot see.
     """
     from . import reference as reference_logic
 
-    quad = geo.oriented(box_polygon(box), flipped, reference_logic.aspect_of(label_def))
+    corners = box_polygon(box)
+    if turn is None:
+        quad = geo.oriented(corners, flipped, reference_logic.aspect_of(label_def))
+    else:
+        quad = geo.turn_quad(geo.order_quad(corners), turn)
 
     out: list[dict] = []
     for code in getattr(label_def, "codes", []) or []:
@@ -258,13 +268,13 @@ def place_label_regions(box: dict, label_def, flipped: bool = False) -> list[dic
 
 
 def apply_reference_regions(box: dict, label_def, *, overwrite: bool = False,
-                            flipped: bool = False) -> dict:
+                            flipped: bool = False, turn: int | None = None) -> dict:
     """Attach reference-placed regions to a box, keeping hand-drawn ones.
 
     An operator who nudged a region because the artwork drifted has produced
     better data than the library has; only ``overwrite`` throws that away.
     """
-    placed = place_label_regions(box, label_def, flipped)
+    placed = place_label_regions(box, label_def, flipped, turn)
     if not placed:
         return box
     existing = regions(box)
@@ -283,7 +293,8 @@ def apply_reference_regions(box: dict, label_def, *, overwrite: bool = False,
 
 
 def refresh_reference_regions(data: dict | None, label_def, *,
-                              flipped: bool = False) -> int:
+                              flipped: bool = False,
+                              turn: int | None = None) -> int:
     """Re-place a label's regions on every box of it in one sidecar.
 
     Regions are attached when a box is auto-labelled, out of whatever the
@@ -305,7 +316,8 @@ def refresh_reference_regions(data: dict | None, label_def, *,
     changed = 0
     for box in boxes_for(data, label_id):
         before = json.dumps(regions(box), sort_keys=True)
-        apply_reference_regions(box, label_def, overwrite=True, flipped=flipped)
+        apply_reference_regions(box, label_def, overwrite=True, flipped=flipped,
+                                turn=turn)
         if json.dumps(regions(box), sort_keys=True) != before:
             changed += 1
     return changed
