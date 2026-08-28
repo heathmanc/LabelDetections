@@ -234,11 +234,60 @@ class InferenceWorker(QObject):
         # paid, removes the first-frame latency spike, and moves the risky call
         # into the one place already expected to take time, where the status
         # reads "Loading the model..." and the window stays live.
+        # Before the warm-up, so the very first inference on this thread runs
+        # the same way every later one will.
+        self._timing_note = self.unsynchronised_timing()
         self._warm_up()
 
         which = ("detector + classifier" if self._classifier is not None
                  else f"{task or 'detector'} only, no stage 2")
         self.loaded.emit(f"Loaded {which}: {self._path}\n{self._device_report()}")
+
+    @staticmethod
+    def unsynchronised_timing() -> str:
+        """Stop Ultralytics' profiler synchronising the accelerator.
+
+        Aimed at the exact frame three py-spy dumps agree on:
+
+            torch/cuda/__init__.py:604   _exchange_device      <- stopped here
+            torch/cuda/__init__.py:1161  synchronize
+            ultralytics/utils/ops.py:73  Profile.time
+            ultralytics/utils/ops.py:58  Profile.__enter__
+
+        Profile calls synchronize so that the milliseconds it reports are the
+        GPU's rather than the queue's. That is a stopwatch, not the work: the
+        model's forward pass does not switch device, and a synchronize for
+        timing is the only thing in the live path that does. On this machine --
+        a 5090 on WDDM also driving the desktop -- that call stops on the
+        worker thread and does not return, while the same call on the same
+        thread during warm-up completes.
+
+        The cost is honest and worth stating: the per-phase numbers become
+        wall-clock around asynchronous CUDA work, so they measure when calls
+        were issued rather than when the GPU finished. Total latency is
+        measured here and is unaffected. The readout says which it is showing.
+
+        Returns "" when applied, or a reason when the library no longer looks
+        the way this expects -- a patch that silently stops applying is worse
+        than one that never did.
+        """
+        try:
+            from ultralytics.utils import ops
+        except Exception as exc:
+            return f"Ultralytics' ops module could not be imported: {exc}"
+        profile = getattr(ops, "Profile", None)
+        if profile is None or not hasattr(profile, "time"):
+            return "Ultralytics' Profile no longer looks the way this expects."
+        if getattr(profile, "_lv_unsynchronised", False):
+            return ""
+        import time as _time
+
+        def _time_without_sync(self):
+            return _time.perf_counter()
+
+        profile.time = _time_without_sync
+        profile._lv_unsynchronised = True
+        return ""
 
     def _warm_up(self) -> None:
         """One inference here, made as close to the live call as it can be.
@@ -457,6 +506,9 @@ class InferenceWorker(QObject):
         # them for the library's own three.
         speed["stage2"] = stage2_ms
         speed["readout"] = readout_ms
+        # So the readout can say the phase numbers are unsynchronised rather
+        # than let them be read as GPU time.
+        speed["_unsynced"] = 1.0 if not getattr(self, "_timing_note", "x") else 0.0
         self.result.emit(items, time.perf_counter() - started, speed)
 
     def _detection_quads(self, results):

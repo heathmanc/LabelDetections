@@ -626,9 +626,15 @@ def phase_line(speed: dict, total_ms: float = 0.0) -> str:
         return ""
     order = ("preprocess", "inference", "postprocess", "stage2", "readout")
     parts = [f"{name} {float(speed[name]):.0f}" for name in order if name in speed]
+    # Ultralytics normally synchronises the accelerator around each phase so
+    # its numbers are the GPU's. That synchronize is what stopped on the worker
+    # thread, so it is off -- and numbers taken without it say when a call was
+    # issued, not when the GPU finished. Worth one word rather than being
+    # quietly wrong.
+    unsynced = bool(speed.get("_unsynced"))
     if not parts:
         return ""
-    line = "   ms: " + "  ".join(parts)
+    line = "   ms: " + "  ".join(parts) + ("  (issued, not GPU)" if unsynced else "")
     # What none of the phases account for. Printed rather than left implicit:
     # a breakdown that adds to 12 next to a total of 71 is the single most
     # useful thing on this readout, and it was invisible.

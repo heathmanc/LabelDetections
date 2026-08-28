@@ -1980,3 +1980,67 @@ def test_a_basler_frame_is_copied_out_before_the_sdk_takes_it_back():
     # The frame must be untouched by what happened to the SDK's buffer.
     assert frame.max() == 0, "the frame is a view into memory the SDK reclaimed"
     assert not np.shares_memory(frame, sdk_buffer)
+
+
+# --- the profiler's synchronize is the frame that hangs ---------------------
+
+@ui
+def test_the_profiler_stops_synchronising_the_accelerator():
+    """Three py-spy dumps agree on the frame: Profile.time -> synchronize ->
+    _exchange_device. That synchronize exists so Ultralytics' milliseconds are
+    the GPU's rather than the queue's -- a stopwatch, not the work."""
+    from label_detections.ui.live_detect import InferenceWorker
+
+    ops = pytest.importorskip("ultralytics.utils.ops")
+    original = ops.Profile.time
+    had_flag = getattr(ops.Profile, "_lv_unsynchronised", False)
+    try:
+        ops.Profile.time = original
+        ops.Profile._lv_unsynchronised = False
+
+        synced = []
+
+        class FakeAccelerator:
+            def synchronize(self, device):
+                synced.append(device)
+
+        assert InferenceWorker.unsynchronised_timing() == "", "did not apply"
+
+        profile = ops.Profile(device="cuda:0")
+        profile.accelerator = FakeAccelerator()
+        with profile:
+            pass
+        assert synced == [], "the accelerator was still synchronised for timing"
+        assert isinstance(profile.dt, float) and profile.dt >= 0.0, (
+            "timing stopped working entirely")
+    finally:
+        ops.Profile.time = original
+        ops.Profile._lv_unsynchronised = had_flag
+
+
+@ui
+def test_it_says_so_rather_than_silently_failing_to_apply():
+    """A patch that stops applying because the library moved is worse than one
+    that never did: the numbers would quietly go back to being synchronised and
+    nobody would know which they were looking at."""
+    from label_detections.ui.live_detect import InferenceWorker
+    import label_detections.ui.live_detect as mod
+
+    ops = pytest.importorskip("ultralytics.utils.ops")
+    real = ops.Profile
+    try:
+        del ops.Profile
+        why = InferenceWorker.unsynchronised_timing()
+        assert why and "no longer looks" in why
+    finally:
+        ops.Profile = real
+
+
+def test_the_readout_says_the_numbers_are_not_gpu_time():
+    line = ld.phase_line({"preprocess": 3.0, "inference": 7.0,
+                          "postprocess": 2.0, "_unsynced": 1.0}, total_ms=12.0)
+    assert "issued, not GPU" in line
+
+    synced = ld.phase_line({"preprocess": 3.0, "inference": 7.0,
+                            "postprocess": 2.0}, total_ms=12.0)
+    assert "issued, not GPU" not in synced
