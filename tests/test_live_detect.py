@@ -548,14 +548,20 @@ def test_a_track_keeps_the_classifier_confidence_apart_from_the_box_one():
     assert track.has_identity
 
 
-def test_the_plate_names_the_box_number_so_the_pair_is_not_a_contradiction():
-    """On the plate, not in the readout: the plate is what an operator reads
-    off a moving part, and that is where the two numbers have to agree."""
-    items = ld.apply_identities([{"name": "label", "conf": 0.91}],
+def test_the_box_number_is_named_when_it_is_shown_at_all():
+    """Two bare numbers that disagree read as a bug -- the same battery saying
+    1.00 on the plate and 0.91 in the readout. They measure different things,
+    so when the box number is shown it is shown with its name on it.
+
+    Shown only on request: it is stage 1's answer to "is there a label here",
+    which is a question asked while tuning, not while parts go past."""
+    plain = ld.apply_identities([{"name": "label", "conf": 0.91}],
                                 [("sp_g31", 1.00)])
-    plate = items[0]["label"]
-    assert plate.startswith("sp_g31 1.00")
-    assert "box 0.91" in plate
+    assert plain[0]["label"] == "sp_g31 1.00"
+
+    detailed = ld.apply_identities([{"name": "label", "conf": 0.91}],
+                                   [("sp_g31", 1.00)], detail=True)
+    assert detailed[0]["label"] == "sp_g31 1.00  box 0.91"
 
 
 def test_the_readout_stays_one_id_and_one_held_average():
@@ -597,9 +603,8 @@ def test_the_readout_and_the_plate_report_the_same_battery_the_same_way():
                                  ids=[7])])
         items = ld.apply_identities(items, [(win.label_id, 1.0)])
         win._on_live_result(items, 0.02)
-        # The plate the operator reads carries both, so the pair is legible
-        # where it is actually read.
-        assert items[0]["label"] == f"{win.label_id} 1.00  box 0.91"
+        # The plate the operator reads carries the identity and how sure of it.
+        assert items[0]["label"] == f"{win.label_id} 1.00"
         # And stage 2's confidence still reaches the book, which is what makes
         # a held identity average possible at all.
         assert win._live_tracks.rows()[0].mean_identity == pytest.approx(1.0)
@@ -854,9 +859,9 @@ def test_identities_land_on_the_boxes_they_belong_to():
              {"name": "label", "track_id": 7, "conf": 0.8}]
     out = ld.apply_identities(items, [("2220-9199", 0.97), ("warn-g31-en", 0.88)])
     assert out[0]["name"] == "2220-9199" and out[1]["name"] == "warn-g31-en"
-    # The plate is the id and the two confidences, nothing else -- the track id
-    # is still on the item for the readout to group by, just not drawn on it.
-    assert out[0]["label"] == "2220-9199 0.97  box 0.90"
+    # The plate is the id and how sure of it, nothing else -- the track id is
+    # still on the item for the readout to group by, just not drawn on it.
+    assert out[0]["label"] == "2220-9199 0.97"
     assert out[0]["track_id"] == 3
     # The detector's own answer is kept, so a disagreement stays visible.
     assert out[0]["detector_name"] == "label"
@@ -998,14 +1003,24 @@ def test_weights_are_routed_by_the_stage_that_made_them():
 
 def test_a_silent_view_says_why_rather_than_showing_nothing():
     """A live view finding nothing looks the same whether the camera is on a
-    wall, the threshold is too high, or the wrong model is loaded."""
+    wall, the threshold is too high, or the wrong model is loaded.
+
+    One line, though. Listing all four causes every time turned a quiet camera
+    into the biggest thing in the pane; the full list is a hover away."""
     assert ld.quiet_hint(3, 0.45, 1024, False) == ""
-    hint = ld.quiet_hint(ld.QUIET_FRAMES + 5, 0.45, 1024, False)
-    assert "Confidence is 0.45" in hint
-    assert "DETECTOR run, not the classifier" in hint
-    assert "stage 2 classifier is set" in hint
-    # With stage 2 configured, that last line is noise.
-    assert "stage 2 classifier is set" not in ld.quiet_hint(20, 0.45, 1024, True)
+
+    no_stage2 = ld.quiet_hint(ld.QUIET_FRAMES + 5, 0.45, 1024, False)
+    assert "no stage 2 classifier" in no_stage2
+    assert len(no_stage2.strip().splitlines()) == 1
+
+    # With stage 2 configured, the threshold is the next thing to look at.
+    assert "0.45" in ld.quiet_hint(20, 0.45, 1024, True)
+    # And with a sane threshold, the size the model trained at.
+    assert "1024" in ld.quiet_hint(20, 0.20, 1024, True)
+
+    # Every cause is still written down, for the readout to carry as a tooltip.
+    for cause in ("Confidence", "Image size", "detector", "stage 2"):
+        assert cause in ld.QUIET_CAUSES
 
 
 def test_the_start_floor_is_adjustable_rather_than_fixed():
@@ -1672,7 +1687,7 @@ def test_the_plate_carries_the_id_and_the_confidences_and_nothing_else():
     assert items[0]["track_id"] == 5
 
     identified = ld.apply_identities(items, [("ODX-Long", 0.87)])
-    assert identified[0]["label"] == "ODX-Long 0.87  box 0.91"
+    assert identified[0]["label"] == "ODX-Long 0.87"
     assert identified[0]["track_id"] == 5
     assert "#" not in identified[0]["label"] and "5" not in identified[0]["label"]
 

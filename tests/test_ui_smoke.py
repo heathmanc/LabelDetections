@@ -409,28 +409,60 @@ def test_the_built_in_guide_describes_the_tool_that_exists():
     assert "battery_side" in text
 
 
-def test_every_tools_action_is_reachable_without_the_menu_bar():
-    """The menu bar is hidden, so a menu action with no shortcut and no button
-    is dead UI. Two diagnostics shipped that way and could not be opened at
-    all -- this is the check that would have caught it."""
+def _menu_action_texts(win) -> set[str]:
+    """Every action reachable by walking down from the menu bar."""
+    seen: set[str] = set()
+
+    def walk(menu):
+        for action in menu.actions():
+            if action.menu() is not None:
+                walk(action.menu())
+            elif not action.isSeparator():
+                seen.add(action.text().replace("&&", "&").replace("&", ""))
+
+    walk(win.menuBar())
+    return seen
+
+
+def test_every_action_has_somewhere_to_be_clicked():
+    """A menu action with no shortcut, no menu and no button is dead UI. Two
+    diagnostics shipped that way and could not be opened at all.
+
+    The menu bar was hidden, which made a button the only home an action could
+    have -- and that is most of why the panes ran out of room. It is visible
+    now, so the invariant is that everything is reachable somehow, not that
+    everything has a button."""
     from PySide6.QtWidgets import QPushButton
 
     win = _window()
+    assert win.menuBar().isVisible() or not win.isVisible(), \
+        "the menu bar is where actions without a button live"
+
     buttons = {b.text() for b in win.findChildren(QPushButton)}
-    handlers = {b.text(): b for b in win.findChildren(QPushButton)}
+    in_menus = _menu_action_texts(win)
 
     for label, method in (("Check Label Scale", "show_label_scale_report"),
                           ("Check Variable Regions", "check_variable_regions")):
         assert label in buttons, f"{method} has no visible button"
 
-    # And every window-level action either carries a shortcut or has a button.
-    unreachable = []
-    for action in win.actions():
-        text = action.text().replace("&&", "&")
-        if action.shortcut().isEmpty() and text not in buttons:
-            unreachable.append(text)
-    assert not unreachable, f"unreachable with the menu bar hidden: {unreachable}"
-    assert handlers  # the lookup above is the real assertion
+    unreachable = [
+        text for text in
+        (a.text().replace("&&", "&") for a in win.actions())
+        if text not in buttons and text not in in_menus
+        and next(a for a in win.actions()
+                 if a.text().replace("&&", "&") == text).shortcut().isEmpty()
+    ]
+    assert not unreachable, f"no menu, no shortcut, no button: {unreachable}"
+
+
+def test_the_diagnostics_live_on_their_own_menu():
+    """They answer "why did that happen" rather than doing the job, and each
+    was a button on a pane somebody uses while working."""
+    win = _window()
+    in_menus = _menu_action_texts(win)
+    for action in ("Performance details", "Show detail on detection plates",
+                   "Test read on this image", "What can be verified"):
+        assert action in in_menus, f"{action} is not on a menu"
 
 
 def test_the_shortcut_sheet_is_generated_not_typed():

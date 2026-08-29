@@ -437,12 +437,16 @@ def test_a_flat_space_shows_the_novel_label_sitting_well_inside():
 
 
 def test_the_note_reaches_the_plate_the_operator_reads():
-    """It is worth nothing in a tuple nobody prints."""
+    """It is worth nothing in a tuple nobody prints.
+
+    And it is never hidden with the diagnostics: a refusal whose reason cannot
+    be seen is indistinguishable from a bug. The note carries "WRONG CODE" and
+    "code ok" too, which are answers rather than measurements."""
     from label_detections.core import live_detect as ld
 
     items = ld.apply_identities([{"name": "label", "conf": 0.96}],
                                 [("unknown", 0.99, "nov 2.40x")])
-    assert items[0]["label"] == "unknown  box 0.96  nov 2.40x"
+    assert items[0]["label"] == "unknown  nov 2.40x"
     assert items[0]["novelty"] == "nov 2.40x"
 
 
@@ -451,5 +455,5 @@ def test_an_identity_with_no_note_leaves_the_plate_as_it_was():
 
     items = ld.apply_identities([{"name": "label", "conf": 0.96}],
                                 [("PC680", 0.99, "")])
-    assert items[0]["label"] == "PC680 0.99  box 0.96"
+    assert items[0]["label"] == "PC680 0.99"
     assert "novelty" not in items[0]

@@ -557,7 +557,8 @@ class InferenceWorker(QObject):
         readout_started = time.perf_counter()
         try:
             from label_detections.core import live_detect as logic
-            items = logic.apply_identities(extract_items(results), identities)
+            items = logic.apply_identities(extract_items(results), identities,
+                                           detail=self._novelty_debug)
         except Exception as exc:
             self.failed.emit(f"Could not read the results: {type(exc).__name__}: {exc}")
             return

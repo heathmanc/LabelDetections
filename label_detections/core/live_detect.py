@@ -184,21 +184,35 @@ def quiet_hint(empty_frames: int, conf: float, imgsz: int,
     A live view that finds nothing looks identical whether the camera is
     pointed at a wall, the threshold is too high, or a classifier was loaded
     into the detector slot. The operator cannot tell those apart from an empty
-    screen, so the readout names the usual causes rather than leaving them to
-    be guessed one at a time.
+    screen, so this names the likeliest one rather than leaving all four to be
+    guessed at.
+
+    One line, not five. It used to list every cause every time, which turned a
+    quiet camera into the biggest thing in the pane -- and the full list is
+    still a hover away on the readout.
     """
     if empty_frames < QUIET_FRAMES:
         return ""
-    lines = [f"", f"Nothing found in {empty_frames} frames. Usual causes:",
-             f"  - Confidence is {conf:.2f}. A fresh model often needs 0.25 to "
-             f"show anything.",
-             f"  - Image size {imgsz} should match what the model trained at.",
-             "  - Is the model in the Test Models field the DETECTOR run, not "
-             "the classifier?"]
     if not has_classifier:
-        lines.append("  - Under a two-stage export, boxes read 'label' until a "
-                     "stage 2 classifier is set on this tab.")
-    return "\n".join(lines)
+        why = "no stage 2 classifier set, so boxes can only read 'label'"
+    elif conf > 0.25:
+        why = f"confidence {conf:.2f} may be too high for a fresh model"
+    else:
+        why = f"check image size {imgsz} matches what the model trained at"
+    return f"\n\nNothing found in {empty_frames} frames -- {why}."
+
+
+QUIET_CAUSES = (
+    "A live view showing nothing looks the same whichever of these it is:\n\n"
+    "  - Confidence is too high. A fresh model often needs 0.25 to show "
+    "anything at all.\n"
+    "  - Image size does not match what the model trained at.\n"
+    "  - The model in the Test Models field is the classifier run, not the "
+    "detector.\n"
+    "  - Under a two-stage export, boxes read 'label' until a stage 2 "
+    "classifier is set.\n"
+    "  - The camera is pointed at something with no labels in it."
+)
 
 
 def throughput_note(rolling: "Rolling", interval_s: float = MIN_INTERVAL_S,
@@ -238,12 +252,26 @@ def throughput_note(rolling: "Rolling", interval_s: float = MIN_INTERVAL_S,
     return f"   (model could run ~{possible:.0f}/s; the limit is {cause}, not the GPU)"
 
 
+def speed_label(rolling: Rolling) -> str:
+    """The one speed number, for a label of its own beside the readout.
+
+    Everything else the timings can say -- the phase breakdown, which ceiling
+    is holding the rate down, whether the model or the CPU is the slow part --
+    is a question asked while tuning a rig, not while watching parts go past.
+    It answered that question in five lines on every frame, above the
+    detections somebody was actually reading. Those lines still exist; they
+    live in Performance details, one menu item away.
+    """
+    if not rolling.mean_ms:
+        return "Inference: --"
+    return f"Inference: {rolling.mean_ms:.0f} ms  ({rolling.rate:.1f}/s)"
+
+
 def frame_summary(counts: dict[str, int], label_id: str,
-                  rolling: Rolling) -> str:
-    """The readout under the live view."""
+                  rolling: Rolling | None = None) -> str:
+    """The readout under the live view: what was found, and nothing else."""
     total = sum(counts.values())
-    lines = [f"{total} detection(s)   {rolling.mean_ms:.0f} ms   "
-             f"{rolling.rate:.1f}/s"]
+    lines = [f"{total} detection(s)"]
     # Only when it is actually there. The label open in the labeling tab is
     # not what the operator is presenting -- a line saying it is missing is a
     # complaint about the wrong thing, on every frame of every other label.
@@ -399,11 +427,11 @@ def track_line(track: Track) -> str:
     return f"{track.name} {track.mean_conf:.2f}"
 
 
-def track_summary(book: TrackBook, label_id: str, rolling: Rolling) -> str:
-    """The readout when tracking is on."""
+def track_summary(book: TrackBook, label_id: str,
+                  rolling: Rolling | None = None) -> str:
+    """The readout when tracking is on. Speed lives in its own label."""
     rows = book.rows()
-    lines = [f"{len(rows)} tracked   {rolling.mean_ms:.0f} ms   "
-             f"{rolling.rate:.1f}/s"]
+    lines = [f"{len(rows)} tracked"]
     # Marked when present, silent when not: the open label is not necessarily
     # the one in front of the camera, and "NOT TRACKED" both named the wrong
     # mechanism -- nothing had lost a track -- and filled the readout with a
@@ -538,7 +566,8 @@ def identify(name: str, conf: float, floor: float = DEFAULT_IDENTITY_FLOOR) -> t
     return str(name), conf
 
 
-def apply_identities(items: list[dict], identities) -> list[dict]:
+def apply_identities(items: list[dict], identities,
+                     detail: bool = False) -> list[dict]:
     """Put stage 2's answers onto stage 1's boxes, by position.
 
     Degrades to leaving the detector's own class name in place when the two
@@ -566,26 +595,31 @@ def apply_identities(items: list[dict], identities) -> list[dict]:
         merged["detector_name"] = item.get("name", "")
         merged["name"] = name
         merged["identity_conf"] = float(conf)
-        # Both numbers, on the plate, because the plate is what gets read while
-        # parts move past. Stage 2 first -- it is the one that names the label
-        # -- and stage 1's box confidence after it, said out loud.
+        # What the label is, and how sure of it -- and nothing else, unless
+        # somebody asks. A plate is read at a glance off a moving part, and
+        # every extra field is width taken from the picture underneath it.
         #
-        # Naming the second one is the whole point. Two bare numbers that
-        # disagree read as a bug: the same battery said 1.00 on the box and
-        # 0.91 in the readout. They measure different things. Stage 2 answers
-        # "which label is this", and a converged classifier over a handful of
-        # classes says 1.00 to that almost always. Stage 1 answers "is there a
-        # label here, and is this its outline", and that is the number that
-        # moves -- so it is worth the width it costs.
-        box = float(item.get("conf", 0.0))
         # An unknown carries no identity confidence worth printing. The number
         # the classifier produced belongs to a class the crop was just refused
         # for, and "unknown 1.00" reads as certainty about the wrong thing.
-        merged["label"] = (f"unknown  box {box:.2f}" if name == UNKNOWN
-                           else f"{name} {conf:.2f}  box {box:.2f}")
+        box = float(item.get("conf", 0.0))
+        merged["label"] = ("unknown" if name == UNKNOWN
+                           else f"{name} {conf:.2f}")
+        # The note is never a diagnostic, so it is never hidden: it carries
+        # "code ok", "WRONG CODE", and the reason a crop was refused. Those are
+        # answers. The novelty distance on an ACCEPTED box is the diagnostic,
+        # and it is already gated where it is produced.
         if note:
             merged["novelty"] = note
             merged["label"] += f"  {note}"
+        if detail:
+            # Stage 1's box confidence, named rather than left as a second bare
+            # number: two numbers that disagree read as a bug. They measure
+            # different things -- stage 2 answers "which label is this", and a
+            # converged classifier over a handful of classes says 1.00 to that
+            # almost always; stage 1 answers "is there a label here, and is
+            # this its outline", which is the number that actually moves.
+            merged["label"] += f"  box {box:.2f}"
         out.append(merged)
     return out
 

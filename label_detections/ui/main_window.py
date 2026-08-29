@@ -458,6 +458,10 @@ class MainWindow(QMainWindow):
         nav_menu = menubar.addMenu("Navigate")
         capture_menu = menubar.addMenu("Capture")
         tools_menu = menubar.addMenu("Tools")
+        # Everything that answers "why did that happen" rather than doing the
+        # job. Each of these used to be a button on a pane somebody uses while
+        # working, competing for width with the controls that run the line.
+        diag_menu = menubar.addMenu("Diagnostics")
 
         undo_action = QAction("Undo", self)
         undo_action.setShortcut(QKeySequence.Undo)
@@ -658,6 +662,52 @@ class MainWindow(QMainWindow):
         shortcuts_action.triggered.connect(self.show_shortcuts_reference)
         tools_menu.addAction(shortcuts_action)
 
+        # --- Diagnostics ---------------------------------------------------
+        perf_action = QAction("Performance details", self)
+        perf_action.setToolTip(
+            "Camera, display and inference rates, the per-phase breakdown, and "
+            "which ceiling is holding the rate down.")
+        perf_action.triggered.connect(self.show_performance_details)
+        diag_menu.addAction(perf_action)
+
+        plate_detail_action = QAction("Show detail on detection plates", self)
+        plate_detail_action.setCheckable(True)
+        plate_detail_action.setChecked(self.live_novelty_debug_check.isChecked())
+        plate_detail_action.setToolTip(
+            "Adds stage 1's box confidence and the novelty distance to every "
+            "plate. Off, a plate is the label id and how sure of it.\n\n"
+            "A refusal always shows its reason whether this is on or not.")
+        plate_detail_action.toggled.connect(
+            self.live_novelty_debug_check.setChecked)
+        self.live_novelty_debug_check.toggled.connect(plate_detail_action.setChecked)
+        diag_menu.addAction(plate_detail_action)
+
+        diag_menu.addSeparator()
+
+        code_test_action = QAction("Test read on this image", self)
+        code_test_action.setToolTip(self.code_test_btn.toolTip())
+        code_test_action.triggered.connect(self.test_code_read)
+        diag_menu.addAction(code_test_action)
+
+        readiness_action = QAction("What can be verified", self)
+        readiness_action.setToolTip(
+            "Which labels can be checked against their printing, and which are "
+            "still resting on the classifier alone.")
+        readiness_action.triggered.connect(self._show_code_readiness)
+        diag_menu.addAction(readiness_action)
+
+        diag_menu.addSeparator()
+
+        delete_json_action = QAction("Delete saved JSON for this image", self)
+        delete_json_action.setToolTip(
+            "Throw away this image's labels and start it again.")
+        delete_json_action.triggered.connect(self.delete_saved_labels_confirmed)
+        diag_menu.addAction(delete_json_action)
+
+        problem_action = QAction("Find next unfinished image", self)
+        problem_action.triggered.connect(self.find_next_problem_image)
+        nav_menu.addAction(problem_action)
+
         # The menu bar is hidden (see below), and Qt does NOT dispatch the
         # shortcuts of actions that live only inside a hidden menu bar. Register
         # every shortcut action on the window itself so the keys keep working.
@@ -672,11 +722,16 @@ class MainWindow(QMainWindow):
             prelabel_action, next_queue_action, shortcuts_action,
             build_queue_action, assist_action, reference_action,
             variance_action, scale_action, live_detect_action, keep_frame_action,
-            keep_json_action,
+            keep_json_action, problem_action,
         ):
             self.addAction(action)
 
-        self.menuBar().setVisible(False)
+        # Visible. It was hidden because an early pass put every action loose
+        # on the bar, which Qt drew as a row of unrelated words; the fix for
+        # that was grouping them into menus, not hiding the result. Hidden, it
+        # left every action needing a button somewhere, which is most of why
+        # the panes ran out of room.
+        self.menuBar().setVisible(True)
 
     def _typing_in_text_field(self) -> bool:
         """True when a text-entry widget has focus.
@@ -2251,15 +2306,15 @@ class MainWindow(QMainWindow):
         """
         outer, w, layout = self._scrollable_tab()
 
-        info = QLabel(
-            "Runs the Test Models tab's model on the live camera. This is model "
-            "validation, not inspection: nothing here passes or fails a battery."
-        )
-        info.setWordWrap(True)
-        info.setStyleSheet("color: #9aa4b2;")
-        layout.addWidget(info)
-
         control_box = QGroupBox("Live detection")
+        control_box.setToolTip(
+            "Runs the Test Models tab's model on the live camera. This is model "
+            "validation, not inspection: nothing here passes or fails a "
+            "battery.\n\n"
+            "The detector is trained on label ids, so what it reports is the "
+            "same identity the recipe is written in -- no resolution step in "
+            "between. A label absent from the trained model cannot appear, "
+            "however clearly it is on the battery.")
         cv_ = QVBoxLayout(control_box)
         cv_.setContentsMargins(8, 8, 8, 8)
         cv_.setSpacing(4)
@@ -2376,6 +2431,10 @@ class MainWindow(QMainWindow):
         floor_row.addWidget(self.live_floor_spin, 1)
         cv_.addLayout(floor_row)
 
+        # Not added to the pane: it answers "why did that one get through",
+        # which is a question asked while tuning, not while watching parts go
+        # past. It lives on the Diagnostics menu and is kept here so the
+        # setting it holds still round-trips through the settings file.
         self.live_novelty_debug_check = QCheckBox("Show novelty distance on every box")
         self.live_novelty_debug_check.setChecked(bool(
             (load_test_settings() or {}).get("novelty_debug", False)))
@@ -2394,7 +2453,6 @@ class MainWindow(QMainWindow):
             "same small blob. More classes and more crops per class are what "
             "fix that; no threshold does.\n\n"
             "A refusal always shows its distance whether this is on or not.")
-        cv_.addWidget(self.live_novelty_debug_check)
 
         code_row = QHBoxLayout()
         self.live_read_codes_check = QCheckBox("Verify the printed code")
@@ -2419,9 +2477,10 @@ class MainWindow(QMainWindow):
             "(Define Regions). 'What can be verified' lists which labels are "
             "covered and which are still resting on the classifier alone.")
         code_row.addWidget(self.live_read_codes_check, 1)
+        # "What can be verified" and "Test read" both answer questions about a
+        # setup rather than run one, so they moved to the Diagnostics menu.
         self.code_readiness_btn = QPushButton("What can be verified")
         self.code_readiness_btn.clicked.connect(self._show_code_readiness)
-        code_row.addWidget(self.code_readiness_btn)
         self.code_test_btn = QPushButton("Test read")
         self.code_test_btn.clicked.connect(self.test_code_read)
         self.code_test_btn.setToolTip(
@@ -2432,7 +2491,6 @@ class MainWindow(QMainWindow):
             "label as a comparison: if the region reads nothing and the whole "
             "label reads fine, the region is landing in the wrong place rather "
             "than the code being unreadable.")
-        code_row.addWidget(self.code_test_btn)
         cv_.addLayout(code_row)
 
         self.live_read_text_check = QCheckBox("Verify the printed text")
@@ -2501,22 +2559,23 @@ class MainWindow(QMainWindow):
         self.live_status_label.setWordWrap(True)
         cv_.addWidget(self.live_status_label)
 
+        self.live_speed_label = QLabel(live_logic.speed_label(live_logic.Rolling()))
+        self.live_speed_label.setStyleSheet("color: #9aa4b2;")
+        self.live_speed_label.setToolTip(
+            "Mean time one inference takes, and how often one starts.\n\n"
+            "The camera and display rates, the per-phase breakdown, and which "
+            "ceiling is holding the rate down are in Performance details on "
+            "the Diagnostics menu. They were printed here on every frame, "
+            "above the detections somebody was actually reading.")
+        cv_.addWidget(self.live_speed_label)
+
         self.live_readout = QTextEdit()
         self.live_readout.setReadOnly(True)
         self.live_readout.setMinimumHeight(120)
         self.live_readout.setPlaceholderText(
-            "Detections, latency and rate appear here once it is running.")
+            "Detections appear here once it is running.")
+        self.live_readout.setToolTip(live_logic.QUIET_CAUSES)
         cv_.addWidget(self.live_readout)
-
-        boundary = QLabel(
-            "The detector is trained on label ids, so what it reports here is "
-            "the same identity the recipe is written in -- no resolution step "
-            "in between. A label absent from the trained model cannot appear, "
-            "however clearly it is on the battery."
-        )
-        boundary.setWordWrap(True)
-        boundary.setStyleSheet("color: #9aa4b2;")
-        cv_.addWidget(boundary)
         layout.addWidget(control_box)
 
         keep_box = QGroupBox("Keep what it fails on")
@@ -2717,6 +2776,32 @@ class MainWindow(QMainWindow):
     def _on_live_failed(self, message: str) -> None:
         self._live_busy = False
         self.live_status_label.setText(f"Inference problem: {message}")
+
+    def show_performance_details(self) -> None:
+        """Everything the timings can say, on demand instead of every frame.
+
+        Camera and display rates, the per-phase breakdown, which ceiling is
+        holding the rate down, and whether the model or something around it is
+        the slow part. All of it is worth having while a rig is being tuned and
+        none of it is worth five lines above the detections while parts go
+        past, which is where it used to live.
+        """
+        camera_fps = self.camera.read_fps() if hasattr(self.camera, "read_fps") else 0.0
+        rolling = self._live_rolling
+        parts = [live_logic.rate_line(getattr(self, "_preview_fps", 0.0),
+                                      camera_fps, rolling,
+                                      getattr(self, "_gui_ms", 0.0)),
+                 live_logic.throughput_note(rolling, self._infer_interval(),
+                                            camera_fps),
+                 live_logic.phase_line(self._live_speed, rolling.mean_ms),
+                 live_logic.slow_hint(rolling,
+                                      getattr(self, "_live_device_line", ""),
+                                      self._live_speed)]
+        text = "".join(p for p in parts if p).strip()
+        QMessageBox.information(
+            self, "Performance details",
+            text or "Nothing measured yet -- start live detect and give it a "
+                    "few frames.")
 
     def _set_live_readout(self, text: str) -> None:
         """Write the readout without stealing the scrollbar.
@@ -2920,28 +3005,20 @@ class MainWindow(QMainWindow):
             self._live_tracks.update(
                 [(i.get("track_id"), i.get("name"), i.get("conf", 0.0),
                   i.get("identity_conf")) for i in items])
-            summary = live_logic.track_summary(self._live_tracks, self.label_id,
-                                               self._live_rolling)
+            summary = live_logic.track_summary(self._live_tracks, self.label_id)
         else:
-            summary = live_logic.frame_summary(counts, self.label_id,
-                                               self._live_rolling)
-        camera_fps = self.camera.read_fps() if hasattr(self.camera, "read_fps") else 0.0
-        rates = live_logic.rate_line(
-            getattr(self, "_preview_fps", 0.0), camera_fps,
-            self._live_rolling, getattr(self, "_gui_ms", 0.0))
-        rates += live_logic.throughput_note(
-            self._live_rolling, self._infer_interval(), camera_fps)
-        rates += live_logic.phase_line(self._live_speed,
-                                       self._live_rolling.mean_ms)
+            summary = live_logic.frame_summary(counts, self.label_id)
+        # One number where five lines of timings used to sit. The rest of what
+        # they said is still measured -- Performance details prints it on
+        # demand -- it just no longer rewrites itself above the detections
+        # thirty times a second.
+        self.live_speed_label.setText(live_logic.speed_label(self._live_rolling))
         # Assembled once and written once. It used to be three setPlainText
         # calls per result, each reading the widget back and rebuilding the
         # document -- thirty rebuilds a second, every one of them resetting the
         # scroll position, which is why the scrollbar could not be used.
         self._set_live_readout(
-            rates + "\n" + summary
-            + live_logic.slow_hint(self._live_rolling,
-                                   getattr(self, "_live_device_line", ""),
-                                   self._live_speed)
+            summary
             + live_logic.quiet_hint(
                 self._live_empty, float(self.test_conf_spin.value()),
                 int(self.test_imgsz_spin.value()),
@@ -4199,10 +4276,17 @@ class MainWindow(QMainWindow):
         save.clicked.connect(self.save_labels)
         save_next = QPushButton("Save + Next")
         save_next.clicked.connect(self.save_and_next)
+        # Moving on without saving is its own act, and there was no button for
+        # it: an image you open, look at and decide needs nothing had to be
+        # saved -- which approves it -- or reached through the image list.
+        prev_btn = QPushButton("‹ Prev")
+        prev_btn.setToolTip("Previous image. Nothing is written (P).")
+        prev_btn.clicked.connect(self.previous_image)
+        next_btn = QPushButton("Next ›")
+        next_btn.setToolTip("Next image. Nothing is written (N).")
+        next_btn.clicked.connect(self.next_image)
         copy_prev = QPushButton("Copy Prev")
         copy_prev.clicked.connect(self.copy_previous_labels)
-        qa_btn = QPushButton("Find Problem")
-        qa_btn.clicked.connect(self.find_next_problem_image)
         # Define Regions, Replace Artwork and Place Regions used to live here.
         # They were three controls doing parts of one job -- photograph the
         # label, say where it is, say what to read on it -- in an order nothing
@@ -4224,10 +4308,6 @@ class MainWindow(QMainWindow):
         clear = QPushButton("Clear Boxes")
         clear.setToolTip("Clear the on-screen boxes for this image without deleting or overwriting the saved JSON label file.")
         clear.clicked.connect(self.clear_boxes_unsaved)
-        clear_saved = QPushButton("Delete Saved JSON")
-        clear_saved.setToolTip("Delete the saved .json labels for this image after confirmation.")
-        clear_saved.clicked.connect(self.delete_saved_labels_confirmed)
-
         zminus = QPushButton("−")
         zminus.clicked.connect(self.canvas.zoom_out)
         zfit = QPushButton("Fit")
@@ -4235,8 +4315,8 @@ class MainWindow(QMainWindow):
         zplus = QPushButton("+")
         zplus.clicked.connect(self.canvas.zoom_in)
 
-        right_panel_buttons = (save, save_next, copy_prev, qa_btn, assist_btn,
-                               delete, clear, clear_saved, zminus, zfit, zplus)
+        right_panel_buttons = (save, save_next, prev_btn, next_btn, copy_prev,
+                               assist_btn, delete, clear, zminus, zfit, zplus)
         for btn in right_panel_buttons:
             btn.setProperty("rightPanelButton", True)
             btn.setMinimumHeight(24)
@@ -4264,10 +4344,12 @@ class MainWindow(QMainWindow):
         health_btn = QPushButton("Dataset Health")
         health_btn.setToolTip("Per-recipe / per-category readiness dashboard: labeled, reviewed, and export-ready counts.")
         health_btn.clicked.connect(self.show_dataset_health)
-        shortcuts_btn = QPushButton("⌨ Shortcuts")
-        shortcuts_btn.setToolTip("Show the keyboard shortcut reference (F1).")
-        shortcuts_btn.clicked.connect(self.show_shortcuts_reference)
-        for btn in (health_btn, shortcuts_btn):
+        # Find Problem hunts for the next image that is not finished, which is
+        # a thing to do while reviewing rather than while annotating one image.
+        # It lives on the Navigate menu and is kept here for its shortcut.
+        qa_btn = QPushButton("Find Problem")
+        qa_btn.clicked.connect(self.find_next_problem_image)
+        for btn in (health_btn,):
             btn.setProperty("rightPanelButton", True)
             btn.setMinimumHeight(24)
             btn.setMaximumHeight(26)
@@ -4279,13 +4361,12 @@ class MainWindow(QMainWindow):
         v.addLayout(form)
         v.addWidget(self.count_label)
         v.addWidget(self.dataset_label)
-        v.addLayout(button_row(health_btn, shortcuts_btn))
         v.addLayout(button_row(zminus, zfit, zplus))
         v.addLayout(button_row(save, save_next))
-        v.addLayout(button_row(copy_prev, qa_btn))
+        v.addLayout(button_row(prev_btn, next_btn))
         v.addWidget(assist_btn)
         v.addLayout(button_row(delete, clear))
-        v.addWidget(clear_saved)
+        v.addLayout(button_row(copy_prev, health_btn))
 
         class_box = QGroupBox("Detector Classes")
         cv = QVBoxLayout(class_box)
