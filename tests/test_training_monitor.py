@@ -155,17 +155,22 @@ def _monitor():
     return monitor
 
 
+def _panel(monitor, stage: str = ""):
+    return monitor.panel(stage)
+
+
 def test_the_bar_counts_epochs_once_the_run_says_how_many():
     """Indeterminate until then. Ultralytics prints the count itself, so
     guessing it from the settings would be a second answer to a question that
     has one source."""
     monitor = _monitor()
-    assert (monitor.bar.minimum(), monitor.bar.maximum()) == (0, 0)
+    panel = _panel(monitor)
+    assert (panel.bar.minimum(), panel.bar.maximum()) == (0, 0)
 
     monitor.append_output(EPOCH_LINE)
-    assert monitor.bar.maximum() == 100
-    assert monitor.bar.value() == 34
-    assert "epochs" in monitor.bar.format()
+    assert panel.bar.maximum() == 100
+    assert panel.bar.value() == 34
+    assert "epochs" in panel.bar.format()
 
 
 def test_the_curves_and_the_bar_agree_about_how_far_in_it_is():
@@ -174,25 +179,25 @@ def test_the_curves_and_the_bar_agree_about_how_far_in_it_is():
     monitor = _monitor()
     monitor.append_output(EPOCH_LINE.replace("34/100", "2/100"))
     monitor.set_metrics(_rows(last=12), patience=50)
-    assert monitor.bar.value() == 12
+    assert _panel(monitor).bar.value() == 12
 
 
 def test_the_run_is_named_so_two_stages_are_not_confused():
     monitor = _monitor()
-    assert "detector" in monitor.what_label.text()
+    assert "detector" in _panel(monitor).what_label.text()
     monitor.begin("classifier", "yolo11s-cls.pt", "data/exports/crops")
-    assert "classifier" in monitor.what_label.text()
+    assert "classifier" in _panel(monitor).what_label.text()
 
 
 def test_starting_a_run_clears_the_last_one():
     monitor = _monitor()
     monitor.append_output(EPOCH_LINE)
     monitor.set_metrics(_rows(), patience=50)
-    assert monitor.best_label.text()
+    assert _panel(monitor).best_label.text()
 
     monitor.begin("detector", "m.pt", "d.yaml")
-    assert monitor.log.toPlainText() == ""
-    assert monitor.best_label.text() == ""
+    assert _panel(monitor).log.toPlainText() == ""
+    assert _panel(monitor).best_label.text() == ""
     assert not monitor.use_btn.isEnabled()
 
 
@@ -200,7 +205,7 @@ def test_the_finished_run_offers_its_weights_only_when_there_are_any(tmp_path):
     monitor = _monitor()
     monitor.finish("Finished", "2m 0s in total.", tmp_path / "nothing" / "best.pt")
     assert not monitor.use_btn.isEnabled()
-    assert "No weights at" in monitor.detail_label.text()
+    assert "No weights at" in _panel(monitor).detail_label.text()
 
     weights = tmp_path / "best.pt"
     weights.write_bytes(b"not really weights")
@@ -254,10 +259,100 @@ def test_the_pane_no_longer_carries_the_log_or_the_chart():
     win = _window()
     page = win.tabs.widget([win.tabs.tabText(i)
                             for i in range(win.tabs.count())].index("Train"))
-    assert win.train_log is win._training_monitor.log
-    assert win.train_metrics_chart is win._training_monitor.chart
-    assert not _is_descendant(win.train_log, page)
-    assert not _is_descendant(win.train_metrics_chart, page)
+    monitor = _monitor()
+    panel = _panel(monitor)
+    assert not _is_descendant(panel.log, page)
+    assert not _is_descendant(panel.chart, page)
+
+
+# --- two stages, two tabs ----------------------------------------------------
+
+def test_train_both_gives_each_stage_its_own_tab():
+    """They are two runs, not two halves of one. Different metrics, different
+    lengths, different reasons to fail."""
+    monitor = _monitor()
+    monitor.begin("classifier", "yolo11s-cls.pt", "crops", fresh=False)
+    assert monitor.tabs.count() == 2
+    assert [monitor.tabs.tabText(i) for i in range(2)] == ["Detector", "Classifier"]
+
+
+def test_the_queued_classifier_does_not_erase_the_detector():
+    """The bug this structure exists to prevent. _begin_fresh_run is already
+    skipped for a queued stage -- 'the classifier continues the detector's work
+    and must not erase its record' -- and one shared panel threw the record
+    away anyway, at the exact moment somebody wants to read it."""
+    monitor = _monitor()
+    monitor.append_output(EPOCH_LINE)
+    monitor.set_metrics(_rows(last=12), patience=50)
+    detector_best = _panel(monitor, "detector").best_label.text()
+    assert detector_best
+
+    monitor.begin("classifier", "yolo11s-cls.pt", "crops", fresh=False)
+
+    kept = _panel(monitor, "detector")
+    assert kept.best_label.text() == detector_best
+    assert EPOCH_LINE.strip() in kept.log.toPlainText()
+    assert kept.bar.value() == 12
+
+
+def test_a_run_somebody_starts_clears_the_last_ones_tabs():
+    monitor = _monitor()
+    monitor.begin("classifier", "yolo11s-cls.pt", "crops", fresh=False)
+    assert monitor.tabs.count() == 2
+
+    monitor.begin("detector", "m.pt", "d.yaml", fresh=True)
+    assert monitor.tabs.count() == 1
+
+
+def test_output_goes_to_the_stage_that_is_running_not_the_tab_being_read():
+    """Somebody reading the detector's tab while the classifier trains must not
+    have the classifier's output appear in it."""
+    monitor = _monitor()
+    monitor.begin("classifier", "c.pt", "crops", fresh=False)
+    monitor.tabs.setCurrentWidget(_panel(monitor, "detector"))
+
+    monitor.append_output("classifier output\n")
+    assert "classifier output" in _panel(monitor, "classifier").log.toPlainText()
+    assert "classifier output" not in _panel(monitor, "detector").log.toPlainText()
+
+
+def test_use_this_model_offers_the_open_tabs_weights(tmp_path):
+    """Two finished runs mean two sets of weights, and which one the button
+    means has to be the one being looked at."""
+    monitor = _monitor()
+    det = tmp_path / "det.pt"
+    det.write_bytes(b"x")
+    monitor.finish("Finished", "done", det)
+
+    monitor.begin("classifier", "c.pt", "crops", fresh=False)
+    cls = tmp_path / "cls.pt"
+    cls.write_bytes(b"x")
+    monitor.finish("Finished", "done", cls)
+
+    taken = []
+    monitor.set_use_handler(lambda w, stage: taken.append((w, stage)))
+    try:
+        monitor.tabs.setCurrentWidget(_panel(monitor, "detector"))
+        monitor.use_btn.click()
+        monitor.tabs.setCurrentWidget(_panel(monitor, "classifier"))
+        monitor.use_btn.click()
+        assert taken == [(str(det), "detector"), (str(cls), "classifier")]
+    finally:
+        monitor.set_use_handler(_window()._use_trained_model)
+
+
+def test_the_button_follows_the_tab_rather_than_the_run(tmp_path):
+    """An unfinished stage has no weights to offer, whichever run is going."""
+    monitor = _monitor()
+    weights = tmp_path / "det.pt"
+    weights.write_bytes(b"x")
+    monitor.finish("Finished", "done", weights)
+    assert monitor.use_btn.isEnabled()
+
+    monitor.begin("classifier", "c.pt", "crops", fresh=False)
+    assert not monitor.use_btn.isEnabled(), "the classifier has produced nothing"
+    monitor.tabs.setCurrentWidget(_panel(monitor, "detector"))
+    assert monitor.use_btn.isEnabled()
 
 
 def _is_descendant(widget: QWidget, ancestor: QWidget) -> bool:

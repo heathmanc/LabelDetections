@@ -1424,11 +1424,11 @@ class MainWindow(QMainWindow):
         # room for them, which also carries the four numbers that were only
         # ever implicit in the output. Both widgets are still built here so
         # every caller that appends a line has something real to append to.
-        self._training_monitor = TrainingMonitor(TrainingMetricsChart(), self)
+        # A chart per stage, built on demand: Train Both is two runs reporting
+        # different metrics, and one chart cannot hold both.
+        self._training_monitor = TrainingMonitor(TrainingMetricsChart, self)
         self._training_monitor.set_use_handler(self._use_trained_model)
         self._training_monitor.stop_btn.clicked.connect(self.stop_training)
-        self.train_log = self._training_monitor.log
-        self.train_metrics_chart = self._training_monitor.chart
 
         watch_btn = QPushButton("Show Training Window")
         watch_btn.setToolTip(
@@ -1749,20 +1749,23 @@ class MainWindow(QMainWindow):
 
         if fresh:
             self._begin_fresh_run()
+        # fresh=False for a queued second stage, so the detector's tab -- its
+        # curves, its best epoch, its output -- survives the classifier
+        # starting. That is also the moment somebody most wants to look at it.
+        queued = list(getattr(self, "_train_queue", None) or [])
         self._training_monitor.begin(
-            stage, str(params.get("model", "")), str(params.get("data", "")))
+            stage, str(params.get("model", "")), str(params.get("data", "")),
+            fresh=fresh,
+            plan=("Detector, then classifier -- one tab each."
+                  if (queued or not fresh) else ""))
         self._training_patience = int(params.get("patience", 0) or 0)
         self._training_monitor.show_run()
-        self.train_log.append(f"--- {stage} ---")
-        self.train_log.append("$ " + " ".join(cmd) + "\n")
+        self._training_monitor.append_output(
+            f"--- {stage} ---\n$ " + " ".join(cmd) + "\n")
         for b in (self.train_start_btn, self.train_cls_btn, self.train_both_btn):
             b.setEnabled(False)
         self.train_stop_btn.setEnabled(True)
         self.status.showMessage(f"Training {stage}...", 5000)
-
-        # Clear the chart immediately so the previous run's curves don't persist.
-        if hasattr(self, "train_metrics_chart"):
-            self.train_metrics_chart.clear()
 
         # Determine which results.csv to follow.  YOLO creates a NEW directory
         # when <project>/<name> already exists (bungvision -> bungvision2 or
@@ -1790,7 +1793,7 @@ class MainWindow(QMainWindow):
         stage: the classifier continues the detector's work and must not erase
         its record.
         """
-        self.train_log.clear()
+        self._training_monitor.clear_output()
         self._stage_results = {}
         self._stage_weights = {}
 
@@ -1887,16 +1890,17 @@ class MainWindow(QMainWindow):
     def _on_train_error(self, _error) -> None:
         if self._train_process is None:
             return
-        self.train_log.append(
+        self._training_monitor.append_output(
             f"\n[error] Could not run '{self.train_yolo_exe_edit.text().strip() or 'yolo'}'. "
-            "Check that Ultralytics is installed and the yolo executable is correct."
+            "Check that Ultralytics is installed and the yolo executable is correct.\n"
         )
 
     def _on_train_finished(self, exit_code: int, _status) -> None:
         if hasattr(self, "_metrics_timer"):
             self._metrics_timer.stop()
         self._poll_training_metrics()  # final refresh to catch the last epoch row
-        self.train_log.append(f"\n[done] Training process exited with code {exit_code}.")
+        self._training_monitor.append_output(
+            f"\n[done] Training process exited with code {exit_code}.\n")
 
         elapsed = time.time() - getattr(self, "_train_start_time", time.time())
         stopped = getattr(self, "_train_stopped", False)
@@ -1905,7 +1909,8 @@ class MainWindow(QMainWindow):
         weights = (run_dir / "weights" / "best.pt") if run_dir else None
 
         if weights:
-            self.train_log.append(f"[done] Best weights (if produced): {weights}")
+            self._training_monitor.append_output(
+                f"[done] Best weights (if produced): {weights}\n")
         if exit_code == 0 and not stopped:
             self.status.showMessage("Training finished.", 8000)
         else:
@@ -1943,18 +1948,19 @@ class MainWindow(QMainWindow):
         queued = getattr(self, "_train_queue", None)
         if queued and exit_code == 0 and not stopped:
             params, stage = queued.pop(0)
-            self.train_log.append(f"\n[queue] Detector finished. Starting {stage}.")
+            self._training_monitor.append_output(
+                f"\n[queue] Detector finished. Starting {stage}.\n")
             self._start_training_run(params, stage, fresh=False)
             return
         if queued:
             self._train_queue = []
-            self.train_log.append(
+            self._training_monitor.append_output(
                 "\n[queue] Detector did not finish cleanly, so the classifier "
-                "was not started.")
+                "was not started.\n")
 
         self._show_training_summary(exit_code, stopped, elapsed, csv_path, run_dir, weights)
 
-    def _use_trained_model(self, weights: str) -> None:
+    def _use_trained_model(self, weights: str, stage: str = "") -> None:
         """Put a finished run's weights where the rest of the app reads them.
 
         The step that was missing at the end of every run: the weights land
@@ -1963,7 +1969,7 @@ class MainWindow(QMainWindow):
         because Live Detect reads its detector from the same one.
         """
         target = "detector"
-        if getattr(self, "_train_stage", "") == "classifier":
+        if (stage or getattr(self, "_train_stage", "")) == "classifier":
             if hasattr(self, "live_classifier_edit"):
                 self.live_classifier_edit.setText(weights)
                 target = "stage 2 classifier"
@@ -2287,7 +2293,7 @@ class MainWindow(QMainWindow):
         if self._train_process is None:
             return
         self._train_stopped = True
-        self.train_log.append("\n[stop] Stopping training...")
+        self._training_monitor.append_output("\n[stop] Stopping training...\n")
         self._train_process.kill()
 
     def _help_tab(self) -> QWidget:

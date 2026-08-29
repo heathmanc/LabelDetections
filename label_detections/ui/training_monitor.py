@@ -16,6 +16,12 @@ So the same information, arranged as the questions somebody actually asks:
 The raw output is still there, folded away, because it is the only thing that
 says anything useful when a run fails to start at all.
 
+One tab per stage, because Train Both is two runs and they are not comparable.
+A detector run and a classifier run report different metrics, take different
+lengths of time, and fail for different reasons -- and the first is still worth
+reading after the second has started, which is exactly when a single shared
+panel has thrown it away.
+
 Modeless on purpose. A run takes minutes to hours and there is no reason to
 stop labelling while it happens; the window can be pushed aside and comes back
 with the run's state, not a fresh one.
@@ -24,37 +30,24 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt
 from PySide6.QtGui import QTextCursor
 from PySide6.QtWidgets import (QDialog, QGroupBox, QHBoxLayout, QLabel,
-                               QProgressBar, QPushButton, QTextEdit,
+                               QProgressBar, QPushButton, QTabWidget, QTextEdit,
                                QVBoxLayout, QWidget)
 
 from ..core import training as training_logic
 
 
-class TrainingMonitor(QDialog):
-    """Follows one training run. Reused across runs rather than rebuilt.
-
-    Held by the main window for its whole life so the log and the chart are
-    always real widgets -- a monitor created per run would leave every caller
-    that appends a line guarding against its absence.
-    """
+class StagePanel(QWidget):
+    """One training run's own progress, curves and output."""
 
     def __init__(self, chart: QWidget, parent=None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Training")
-        # Not modal: a run takes minutes to hours, and nothing about labelling
-        # has to wait for it.
-        self.setModal(False)
-        self.setMinimumSize(720, 620)
-
-        self._weights: Path | None = None
-        self._on_use = None
         self._total_epochs = 0
+        self.weights: Path | None = None
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(8)
 
         self.what_label = QLabel("Preparing...")
@@ -110,32 +103,10 @@ class TrainingMonitor(QDialog):
         self.log_box.toggled.connect(self.log.setVisible)
         layout.addWidget(self.log_box)
 
-        buttons = QHBoxLayout()
-        self.stop_btn = QPushButton("Stop")
-        self.stop_btn.setToolTip(
-            "Ends the run. Ultralytics writes weights every epoch, so what has "
-            "been reached so far is already on disk.")
-        buttons.addWidget(self.stop_btn)
-        buttons.addStretch(1)
-        self.use_btn = QPushButton("Use This Model")
-        self.use_btn.setEnabled(False)
-        self.use_btn.setToolTip(
-            "Put the weights this run produced into Test Models, which is also "
-            "where Live Detect reads its detector from.\n\n"
-            "It is best.pt, not last.pt: the epoch that validated best rather "
-            "than the one that happened to be last.")
-        self.use_btn.clicked.connect(self._use_clicked)
-        buttons.addWidget(self.use_btn)
-        close = QPushButton("Close")
-        close.clicked.connect(self.hide)
-        buttons.addWidget(close)
-        layout.addLayout(buttons)
-
-    # --- starting ----------------------------------------------------------
+    # --- while it runs -----------------------------------------------------
 
     def begin(self, stage: str, model: str, data: str) -> None:
-        """Reset for a new run and say what it is."""
-        self._weights = None
+        self.weights = None
         self._total_epochs = 0
         self.what_label.setText(f"Training the {stage}")
         self.detail_label.setText(f"{model}\n{data}" if data else str(model))
@@ -145,13 +116,9 @@ class TrainingMonitor(QDialog):
                                     "and caches, so it is the slow one.")
         self.best_label.setText("")
         self.log.clear()
-        self.use_btn.setEnabled(False)
-        self.stop_btn.setEnabled(True)
-
-    # --- while it runs -----------------------------------------------------
+        self.log_box.setChecked(False)
 
     def append_output(self, text: str) -> None:
-        """Add a chunk of the process's stdout, and read the epoch off it."""
         if not text:
             return
         self.log.moveCursor(QTextCursor.End)
@@ -159,9 +126,9 @@ class TrainingMonitor(QDialog):
         self.log.moveCursor(QTextCursor.End)
         found = training_logic.parse_epoch(text)
         if found:
-            self._set_epoch(*found)
+            self.set_epoch(*found)
 
-    def _set_epoch(self, done: int, total: int) -> None:
+    def set_epoch(self, done: int, total: int) -> None:
         if total and total != self._total_epochs:
             self._total_epochs = int(total)
             self.bar.setRange(0, int(total))
@@ -170,12 +137,10 @@ class TrainingMonitor(QDialog):
             self.bar.setValue(int(done))
 
     def set_progress(self, elapsed: float) -> None:
-        """Refresh the elapsed/remaining line. Driven by the caller's timer."""
         self.progress_label.setText(training_logic.progress_text(
             self.bar.value(), self._total_epochs, elapsed))
 
     def set_metrics(self, rows: list[dict], patience: int = 0) -> None:
-        """Hand over the parsed results.csv: the curves and the best epoch."""
         if hasattr(self.chart, "set_data"):
             self.chart.set_data(training_logic.metric_series(rows, "epoch"),
                                 training_logic.chart_series(rows))
@@ -187,10 +152,7 @@ class TrainingMonitor(QDialog):
         if done and self._total_epochs:
             self.bar.setValue(min(int(done), self._total_epochs))
 
-    # --- finishing ---------------------------------------------------------
-
     def finish(self, headline: str, detail: str, weights: Path | None) -> None:
-        self.stop_btn.setEnabled(False)
         self.what_label.setText(headline)
         self.progress_label.setText(detail)
         if self._total_epochs:
@@ -198,17 +160,157 @@ class TrainingMonitor(QDialog):
         else:
             self.bar.setRange(0, 1)
             self.bar.setValue(1)
-        self._weights = weights if (weights and Path(weights).is_file()) else None
-        self.use_btn.setEnabled(self._weights is not None)
-        if self._weights is None and weights:
+        self.weights = weights if (weights and Path(weights).is_file()) else None
+        if self.weights is None and weights:
             # Said rather than left as a disabled button nobody can explain.
             self.detail_label.setText(
                 f"No weights at {weights} -- the run did not get far enough to "
                 f"write any, or it wrote them somewhere else.")
 
+
+class TrainingMonitor(QDialog):
+    """Follows a training run, or both stages of one. Reused across runs."""
+
+    def __init__(self, chart_factory, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Training")
+        # Not modal: a run takes minutes to hours, and nothing about labelling
+        # has to wait for it.
+        self.setModal(False)
+        self.setMinimumSize(720, 660)
+
+        self._chart_factory = chart_factory
+        self._panels: dict[str, StagePanel] = {}
+        self._stage = ""
+        self._on_use = None
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
+
+        self.plan_label = QLabel("")
+        self.plan_label.setWordWrap(True)
+        self.plan_label.setStyleSheet("color: #9aa4b2;")
+        self.plan_label.setVisible(False)
+        layout.addWidget(self.plan_label)
+
+        self.tabs = QTabWidget()
+        layout.addWidget(self.tabs, 1)
+
+        buttons = QHBoxLayout()
+        self.stop_btn = QPushButton("Stop")
+        self.stop_btn.setToolTip(
+            "Ends the run. Ultralytics writes weights every epoch, so what has "
+            "been reached so far is already on disk.")
+        buttons.addWidget(self.stop_btn)
+        buttons.addStretch(1)
+        self.use_btn = QPushButton("Use This Model")
+        self.use_btn.setEnabled(False)
+        self.use_btn.setToolTip(
+            "Put the weights the OPEN tab's run produced into the field the "
+            "rest of the application reads -- Test Models for a detector, "
+            "which is also where Live Detect gets its detector, and the stage "
+            "2 field for a classifier.\n\n"
+            "It is best.pt, not last.pt: the epoch that validated best rather "
+            "than the one that happened to be last.")
+        self.use_btn.clicked.connect(self._use_clicked)
+        buttons.addWidget(self.use_btn)
+        close = QPushButton("Close")
+        close.clicked.connect(self.hide)
+        buttons.addWidget(close)
+        layout.addLayout(buttons)
+
+        # Which tab is open decides which weights Use This Model offers, so it
+        # has to follow the tab rather than the run.
+        self.tabs.currentChanged.connect(lambda _i: self._refresh_use_button())
+
+    # --- panels ------------------------------------------------------------
+
+    def panel(self, stage: str = "") -> StagePanel | None:
+        """The named stage's panel, or the one currently open."""
+        if stage:
+            return self._panels.get(stage)
+        widget = self.tabs.currentWidget()
+        return widget if isinstance(widget, StagePanel) else None
+
+    @property
+    def current(self) -> StagePanel | None:
+        """The panel the RUN is writing to, which is not always the open tab."""
+        return self._panels.get(self._stage)
+
+    def _stage_panel(self, stage: str) -> StagePanel:
+        panel = self._panels.get(stage)
+        if panel is None:
+            panel = StagePanel(self._chart_factory(), self)
+            self._panels[stage] = panel
+            self.tabs.addTab(panel, stage.capitalize())
+        return panel
+
+    # --- starting ----------------------------------------------------------
+
+    def begin(self, stage: str, model: str, data: str, fresh: bool = True,
+              plan: str = "") -> None:
+        """Start a stage. ``fresh`` clears the other stages with it.
+
+        A queued second stage must NOT be fresh: the classifier continues the
+        detector's work, and wiping the tab that recorded it is exactly what
+        the queue's ``fresh=False`` exists to prevent. The detector's curves
+        are also the first thing anybody wants to look at while the classifier
+        runs, which is when a single shared panel has just discarded them.
+        """
+        if fresh:
+            self.tabs.clear()
+            self._panels = {}
+        self._stage = stage
+        panel = self._stage_panel(stage)
+        panel.begin(stage, model, data)
+        self.tabs.setCurrentWidget(panel)
+        self.plan_label.setText(plan)
+        self.plan_label.setVisible(bool(plan))
+        self.stop_btn.setEnabled(True)
+        self._refresh_use_button()
+
+    # --- while it runs -----------------------------------------------------
+
+    def append_output(self, text: str) -> None:
+        panel = self.current
+        if panel is not None:
+            panel.append_output(text)
+
+    def clear_output(self) -> None:
+        panel = self.current
+        if panel is not None:
+            panel.log.clear()
+
+    def set_progress(self, elapsed: float) -> None:
+        panel = self.current
+        if panel is not None:
+            panel.set_progress(elapsed)
+
+    def set_metrics(self, rows: list[dict], patience: int = 0) -> None:
+        panel = self.current
+        if panel is not None:
+            panel.set_metrics(rows, patience)
+
+    # --- finishing ---------------------------------------------------------
+
+    def finish(self, headline: str, detail: str, weights: Path | None) -> None:
+        self.stop_btn.setEnabled(False)
+        panel = self.current
+        if panel is not None:
+            panel.finish(headline, detail, weights)
+        self._refresh_use_button()
+
+    def _refresh_use_button(self) -> None:
+        panel = self.panel()
+        self.use_btn.setEnabled(panel is not None and panel.weights is not None)
+
     def _use_clicked(self) -> None:
-        if self._weights is not None and self._on_use is not None:
-            self._on_use(str(self._weights))
+        panel = self.panel()
+        if panel is None or panel.weights is None or self._on_use is None:
+            return
+        stage = next((name for name, p in self._panels.items() if p is panel), "")
+        self._on_use(str(panel.weights), stage)
 
     def set_use_handler(self, handler) -> None:
         self._on_use = handler
