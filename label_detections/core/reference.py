@@ -86,6 +86,37 @@ def aspect_of(label) -> float:
     return (width / height) if width > 0 and height > 0 else 0.0
 
 
+def crop_shape_warning(aspect: float) -> str:
+    """Whether this artwork's shape makes stage 2's crops unrepeatable.
+
+    Every crop the classifier sees is turned so the label's long side runs
+    across, which is only worth doing because it is the SAME turn every time.
+    The decision is made from the detected quad, and a tilt moves that
+    measurement -- so a label whose proportions sit near the threshold gets
+    turned in one frame and left in the next, and the classifier is shown two
+    pictures of one label for a reason that correlates with nothing.
+
+    Said at enrolment rather than discovered later as classifier noise. It is
+    not a refusal: the label works, it is just harder to learn than its
+    printing deserves, and the fix is a rig that sees it at less of an angle.
+    """
+    from . import geometry as geo
+
+    aspect = float(aspect or 0.0)
+    if aspect <= 0 or geo.landscape_is_stable(aspect):
+        return ""
+    low, high = geo.landscape_band()
+    return (f"This label is {aspect:.2f} to 1, which is close to square.\n\n"
+            f"Crops of it are turned so the long side runs across, and between "
+            f"{low:.2f} and {high:.2f} a camera tilt can change which side "
+            f"looks longer -- so the same label can be turned one way in one "
+            f"frame and the other way in the next. The classifier then sees "
+            f"two pictures of it and has to learn both.\n\n"
+            f"It still works. It is just harder to learn than its printing "
+            f"deserves, so expect to need more images of this one, and prefer "
+            f"captures where it is square-on to the camera.")
+
+
 def missing(labels) -> list[str]:
     """Every label id with no artwork, in the order they were given."""
     return [str(getattr(label, "label_id", "")) for label in labels or []

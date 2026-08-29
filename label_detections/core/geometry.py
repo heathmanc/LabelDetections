@@ -148,7 +148,7 @@ def quad_aspect(quad: Quad) -> float:
     return (w / h) if h > 0 else 0.0
 
 
-def align_quad(quad: Quad, aspect: float) -> Quad:
+def align_quad(quad: Quad, aspect: float, tol: float = 0.0) -> Quad:
     """Corners ordered so the quad reads with the proportions of the artwork.
 
     ``order_quad`` normalises to the IMAGE's top-left, and that is not enough.
@@ -173,10 +173,10 @@ def align_quad(quad: Quad, aspect: float) -> Quad:
     reading the label. Square-ish shapes are left alone: there is no proportion
     to match, so there is nothing to learn.
     """
-    return turn_quad(order_quad(quad), candidate_turns(quad, aspect)[0])
+    return turn_quad(order_quad(quad), candidate_turns(quad, aspect, tol)[0])
 
 
-def candidate_turns(quad: Quad, aspect: float) -> list[int]:
+def candidate_turns(quad: Quad, aspect: float, tol: float = 0.0) -> list[int]:
     """Which quarter turns of an ordered quad could be the label's own reading.
 
     Two of them when the label's proportions say which pair of edges is its
@@ -190,9 +190,14 @@ def candidate_turns(quad: Quad, aspect: float) -> list[int]:
     """
     settled = order_quad(quad)
     own = quad_aspect(settled)
+    # ``tol`` is how far from square a shape has to be before its proportions
+    # are trusted. Placing a region uses SQUARE_TOL, where the target aspect is
+    # the artwork's own and reliable; turning a crop flat passes a wider one,
+    # because there the decision is made from a measurement tilt can move.
+    tol = float(tol or SQUARE_TOL)
     if (aspect <= 0 or own <= 0
-            or max(own, 1.0 / own) < SQUARE_TOL
-            or max(aspect, 1.0 / aspect) < SQUARE_TOL):
+            or max(own, 1.0 / own) < tol
+            or max(aspect, 1.0 / aspect) < tol):
         return [0, 1, 2, 3]
     if (own >= 1.0) == (aspect >= 1.0):
         return [0, 2]
@@ -347,8 +352,49 @@ def homography_from_unit(quad: Quad, orient: bool = True) -> Matrix | None:
 
 # Any clearly-landscape target. align_quad only cares which side of 1 the two
 # aspects fall on, so the exact number is arbitrary -- it just has to be far
-# enough from square to clear the SQUARE_TOL guard.
+# enough from square to clear the tolerance guard.
 LANDSCAPE = 100.0
+
+# How far a tilt can move a MEASURED aspect either way. A label seen thirty
+# degrees off square foreshortens by cos(30), about 13%; this is that rounded
+# up. A bolted-down camera over a belt sees rather less.
+TILT_MARGIN = 1.15
+
+# How far from square a quad must look before it is turned flat. Wider than
+# SQUARE_TOL, and that is the whole reason it is a separate number.
+#
+# This decision is made from the MEASURED quad, and tilt moves the measurement
+# -- so a label whose true aspect sits near the threshold is turned in one
+# frame and left in the next. That is worse than never turning it, because the
+# inconsistency correlates with nothing at all.
+#
+# The band cannot be removed, only moved, so it is put where labels are least
+# likely to sit. At 1.15 it spanned 1.00-1.32: square stickers, round decals in
+# square die-cuts, most of what somebody is likely to enrol next. At 1.40 it
+# spans 1.22-1.61, and anything genuinely square is now safely never turned.
+# ``landscape_band`` states it, and a label enrolled inside it is warned about.
+LANDSCAPE_TOL = 1.4
+
+
+def landscape_band() -> tuple[float, float]:
+    """The aspect range where turning a crop flat is not reliably repeatable."""
+    return (LANDSCAPE_TOL / TILT_MARGIN, LANDSCAPE_TOL * TILT_MARGIN)
+
+
+def landscape_is_stable(aspect: float) -> bool:
+    """Will this artwork's crops be turned the SAME way in every frame?
+
+    True either because the label is clearly elongated (always turned) or
+    clearly square-ish (never turned). False only inside the band where tilt
+    can carry the measurement across the threshold.
+    """
+    aspect = float(aspect or 0.0)
+    if aspect <= 0:
+        return True
+    if aspect < 1.0:
+        aspect = 1.0 / aspect
+    low, high = landscape_band()
+    return not (low <= aspect <= high)
 
 
 def landscape_quad(quad: Quad) -> Quad:
@@ -368,7 +414,7 @@ def landscape_quad(quad: Quad) -> Quad:
     Applied identically when crops are exported for training and when they are
     taken at runtime, so nothing sees a shape it did not train on.
     """
-    return align_quad(quad, LANDSCAPE)
+    return align_quad(quad, LANDSCAPE, tol=LANDSCAPE_TOL)
 
 
 def oriented(quad: Quad, flipped: bool = False, aspect: float = 0.0) -> Quad:

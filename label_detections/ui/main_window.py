@@ -3689,7 +3689,17 @@ class MainWindow(QMainWindow):
             bits.append(", ".join(f"{c.role}/{c.symbology}" for c in label.codes))
         if label.surface and label.surface != "matte":
             bits.append(label.surface)
+        aspect = float(getattr(label, "reference_aspect", 0.0) or 0.0)
+        if aspect:
+            bits.append(f"{aspect:.2f}:1")
+        shape = reference_logic.crop_shape_warning(aspect)
+        if shape:
+            # Kept on the label, not only said once at enrolment: it explains
+            # why this one needs more images than its neighbours, and that
+            # question is asked weeks later.
+            bits.append("\u26a0 close to square")
         self.label_meta_label.setText(" · ".join(bits) or str(label.name or "—"))
+        self.label_meta_label.setToolTip(shape)
 
         self._refresh_assist_button()
         statuses = list(persistence.dataset_statuses(label.label_id).values())
@@ -5912,6 +5922,10 @@ class MainWindow(QMainWindow):
         self._record_capture_group(raw)
         return str(raw) if raw else ""
 
+    def _warn_crop_shape(self, text: str) -> None:
+        """Its own method so a test can answer it. See _ask_replace_reference."""
+        QMessageBox.information(self, "Close to square", text)
+
     def _reference_annotation(self, label, result: dict, source: str) -> bool:
         """Label the photograph the artwork was flattened out of.
 
@@ -6083,6 +6097,11 @@ class MainWindow(QMainWindow):
         self._refresh_labels()
         self._refresh_active_label_panel()
         self._refresh_images()
+        shape = reference_logic.crop_shape_warning(
+            float(getattr(saved, "reference_aspect", 0.0) or 0.0))
+        if shape:
+            self._warn_crop_shape(shape)
+
         note = f"{self.label_id}: reference image saved with {count} region(s)"
         if labelled:
             note += "; the capture it came from is labelled"

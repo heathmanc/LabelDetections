@@ -228,3 +228,81 @@ def test_training_and_runtime_crops_are_taken_the_same_way():
                    inspect.getsource(classify_export.write_region_dataset),
                    inspect.getsource(live_ui.InferenceWorker._identify)):
         assert "landscape=True" in source
+
+
+# --- the band where turning a crop flat is not repeatable ---------------------
+
+def _tilted(aspect: float, tilt: float):
+    """A standing label at ``aspect``, foreshortened by ``tilt``."""
+    side = 100.0 * aspect * tilt
+    return [[0.0, 0.0], [100.0, 0.0], [100.0, side], [0.0, side]]
+
+
+def _turned(aspect: float, tilt: float) -> bool:
+    q = _tilted(aspect, tilt)
+    return geo.landscape_quad(q) != geo.order_quad(q)
+
+
+def test_a_square_label_is_never_turned_however_it_is_tilted():
+    """The band cannot be removed, only moved -- so it is moved off the shapes
+    somebody is most likely to enrol next: square stickers and round decals in
+    square die-cuts. At the old 1.15 threshold every one of those was in it."""
+    for aspect in (1.0, 1.05, 1.15):
+        assert {_turned(aspect, t) for t in (0.87, 1.0, 1.15)} == {False}
+
+
+def test_a_clearly_long_label_is_always_turned_however_it_is_tilted():
+    for aspect in (1.8, 2.0, 3.3, 6.0):
+        assert {_turned(aspect, t) for t in (0.87, 1.0, 1.15)} == {True}
+
+
+def test_every_shape_that_is_not_repeatable_is_one_the_operator_was_warned_about():
+    """The guarantee that makes the band acceptable: nothing is inconsistent
+    without having been named at enrolment."""
+    for aspect in [1.0 + i / 100 for i in range(0, 250)]:
+        consistent = len({_turned(aspect, t) for t in (0.87, 1.0, 1.15)}) == 1
+        if not consistent:
+            assert not geo.landscape_is_stable(aspect), \
+                f"aspect {aspect:.2f} flips untold"
+
+
+def test_the_band_is_stated_rather_than_left_implicit():
+    low, high = geo.landscape_band()
+    assert low < geo.LANDSCAPE_TOL < high
+    assert not geo.landscape_is_stable((low + high) / 2)
+    assert geo.landscape_is_stable(1.0) and geo.landscape_is_stable(10.0)
+    # And it reads the same for a portrait label as for its landscape mirror.
+    assert geo.landscape_is_stable(0.2) and not geo.landscape_is_stable(1 / 1.4)
+
+
+def test_placing_a_region_keeps_its_own_narrower_tolerance():
+    """Two different questions. Placing a region compares against the artwork's
+    own aspect, which is recorded and exact; turning a crop compares a measured
+    quad against nothing, which is why it needs more room."""
+    assert geo.SQUARE_TOL < geo.LANDSCAPE_TOL
+    # _tilted builds a STANDING label, so this quad reads 0.8:1.
+    quad = _tilted(1.25, 1.0)
+    assert round(geo.quad_aspect(geo.order_quad(quad)), 2) == 0.8
+    # Against 1.25:1 artwork it is a quarter turn out, and placing corrects it:
+    # that comparison is against a recorded, exact number.
+    assert geo.align_quad(quad, 1.25) != geo.order_quad(quad)
+    # Against 0.8:1 artwork it already agrees.
+    assert geo.align_quad(quad, 0.8) == geo.order_quad(quad)
+    # But its CROP is left alone either way, because that decision compares the
+    # measurement against nothing and 1.25 is inside the band tilt can cross.
+    assert geo.landscape_quad(quad) == geo.order_quad(quad)
+
+
+def test_a_near_square_label_is_told_at_enrolment():
+    """Discovered later it is unexplained classifier noise. Said here it is a
+    known property of one label, with a reason and a thing to do about it."""
+    warning = reference_logic.crop_shape_warning(1.4)
+    assert "close to square" in warning
+    assert "1.22" in warning and "1.61" in warning
+    assert "square-on to the camera" in warning
+    assert "still works" in warning, "it is a caveat, not a refusal"
+
+
+def test_a_label_of_any_usable_shape_is_not_warned_about():
+    for aspect in (0.0, 1.0, 1.1, 1.9, 3.3):
+        assert reference_logic.crop_shape_warning(aspect) == ""
