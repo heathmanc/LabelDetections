@@ -177,3 +177,20 @@ def test_a_training_run_needs_four_fields_and_the_rest_is_folded_away():
     # And the knobs inside them are genuinely off screen, not merely greyed.
     assert not win.train_epochs_spin.isVisible()
     assert not win.cls_erasing_spin.isVisible()
+
+
+def test_the_label_library_is_listed_once():
+    """Detector Classes listed the same label ids with the same export-ready
+    counts as the Label tab, minus the target and the reference warning -- and
+    under a two-stage export it named classes the detector does not have, since
+    every label box exports as the generic class there.
+
+    What it uniquely carried was the per-image breakdown, which moved beside
+    the count it complements."""
+    from PySide6.QtWidgets import QGroupBox
+
+    win = _window()
+    titles = {b.title() for b in win.findChildren(QGroupBox)}
+    assert "Detector Classes" not in titles
+    assert not hasattr(win, "class_list_widget")
+    assert win.class_counts_label.isVisible()

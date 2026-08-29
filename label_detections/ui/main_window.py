@@ -3680,7 +3680,6 @@ class MainWindow(QMainWindow):
             return
         self.library = persistence.load_library()
         self._refresh_class_combo()
-        self._refresh_class_list_widget()
         self._refresh_labels()
         self.set_active_label(label.label_id, prompt=True)
 
@@ -3694,7 +3693,6 @@ class MainWindow(QMainWindow):
             return
         self.library = persistence.load_library()
         self._refresh_class_combo()
-        self._refresh_class_list_widget()
         self._refresh_labels()
 
     def _delete_label_data(self, label_id: str) -> int:
@@ -4327,9 +4325,19 @@ class MainWindow(QMainWindow):
         self.tool_combo.addItem("Box fallback", "box")
         self.tool_combo.currentIndexChanged.connect(self._tool_changed)
         self.count_label = QLabel("Battery: 0 / 1   Bungs: 0 / expected 6")
+        # What else is on this image, by name. The line above answers "is this
+        # image usable for the open label"; this one answers "what else did I
+        # draw", which the first cannot say and the label list has no idea
+        # about -- it is the only per-image thing the old Detector Classes box
+        # carried that was not already on screen twice.
+        self.class_counts_label = QLabel("Current image: no labels")
+        self.class_counts_label.setStyleSheet("color: #94a3b8;")
+        self.class_counts_label.setToolTip(
+            "Per-class box counts for the image currently on the canvas.")
         self.dataset_label = QLabel("Dataset: 0 images, 0 labeled, 0 ready")
-        # Both grow with the dataset and were clipped at the rail's edge.
-        for _lbl in (self.count_label, self.dataset_label):
+        # All three grow with the dataset and were clipped at the rail's edge.
+        for _lbl in (self.count_label, self.class_counts_label,
+                     self.dataset_label):
             _lbl.setWordWrap(True)
 
         save = QPushButton("Save")
@@ -4420,6 +4428,7 @@ class MainWindow(QMainWindow):
         v.addWidget(self.guidance_label)
         v.addLayout(form)
         v.addWidget(self.count_label)
+        v.addWidget(self.class_counts_label)
         v.addWidget(self.dataset_label)
         v.addLayout(button_row(zminus, zfit, zplus))
         v.addLayout(button_row(save, save_next))
@@ -4427,30 +4436,6 @@ class MainWindow(QMainWindow):
         v.addWidget(assist_btn)
         v.addLayout(button_row(delete, clear))
         v.addLayout(button_row(copy_prev, health_btn))
-
-        class_box = QGroupBox("Detector Classes")
-        cv = QVBoxLayout(class_box)
-        cv.setContentsMargins(8, 8, 8, 8)
-        cv.setSpacing(4)
-        class_box.setToolTip(
-            "The classes the model is trained on: one per label, plus the "
-            "battery face. This list is the label library -- add a label to add "
-            "a class. Every new one needs a retrain before it is detected."
-        )
-        self.class_list_widget = QListWidget()
-        self.class_list_widget.setMaximumHeight(120)
-        self.class_list_widget.setToolTip(
-            "Derived from the label library, so it cannot disagree with what the\n"
-            "detector is actually trained on. Read-only on purpose: a class list\n"
-            "edited separately from the labels is two answers to one question."
-        )
-        cv.addWidget(self.class_list_widget)
-        self.class_counts_label = QLabel("Current image: no labels")
-        self.class_counts_label.setWordWrap(True)
-        self.class_counts_label.setStyleSheet("color: #94a3b8;")
-        self.class_counts_label.setToolTip("Per-class box counts for the image currently on the canvas.")
-        cv.addWidget(self.class_counts_label)
-        self._refresh_class_list_widget()
 
         export_box = QGroupBox("Export")
         ev = QVBoxLayout(export_box)
@@ -4587,7 +4572,6 @@ class MainWindow(QMainWindow):
         ev.addWidget(export_note)
 
         layout.addWidget(label_box)
-        layout.addWidget(class_box)
         layout.addWidget(export_box)
         layout.addStretch(1)
         return w
@@ -4643,32 +4627,6 @@ class MainWindow(QMainWindow):
         self.class_combo.blockSignals(False)
         self._class_changed(self.class_combo.currentIndex())
 
-    def _refresh_class_list_widget(self) -> None:
-        """The detector's classes, with how many export-ready images back each.
-
-        The count is the useful number: a class with no images behind it is one
-        the model is asked to learn and given nothing to learn it from, which
-        is how a class ends up detected nowhere or everywhere.
-        """
-        if not hasattr(self, "class_list_widget"):
-            return
-        self.class_list_widget.clear()
-        for name in self.library.detector_classes():
-            if name in labels_mod.STRUCTURAL_CLASSES:
-                suffix = "the battery face"
-            else:
-                statuses = list(persistence.dataset_statuses(name).values())
-                ready = sum(1 for st in statuses if review_logic.export_ready(st))
-                # Deliberately no class number here. The export numbers classes
-                # from what the annotations actually contain, so a label with
-                # nothing reviewed is absent from the model and every class
-                # after it sits at a different index than this list would
-                # imply. Names are what inference returns; a number shown here
-                # would be a number that is right only by luck.
-                suffix = f"{ready} ready" if ready else "not in the model yet"
-            item = QListWidgetItem(f"{name}  ({suffix})")
-            item.setData(Qt.ItemDataRole.UserRole, name)
-            self.class_list_widget.addItem(item)
 
 
     def set_class_by_name(self, name: str) -> None:
