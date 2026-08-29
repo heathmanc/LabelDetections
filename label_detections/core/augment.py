@@ -8,24 +8,27 @@ afternoon off one lot and the date code is *identical* in every one, which
 makes it a perfectly good shortcut for "this is a spec plate" until next
 month's date breaks detection for reasons nobody can see.
 
-Two things live here, and they belong together: a check that says whether a
-label actually has that problem, and the fix for when it does.
+What lives here is the check that says whether a label has that problem, and
+nothing that pretends to fix it.
 
-The fix is **cross-grafting**, not synthesis. Fifty images already carry fifty
-real date codes; grafting one image's date-code region into another's label
-produces training data with a genuine, correctly-lit, correctly-perspectived
-code that simply belongs to a different battery. Painting noise or fake text
-there instead would put something in the training set that never occurs at
-runtime, which is a domain gap built on purpose.
+There used to be a fix: cross-grafting, which took a real date code from one
+image and put it into another's label. It was careful -- real pixels, real
+lighting, real perspective, and it only fired where the check measured a region
+as genuinely constant. It was still a stopgap for a data-collection shortcut,
+and the code said so in as many words. Two hundred images off one lot have one
+date code however they are recombined; the number of real date codes in the
+training set does not go up. Photographing units from a second lot is not a
+harder fix, it is the only one that adds information.
+
+So the check reports, and what it asks for is more data rather than more
+copies of the data.
 
 Policy is stdlib and testable bare. OpenCV is imported inside the functions
 that actually touch pixels, so importing this module costs nothing.
 """
 from __future__ import annotations
 
-import random
 from dataclasses import dataclass
-from typing import Any, Iterable
 
 from . import geometry as geo
 
@@ -84,7 +87,7 @@ def variance_verdict(name: str, score: float, images: int) -> str:
                 f"(variation {score:.2f}). Check whether they all came from one "
                 "lot -- if so the model can use it as a shortcut for the class, "
                 "and a new value would then break detection. Capture across more "
-                "lots, or turn on variable-region copies at export.")
+                "lots.")
     if score < CLEARLY_VARIED:
         return (f"'{name}': varies a little across {images} images "
                 f"(variation {score:.2f}). Worth more spread if these came from "
@@ -108,20 +111,6 @@ class RegionReport:
     def text(self) -> str:
         return variance_verdict(self.name, self.score, self.images)
 
-
-def plan_copies(reports: Iterable[RegionReport], requested: int) -> int:
-    """How many extra copies to write, given what the check found.
-
-    Zero when nothing is at risk: recombining a region that already varies adds
-    training images that teach nothing, and they dilute the real ones.
-    """
-    requested = max(0, int(requested))
-    if not requested:
-        return 0
-    return requested if any(r.at_risk for r in reports) else 0
-
-
-# --- pixels ----------------------------------------------------------------
 
 def _cv2():
     import cv2  # imported here so the policy above stays importable bare
@@ -206,110 +195,6 @@ def region_variance(crops: list) -> float:
     return cross / within
 
 
-def match_levels(patch, reference):
-    """Shift a patch onto the reference's label stock.
-
-    The donor came from a different battery under slightly different light, so
-    its stock sits at a different grey. Pasted as-is that shows as a faint
-    rectangle -- an artifact occurring nowhere at runtime, which a network will
-    happily learn as the thing marking a training image.
-
-    Shifted by the difference of medians, and deliberately not rescaled. Median
-    rather than mean because the two crops carry different amounts of text, and
-    a mean is dragged around by how much ink happens to be in each. Contrast is
-    left alone because both were printed by the same process on the same stock:
-    rescaling it would only distort the donor's glyphs to match the target's
-    text coverage, which is not a thing they should agree on.
-    """
-    np = _np()
-    if patch is None or reference is None or not getattr(reference, "size", 0):
-        return patch
-    shift = float(np.median(reference.astype(np.float32))) - \
-        float(np.median(patch.astype(np.float32)))
-    return np.clip(patch.astype(np.float32) + shift, 0, 255).astype(patch.dtype)
-
-
-# One pixel, not more. Feathering was meant to hide a seam, but once the patch
-# is levelled onto the same stock there is no seam to hide -- and a wide ramp
-# blends two different values together, which shows up as exactly the ghosted
-# rectangle it was supposed to prevent. Measured across 0/1/3 px on real
-# grafts: 0 and 1 are clean, 3 is visibly outlined.
-DEFAULT_FEATHER = 1
-
-
-def graft_region(image, box: dict, rect: list[float], patch,
-                 feather: int = DEFAULT_FEATHER):
-    """Paste a rectified patch into a region of an image.
-
-    The patch is levelled to the target region first, then feathered, so the
-    result carries a different value printed in the same ink under the same
-    light -- which is the only thing that makes it usable as training data.
-    """
-    cv2, np = _cv2(), _np()
-    quad = region_quad(box, rect)
-    if quad is None or patch is None or image is None:
-        return image
-
-    existing = rectify_region(image, box, rect,
-                              size=(patch.shape[1], patch.shape[0]))
-    patch = match_levels(patch, existing)
-
-    height, width = patch.shape[:2]
-    src = np.array([[0, 0], [width - 1, 0], [width - 1, height - 1], [0, height - 1]],
-                   dtype=np.float32)
-    dst = np.array(quad, dtype=np.float32)
-    try:
-        matrix = cv2.getPerspectiveTransform(src, dst)
-    except Exception:
-        return image
-
-    shape = (image.shape[1], image.shape[0])
-    warped = cv2.warpPerspective(patch, matrix, shape)
-    mask = np.full((height, width), 255, dtype=np.uint8)
-    if feather > 0:
-        mask[:feather, :] = 0
-        mask[-feather:, :] = 0
-        mask[:, :feather] = 0
-        mask[:, -feather:] = 0
-    warped_mask = cv2.warpPerspective(mask, matrix, shape)
-    if feather > 0:
-        blur = max(3, feather * 2 + 1)
-        warped_mask = cv2.GaussianBlur(warped_mask, (blur, blur), 0)
-
-    alpha = (warped_mask.astype(np.float32) / 255.0)[:, :, None]
-    blended = image.astype(np.float32) * (1 - alpha) + warped.astype(np.float32) * alpha
-    return blended.astype(image.dtype)
-
-
-def shuffle_patch(crop, rng: random.Random, tiles: int = 6):
-    """Scramble a crop's own tiles. The fallback when there is no donor.
-
-    Keeps the local texture -- ink on label stock, the same gloss and the same
-    lighting -- while destroying the glyphs, so it still reads as something
-    printed rather than as noise.
-    """
-    np = _np()
-    if crop is None or not getattr(crop, "size", 0):
-        return crop
-    height, width = crop.shape[:2]
-    step_y = max(1, height // 2)
-    step_x = max(1, width // max(1, tiles))
-    blocks = []
-    for y in range(0, height - step_y + 1, step_y):
-        for x in range(0, width - step_x + 1, step_x):
-            blocks.append(((y, x), crop[y:y + step_y, x:x + step_x].copy()))
-    if len(blocks) < 2:
-        return crop
-    contents = [b for _pos, b in blocks]
-    rng.shuffle(contents)
-    out = crop.copy()
-    for ((y, x), _original), content in zip(blocks, contents):
-        out[y:y + content.shape[0], x:x + content.shape[1]] = content
-    return out
-
-
-# --- dataset-level ---------------------------------------------------------
-
 def _label_boxes(entry, label_id: str) -> list[dict]:
     return [b for b in (entry.annotation.get("boxes") or [])
             if str(b.get("label_id", "")) == str(label_id)]
@@ -368,68 +253,7 @@ def scan_text(reports: list[RegionReport]) -> str:
         lines.append("")
         lines.append(
             f"{len(at_risk)} region(s) are constant enough to be learned as a "
-            "shortcut. Capturing across more lots is the real fix; variable-region "
-            "copies at export are the stopgap.")
+            "shortcut. The fix is captures from another lot -- recombining the "
+            "ones already collected cannot add a date code that was never "
+            "photographed.")
     return "\n".join(lines)
-
-
-def augmented_variants(entry, label, copies: int, donors: dict, rng: random.Random,
-                       *, read=None) -> list:
-    """Extra training images for one entry, with its variable regions replaced.
-
-    Donor content comes from other images of the same label -- real values,
-    correctly lit, simply belonging to a different battery. Only when no donor
-    exists does it fall back to scrambling the region's own tiles.
-
-    The annotation is untouched: same box, same class, same everything. Only
-    pixels inside the regions change, which is the whole point.
-    """
-    read = read or _read
-    regions = variable_regions(label)
-    boxes = _label_boxes(entry, str(entry.label_id))
-    if not regions or not boxes or copies <= 0:
-        return []
-
-    base = read(entry.image)
-    if base is None:
-        return []
-
-    out = []
-    for _ in range(int(copies)):
-        image = base.copy()
-        changed = False
-        for box in boxes:
-            for name, rect in regions:
-                pool = [c for src, c in donors.get(name, []) if src != entry.image]
-                if pool:
-                    patch = pool[rng.randrange(len(pool))]
-                else:
-                    own = rectify_region(base, box, rect)
-                    patch = shuffle_patch(own, rng) if own is not None else None
-                if patch is None:
-                    continue
-                image = graft_region(image, box, rect, patch)
-                changed = True
-        if changed:
-            out.append(image)
-    return out
-
-
-def donor_pool(entries, label, *, read=None) -> dict:
-    """``{region name: [(source image, crop), ...]}`` across a label's images."""
-    read = read or _read
-    pool: dict[str, list] = {}
-    for name, rect in variable_regions(label):
-        collected = []
-        for entry in entries:
-            image = None
-            for box in _label_boxes(entry, str(entry.label_id)):
-                if image is None:
-                    image = read(entry.image)
-                if image is None:
-                    break
-                crop = rectify_region(image, box, rect)
-                if crop is not None:
-                    collected.append((entry.image, crop))
-        pool[name] = collected
-    return pool

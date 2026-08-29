@@ -1,4 +1,17 @@
-"""Variable-region checking, and cross-grafting for when it finds a problem."""
+"""Regions of a label that change between units, and whether they actually do.
+
+A date code, a serial, a lot number: the artwork around them holds still and
+they do not. Collect two hundred images in one afternoon off one lot and the
+code is IDENTICAL in every one, which makes it a perfectly good shortcut for
+"this is a PC680" until next month's date breaks detection for reasons nobody
+can see.
+
+This measures that and says so. It used to also offer a fix -- grafting a real
+date code from one image into another's label -- and that is gone. It was
+careful about it, and it was still a stopgap: two hundred images off one lot
+carry one date code however they are recombined. The number of real codes in
+the training set does not go up. A second lot is the only thing that adds one.
+"""
 from __future__ import annotations
 
 import os
@@ -51,15 +64,6 @@ def test_the_verdict_explains_the_failure_rather_than_printing_a_number():
 
 def test_too_few_images_is_reported_as_unknown_not_as_constant():
     assert "not enough to tell" in augment.variance_verdict("date_code", 0.0, 1)
-
-
-def test_copies_are_only_written_for_regions_that_need_them():
-    at_risk = augment.RegionReport("sp", "date_code", [0, 0, 1, 1], 0.0, 40)
-    fine = augment.RegionReport("sp", "date_code", [0, 0, 1, 1], 0.3, 40)
-    assert augment.plan_copies([at_risk], 3) == 3
-    assert augment.plan_copies([fine], 3) == 0
-    assert augment.plan_copies([at_risk], 0) == 0
-    assert augment.plan_copies([], 3) == 0
 
 
 def test_a_two_image_sample_is_not_treated_as_at_risk():
@@ -122,65 +126,9 @@ def test_rectifying_deskews_so_crops_from_any_angle_compare():
 
 
 @pytestmark_cv
-def test_grafting_replaces_the_region_and_leaves_the_rest_alone():
-    target = _plate("2026-01-04")
-    donor_crop = augment.rectify_region(_plate("2027-09-30"), BOX, DATE_REGION)
-    grafted = augment.graft_region(target.copy(), BOX, DATE_REGION, donor_crop)
-
-    after = augment.rectify_region(grafted, BOX, DATE_REGION)
-    before = augment.rectify_region(target, BOX, DATE_REGION)
-    assert augment.region_variance([before, after]) > augment.NEAR_IDENTICAL
-
-    # The model number sits outside the region and must be untouched.
-    header = (slice(30, 70), slice(30, 200))
-    assert np.array_equal(target[header], grafted[header])
-
-
 @pytestmark_cv
-def test_a_graft_leaves_no_seam_even_from_a_differently_lit_donor():
-    """A visible rectangle around the region occurs nowhere at runtime, so a
-    network would learn it as the thing marking a training image."""
-    target = _plate("2026-01-04")
-    quad = [[int(v) for v in p] for p in augment.region_quad(BOX, DATE_REGION)]
-    x0, y0 = quad[0]
-
-    for offset in (0, 25, -30):
-        donor = augment.rectify_region(
-            cv2.convertScaleAbs(_plate("2028-11-27"), alpha=1.0, beta=offset),
-            BOX, DATE_REGION)
-        grafted = augment.graft_region(target.copy(), BOX, DATE_REGION, donor)
-        outside = grafted[y0 - 4, x0 + 40].astype(int)
-        inside = grafted[y0 + 4, x0 + 2].astype(int)
-        assert abs(int(outside.mean()) - int(inside.mean())) <= 2, \
-            f"stock tone jumps at the region border with a donor {offset:+} grey"
-
-
 @pytestmark_cv
-def test_levels_are_matched_on_the_median_not_the_mean():
-    """The crops carry different amounts of ink, and a mean is dragged around
-    by how much -- which is what left a tonal patch behind."""
-    dense = _plate("8888-88-88")
-    sparse = _plate("1-1")
-    dense_crop = augment.rectify_region(dense, BOX, DATE_REGION)
-    sparse_crop = augment.rectify_region(sparse, BOX, DATE_REGION)
-    matched = augment.match_levels(sparse_crop, dense_crop)
-    assert abs(float(np.median(matched)) - float(np.median(dense_crop))) < 2.0
-    # Contrast is left alone: same ink, same stock, same printing process.
-    assert abs(float(matched.std()) - float(sparse_crop.std())) < 2.0
-
-
 @pytestmark_cv
-def test_the_shuffle_fallback_destroys_the_glyphs_but_keeps_the_texture():
-    import random
-
-    crop = augment.rectify_region(_plate("2026-01-04"), BOX, DATE_REGION)
-    shuffled = augment.shuffle_patch(crop, random.Random(1))
-    assert shuffled.shape == crop.shape
-    assert augment.region_variance([crop, shuffled]) > augment.NEAR_IDENTICAL
-    # Same ink, same stock: the overall brightness barely moves.
-    assert abs(float(shuffled.mean()) - float(crop.mean())) < 6.0
-
-
 @pytestmark_cv
 def test_a_blank_region_scores_zero_rather_than_dividing_by_nothing():
     blank = [augment.rectify_region(np.full((180, 260, 3), 200, np.uint8),
@@ -233,74 +181,10 @@ VARIED = ["2026-01-04", "2026-03-19", "2026-07-28", "2026-11-02",
 
 
 @pytestmark_cv
-def test_a_constant_region_gets_extra_copies(tmp_path):
-    from label_detections.core import yolo_export
-
-    out = tmp_path / "ds"
-    yolo_export.write_dataset(out, _entries(tmp_path, CONSTANT),
-                              library=_library(), augment=2, seed=1)
-    rows = (out / "manifest.csv").read_text(encoding="utf-8").splitlines()[1:]
-    augmented = [r for r in rows if r.endswith(",1")]
-    assert augmented, "a constant date code is exactly the case this exists for"
-    assert all(r.startswith("train,") for r in augmented), \
-        "recombined images validate nothing except recombined images"
-
-
 @pytestmark_cv
-def test_a_region_that_already_varies_gets_none(tmp_path):
-    """Recombining it teaches nothing and dilutes the real images."""
-    from label_detections.core import yolo_export
-
-    out = tmp_path / "ds"
-    yolo_export.write_dataset(out, _entries(tmp_path, VARIED),
-                              library=_library(), augment=2, seed=1)
-    rows = (out / "manifest.csv").read_text(encoding="utf-8").splitlines()[1:]
-    assert not [r for r in rows if r.endswith(",1")]
-    assert "already vary" in (out / "split_report.txt").read_text(encoding="utf-8")
-
-
 @pytestmark_cv
-def test_asking_for_none_writes_none(tmp_path):
-    from label_detections.core import yolo_export
-
-    out = tmp_path / "ds"
-    yolo_export.write_dataset(out, _entries(tmp_path, CONSTANT),
-                              library=_library(), augment=0, seed=1)
-    rows = (out / "manifest.csv").read_text(encoding="utf-8").splitlines()[1:]
-    assert not [r for r in rows if r.endswith(",1")]
-
-
 @pytestmark_cv
-def test_an_augmented_image_carries_the_same_labels_as_its_original(tmp_path):
-    """Only pixels inside the region change. The box is untouched."""
-    from label_detections.core import yolo_export
-
-    out = tmp_path / "ds"
-    yolo_export.write_dataset(out, _entries(tmp_path, CONSTANT),
-                              library=_library(), augment=1, seed=1)
-    labels = sorted((out / "labels" / "train").glob("*.txt"))
-    augmented = [p for p in labels if "__aug" in p.name]
-    plain = [p for p in labels if "__aug" not in p.name]
-    assert augmented and plain
-    assert {p.read_text(encoding="utf-8") for p in augmented} == \
-        {p.read_text(encoding="utf-8") for p in plain}
-
-
 @pytestmark_cv
-def test_the_augmented_pixels_really_differ_from_the_original(tmp_path):
-    from label_detections.core import yolo_export
-
-    out = tmp_path / "ds"
-    yolo_export.write_dataset(out, _entries(tmp_path, CONSTANT),
-                              library=_library(), augment=1, seed=3)
-    images = sorted((out / "images" / "train").glob("*.jpg"))
-    augmented = next(p for p in images if "__aug" in p.name)
-    original = next(p for p in images if "__aug" not in p.name)
-    a = augment.rectify_region(cv2.imread(str(augmented)), BOX, DATE_REGION)
-    b = augment.rectify_region(cv2.imread(str(original)), BOX, DATE_REGION)
-    assert augment.region_variance([a, b]) > 0.0
-
-
 @pytestmark_cv
 def test_the_check_ships_with_the_dataset_either_way(tmp_path):
     """A region that is the same picture in every image is worth knowing about
@@ -309,7 +193,7 @@ def test_the_check_ships_with_the_dataset_either_way(tmp_path):
 
     out = tmp_path / "ds"
     yolo_export.write_dataset(out, _entries(tmp_path, CONSTANT),
-                              library=_library(), augment=0, seed=1)
+                              library=_library(), seed=1)
     report = (out / "variable_regions.txt").read_text(encoding="utf-8")
     assert "date_code" in report
     assert "looks the same" in report
@@ -321,9 +205,7 @@ def test_a_label_with_no_variable_regions_is_left_entirely_alone(tmp_path):
 
     out = tmp_path / "ds"
     yolo_export.write_dataset(out, _entries(tmp_path, CONSTANT),
-                              library=_library(vary_region=False), augment=3, seed=1)
-    rows = (out / "manifest.csv").read_text(encoding="utf-8").splitlines()[1:]
-    assert not [r for r in rows if r.endswith(",1")]
+                              library=_library(vary_region=False), seed=1)
     assert not (out / "variable_regions.txt").exists()
 
 
@@ -334,3 +216,20 @@ def test_scan_text_names_what_to_do_about_it(tmp_path):
     assert "date_code" in text
     assert "shortcut" in text
     assert "1 region(s) are constant enough" in text
+
+
+@pytestmark_cv
+def test_the_export_writes_no_image_that_was_not_photographed(tmp_path):
+    """Every row in the manifest points at a real capture. The manifest used to
+    carry an `augmented` column and rows ending in ,1 -- images composed out of
+    two others, counted in the training set as though they were evidence."""
+    from label_detections.core import yolo_export
+
+    out = tmp_path / "ds"
+    yolo_export.write_dataset(out, _entries(tmp_path, CONSTANT),
+                              library=_library(), seed=1)
+    lines = (out / "manifest.csv").read_text(encoding="utf-8").splitlines()
+    assert "augmented" not in lines[0]
+
+    written = sorted(p.name for p in (out / "images").rglob("*.jpg"))
+    assert written and not [n for n in written if "__aug" in n]

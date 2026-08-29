@@ -4425,16 +4425,6 @@ class MainWindow(QMainWindow):
         self.export_task_combo = QComboBox()
         self.export_task_combo.addItem("OBB dataset - all labeled classes", "obb")
         self.export_task_combo.addItem("Detect boxes dataset - compatibility", "detect")
-        self.export_augment_spin = QSpinBox()
-        self.export_augment_spin.setRange(0, 10)
-        self.export_augment_spin.setValue(0)
-        self.export_augment_spin.setToolTip(
-            "Extra training copies per image with variable regions -- date codes, "
-            "serials -- grafted from other images of the same label.\n\n"
-            "Only written for labels whose regions turn out to be near-identical "
-            "across the dataset; ones that already vary get none, because "
-            "recombining them teaches nothing and dilutes the real images.\n\n"
-            "Check Variable Regions (Ctrl+Shift+G) says which is which.")
         exp = QPushButton("Export Dataset")
         exp.clicked.connect(self.export_yolo)
         exp_all = QPushButton("Export All")
@@ -4521,10 +4511,6 @@ class MainWindow(QMainWindow):
 
         ev.addWidget(QLabel("Export task"))
         ev.addWidget(self.export_task_combo)
-        augment_row = QHBoxLayout()
-        augment_row.addWidget(QLabel("Variable-region copies"))
-        augment_row.addWidget(self.export_augment_spin, 1)
-        ev.addLayout(augment_row)
         ev.addLayout(export_btn_row)
         ev.addWidget(exp_two)
         export_note = QLabel("Exports annotation class names as-is. Reviewed and force-reviewed images only.")
@@ -7869,11 +7855,6 @@ class MainWindow(QMainWindow):
         self.clahe_clip_slider.setValue(20)
         self.clahe_grid_slider.setValue(8)
 
-    def _export_augment(self) -> int:
-        if not hasattr(self, "export_augment_spin"):
-            return 0
-        return int(self.export_augment_spin.value())
-
     def _novelty_dataset(self) -> Path | None:
         """The classification crops to measure from.
 
@@ -8421,7 +8402,7 @@ class MainWindow(QMainWindow):
                 f"Exporting {self.label_id}",
                 lambda progress: export_label_yolo(
                     self.label_id, task=task, reviewed_only=reviewed_only,
-                    library=self.library, augment=self._export_augment(),
+                    library=self.library,
                     progress=progress))
         except Exception as e:
             QMessageBox.warning(self, "Export", str(e))
@@ -8456,7 +8437,7 @@ class MainWindow(QMainWindow):
                 "Exporting every label",
                 lambda progress: export_all_labels_yolo(
                     task=task, reviewed_only=reviewed_only, library=self.library,
-                    augment=self._export_augment(), progress=progress))
+                    progress=progress))
         except Exception as e:
             QMessageBox.warning(self, "Export All Labels", str(e))
             return

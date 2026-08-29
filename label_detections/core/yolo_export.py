@@ -234,79 +234,14 @@ def _write_split(out: Path, entries: list[dataset_logic.Entry], class_index: dic
     return rows
 
 
-def _write_augmented(out: Path, entries: list[dataset_logic.Entry],
-                     class_index: dict[str, int], task: str, library,
-                     copies: int, seed: int,
-                     class_mode: str = "label_id") -> tuple[list[str], list[str]]:
-    """Extra training images with each label's variable regions replaced.
-
-    Train only, never validation: recombined images validate nothing except how
-    well the model handles recombined images.
-
-    Returns (manifest rows, notes for the report).
-    """
-    import random
-
-    rng = random.Random(seed)
-    rows: list[str] = []
-    notes: list[str] = []
-    if copies <= 0 or library is None:
-        return rows, notes
-
-    by_label: dict[str, list] = {}
-    for entry in entries:
-        by_label.setdefault(str(entry.label_id), []).append(entry)
-
-    for label_id, group in sorted(by_label.items()):
-        label = library.get(label_id)
-        if label is None or not augment_logic.variable_regions(label):
-            continue
-        reports = augment_logic.scan_entries(group, library)
-        planned = augment_logic.plan_copies(reports, copies)
-        if not planned:
-            notes.append(
-                f"{label_id}: variable regions already vary across its images, so "
-                "no extra copies were written.")
-            continue
-
-        donors = augment_logic.donor_pool(group, label)
-        written = 0
-        for entry in group:
-            variants = augment_logic.augmented_variants(
-                entry, label, planned, donors, rng)
-            for index, image in enumerate(variants):
-                stem = f"{safe_token(label_id)}__aug{index}__{Path(entry.image).stem}"
-                target = out / "images" / "train" / f"{stem}.jpg"
-                try:
-                    import cv2
-                    if not cv2.imwrite(str(target), image):
-                        continue
-                except Exception:
-                    continue
-                boxes = _write_label_file(out, "train", stem, entry.annotation,
-                                          class_index, task, class_mode)
-                rows.append(f"train,{label_id},{target.name},{boxes},"
-                            f"{entry.session or entry.source or ''},1")
-                written += 1
-        notes.append(
-            f"{label_id}: {written} extra training image(s) written with variable "
-            f"regions grafted from other images of the same label.")
-    return rows, notes
-
-
 def write_dataset(out: Path, entries: list[dataset_logic.Entry], *, task: str = "obb",
                   split_train: float = DEFAULT_SPLIT_TRAIN, seed: int = DEFAULT_SEED,
                   reviewed_only: bool = True, library=None,
-                  augment: int = 0, class_mode: str = "label_id",
+                  class_mode: str = "label_id",
                   progress=None) -> Path:
     """Write a YOLO dataset from already-collected entries.
 
     ``class_mode`` picks what the detector's classes mean -- see CLASS_MODES.
-
-    ``augment`` asks for that many extra training copies per image of any label
-    whose variable regions turn out to be constant across the dataset -- see
-    ``core/augment.py``. Labels whose regions already vary get none, because
-    recombining them teaches nothing and dilutes the real images.
 
     ``progress`` is called as ``progress(done, total, message)`` as images are
     copied. Optional and ignored by every non-interactive caller: it exists
@@ -348,9 +283,9 @@ def write_dataset(out: Path, entries: list[dataset_logic.Entry], *, task: str = 
         shutil.rmtree(out)
     out.mkdir(parents=True, exist_ok=True)
 
-    # Copies plus the augmented copies, so the bar does not reach the end and
+    # Copies only.
     # then sit there through a phase nobody was told about.
-    total = len(train) + len(val) + (len(train) * max(0, augment))
+    total = len(train) + len(val)
     done = 0
 
     def tick(message: str) -> None:
@@ -362,15 +297,10 @@ def write_dataset(out: Path, entries: list[dataset_logic.Entry], *, task: str = 
     if progress is not None:
         progress(0, total, "Preparing")
 
-    rows = ["split,label_id,image,boxes,group,augmented"]
+    rows = ["split,label_id,image,boxes,group"]
     rows += _write_split(out, train, class_index, "train", task, class_mode, tick)
     rows += _write_split(out, val, class_index, "val", task, class_mode, tick)
 
-    if progress is not None and augment:
-        progress(done, total, "Building augmented copies")
-    augmented_rows, augment_notes = _write_augmented(
-        out, train, class_index, task, library, augment, seed, class_mode)
-    rows += augmented_rows
     if progress is not None:
         progress(total, total, "Writing the manifest")
 
@@ -390,15 +320,12 @@ def write_dataset(out: Path, entries: list[dataset_logic.Entry], *, task: str = 
     # The split report ships with the dataset on purpose: a reviewer needs to
     # see that no capture group straddles train and val before trusting a
     # validation number.
-    split_text = report.text()
-    if augment_notes:
-        split_text += "\n\nVariable regions:\n" + "\n".join(
-            f"  {note}" for note in augment_notes)
-    (out / "split_report.txt").write_text(split_text + "\n", encoding="utf-8")
+    (out / "split_report.txt").write_text(report.text() + "\n", encoding="utf-8")
 
-    # The check ships with the dataset whether or not anything was augmented: a
-    # region that is the same picture in every image is worth knowing about
-    # before training, not after a month of drift.
+    # The variable-region check ships with the dataset: a region that is the
+    # same picture in every image is worth knowing about before training rather
+    # than after a month of drift. It reports; it no longer offers to paper
+    # over what it finds by recombining the images already collected.
     if library is not None:
         scan = augment_logic.scan_entries(entries, library)
         if scan:
@@ -411,7 +338,7 @@ def export_label_yolo(label_id: str, *, task: str = "obb", reviewed_only: bool =
                       split_train: float = DEFAULT_SPLIT_TRAIN,
                       seed: int = DEFAULT_SEED, out: Path | None = None,
                       class_mode: str = "label_id",
-                      library=None, augment: int = 0, progress=None) -> Path:
+                      library=None, progress=None) -> Path:
     """Export one label's dataset on its own.
 
     Useful for checking a single label in isolation. The normal training run
@@ -427,7 +354,7 @@ def export_label_yolo(label_id: str, *, task: str = "obb", reviewed_only: bool =
     target = out or (EXPORT_DIR / f"{safe_token(label_id)}_{task}")
     return write_dataset(target, entries, task=task, split_train=split_train,
                          seed=seed, reviewed_only=reviewed_only,
-                         library=library, augment=augment, class_mode=class_mode,
+                         library=library, class_mode=class_mode,
                          progress=progress)
 
 
@@ -435,7 +362,7 @@ def export_all_labels_yolo(*, task: str = "obb", reviewed_only: bool = True,
                            split_train: float = DEFAULT_SPLIT_TRAIN,
                            seed: int = DEFAULT_SEED, out: Path | None = None,
                            class_mode: str = "label_id",
-                           library=None, augment: int = 0, progress=None) -> Path:
+                           library=None, progress=None) -> Path:
     """Export every label's dataset into one training set.
 
     This is the normal export, and the only one worth trusting. Labels gather
@@ -459,5 +386,5 @@ def export_all_labels_yolo(*, task: str = "obb", reviewed_only: bool = True,
     target = out or (EXPORT_DIR / f"all_labels_{task}")
     return write_dataset(target, entries, task=task, split_train=split_train,
                          seed=seed, reviewed_only=reviewed_only,
-                         library=library, augment=augment, class_mode=class_mode,
+                         library=library, class_mode=class_mode,
                          progress=progress)
