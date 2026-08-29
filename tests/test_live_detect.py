@@ -33,9 +33,11 @@ def test_a_busy_model_never_gets_another_frame():
     assert ld.should_infer(busy=True, since_last_s=1.0) is False
 
 
-def test_inference_does_not_start_more_often_than_the_floor():
-    assert ld.should_infer(False, ld.MIN_INTERVAL_S - 0.01) is False
-    assert ld.should_infer(False, ld.MIN_INTERVAL_S) is True
+def test_a_caller_can_still_ask_for_a_slower_rate():
+    """The mechanism stays even though nothing uses it by default: a rig with a
+    reason to run below what its hardware allows can pass an interval."""
+    assert ld.should_infer(False, 0.02, min_interval_s=0.01) is True
+    assert ld.should_infer(False, 0.02, min_interval_s=0.5) is False
 
 
 def test_the_rate_counts_skipped_frames_rather_than_inverting_the_latency():
@@ -1023,16 +1025,19 @@ def test_a_silent_view_says_why_rather_than_showing_nothing():
         assert cause in ld.QUIET_CAUSES
 
 
-def test_the_start_floor_is_adjustable_rather_than_fixed():
-    """It is a throughput ceiling -- 0.15 caps any hardware at 6.7/s -- but
-    lowering it for everyone destabilised a camera that had been fine, because
-    it also unblocked the display tick and drove the whole capture path nine
-    times harder. So it is conservative by default and adjustable, instead of
-    being chosen for the user by someone with no access to the hardware."""
-    assert ld.MIN_INTERVAL_S > 0
-    # should_infer takes it as an argument: the default is a default, not a law.
-    assert ld.should_infer(False, 0.02, min_interval_s=0.01) is True
-    assert ld.should_infer(False, 0.02, min_interval_s=0.5) is False
+def test_nothing_throttles_inference_below_the_hardware():
+    """Two ceilings already stand above this one and neither is a setting: the
+    camera decides how often a frame exists, and `busy` holds until a result
+    comes back, so at most one inference is ever in flight.
+
+    The floor was 0.15 -- 6.7/s -- for a real reason that has since been fixed:
+    the display tick used to run inference inline, so unthrottling one
+    unthrottled the other. Inference is on a worker thread now and the tick is
+    derived from the camera's own rate. What was left held a 30 fps camera and
+    an 8 ms model to 6.7 inferences a second."""
+    assert ld.MIN_INTERVAL_S == 0.0
+    assert ld.should_infer(False, 0.0) is True
+    assert ld.should_infer(True, 10.0) is False, "busy is still the real gate"
 
 
 def test_a_throttled_rate_is_called_out_next_to_the_latency():
@@ -1524,11 +1529,11 @@ def test_the_crash_handler_is_armed_at_startup():
 
 
 @ui
-def test_the_inference_rate_is_a_setting_and_governs_the_pump():
-    """Raising it drives the whole capture path harder, not just the GPU: with
-    inference off the GUI thread, the display tick is free to come round again
-    as soon as it is dispatched. 6.7 -> 100 took that tick from ~7 to ~60 a
-    second and destabilised a camera that had been fine."""
+def test_every_frame_offered_reaches_the_model():
+    """The pump adds no delay of its own. It is only ever handed a frame the
+    camera has actually produced -- the preview tick returns early when the
+    frame counter has not moved -- so throttling here would drop frames the
+    hardware had already paid for."""
     win = _window()
     handed = []
     _watch_infer(win, handed)
@@ -1536,25 +1541,27 @@ def test_the_inference_rate_is_a_setting_and_governs_the_pump():
     win._live_loaded = True
     win._live_busy = False
     try:
-        win.live_rate_spin.setValue(2.0)          # one inference per 500 ms
-        win._live_last_started = time.monotonic() - 0.1
+        win._live_last_started = time.monotonic()      # no gap at all
         win._pump_live_detect(np.zeros((8, 8, 3), np.uint8))
-        assert handed == [], "ignored the configured rate"
+        assert len(handed) == 1, "the pump throttled a frame the camera produced"
 
-        win._live_last_started = time.monotonic() - 0.6
+        # The one gate that does hold: a model still working is not interrupted.
+        win._live_busy = True
         win._pump_live_detect(np.zeros((8, 8, 3), np.uint8))
         assert len(handed) == 1
     finally:
-        win.live_rate_spin.setValue(1.0 / ld.MIN_INTERVAL_S)   # shared window
+        # The window is shared, so this has to go back as it was found.
         win._live_thread = None
         win._live_busy = False
         win._live_loaded = False
 
 
-def test_the_default_rate_is_the_one_that_ran_stably():
-    """Conservative by default. Raising it drives the capture path harder, so
-    it is a step someone takes and can walk back -- not one taken for them."""
-    assert abs(1.0 / ld.MIN_INTERVAL_S - 6.7) < 0.2
+def test_the_rate_is_not_a_setting_anybody_has_to_tune():
+    """It asked an operator to pick a number that only ever sat below two
+    ceilings they could not change."""
+    win = _window()
+    assert not hasattr(win, "live_rate_spin")
+    assert win._infer_interval() == 0.0
 
 
 def test_the_phase_breakdown_separates_the_gpu_from_the_resize():

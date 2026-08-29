@@ -23,18 +23,30 @@ from dataclasses import dataclass, field
 # frame interval: the preview must never wait on the model.
 # A floor on how often inference may START.
 #
-# Back to 0.15, the value this branch inherited and ran stably on. Lowering it
-# to 0.01 was defensible in isolation -- 6.7/s is a hard ceiling on any
-# hardware -- but it did not happen in isolation: with inference also moved off
-# the GUI thread, the display tick stopped being blocked by it and went from
-# ~7 to ~60 iterations a second, so everything downstream, the camera included,
-# was driven nine times harder. That is what destabilised a camera path that
-# had been fine.
+# Zero, because two real ceilings already stand above it and this one only ever
+# sat below them:
 #
-# It is a setting now rather than a constant, so the rate can be raised
-# deliberately and watched, instead of being raised for everyone by someone
-# who could not test it against the hardware.
-MIN_INTERVAL_S = 0.15
+#   The camera. Inference is offered a frame from the preview tick, and that
+#   tick returns early when the frame counter has not moved -- so a frame is
+#   never handed to the model twice, and the model cannot start more often than
+#   the camera delivers. On an unthreaded backend the same bound comes from
+#   read() blocking until a frame exists.
+#
+#   The model. `busy` holds until a result comes back, so at most one inference
+#   is ever in flight; the rate cannot exceed 1/latency however fast frames
+#   arrive.
+#
+# It was 0.15 -- 6.7/s -- for a real reason that has since been fixed. Lowering
+# it once destabilised a camera, because back then the display tick ran
+# inference inline and unthrottling one unthrottled the other. Inference moved
+# to a worker thread and the tick interval is now derived from the camera's own
+# measured rate (see tick_interval_ms), so the two are no longer coupled. What
+# was left was a throttle that held a 30 fps camera and an 8 ms model to 6.7
+# inferences a second, and a spinner asking an operator to tune around it.
+#
+# `should_infer` still takes an interval, so a caller with a reason to run
+# slower than the hardware can pass one. Nothing does by default.
+MIN_INTERVAL_S = 0.0
 
 # How long to wait for a result before assuming it is never coming. The busy
 # flag is cleared by the result, so a result that never arrives -- a worker
