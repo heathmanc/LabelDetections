@@ -69,11 +69,18 @@ def test_main_window_constructs():
 
 
 def test_all_tabs_are_present():
+    """Six, not seven: the contrast sliders adjust the camera preview, so they
+    fold into Capture rather than costing a seventh of a tab bar that could not
+    fit seven (see test_ui_fit)."""
     win = _window()
-    assert win.tabs.count() == 7
+    assert win.tabs.count() == 6
     titles = [win.tabs.tabText(i) for i in range(win.tabs.count())]
-    for expected in ("Label", "Live Capture", "Test Models", "Train", "Live Detect"):
+    for expected in ("Label", "Capture", "Test", "Train", "Detect", "Help"):
         assert expected in titles, f"{expected} missing from {titles}"
+    # The sliders still exist and are still wired, just somewhere else.
+    for name in ("brightness_slider", "contrast_slider", "gamma_slider",
+                 "sharpen_slider", "clahe_check"):
+        assert getattr(win, name, None) is not None, f"{name} lost in the merge"
 
 
 def test_every_tab_renders():
@@ -444,8 +451,8 @@ def test_every_action_has_somewhere_to_be_clicked():
     buttons = {b.text() for b in win.findChildren(QPushButton)}
     in_menus = _menu_action_texts(win)
 
-    for label, method in (("Check Label Scale", "show_label_scale_report"),
-                          ("Check Variable Regions", "check_variable_regions")):
+    for label, method in (("Label Scale", "show_label_scale_report"),
+                          ("Variable Regions", "check_variable_regions")):
         assert label in buttons, f"{method} has no visible button"
 
     unreachable = [

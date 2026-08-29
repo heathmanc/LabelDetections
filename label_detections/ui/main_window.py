@@ -882,9 +882,12 @@ class MainWindow(QMainWindow):
         wanted and cost no height when they are not -- which is the difference
         between a tab you can read and a tab that is every knob at once.
         """
-        box = QGroupBox(title)
+        box = QGroupBox("\u25b8  " + title)
         box.setCheckable(True)
         box.setChecked(False)
+        box.toggled.connect(
+            lambda open_, b=box, t=title: b.setTitle(
+                ("\u25be  " if open_ else "\u25b8  ") + t))
         if tooltip:
             box.setToolTip(tooltip)
         outer = QVBoxLayout(box)
@@ -942,16 +945,15 @@ class MainWindow(QMainWindow):
     def _left_panel(self) -> QWidget:
         tabs = QTabWidget()
         tabs.addTab(self._label_tab(), "Label")
-        tabs.addTab(self._capture_tab(), "Live Capture")
-        tabs.addTab(self._adjust_tab(), "Contrast")
+        tabs.addTab(self._capture_tab(), "Capture")
         self._test_tab_widget = self._model_test_tab()
-        tabs.addTab(self._test_tab_widget, "Test Models")
+        tabs.addTab(self._test_tab_widget, "Test")
         self._train_tab_widget = self._train_tab()
         tabs.addTab(self._train_tab_widget, "Train")
         self._live_tab_widget = self._live_detect_tab()
         self._refresh_live_detector_label()
-        tabs.addTab(self._live_tab_widget, "Live Detect")
-        tabs.addTab(self._help_tab(), "Instructions")
+        tabs.addTab(self._live_tab_widget, "Detect")
+        tabs.addTab(self._help_tab(), "Help")
         self.tabs = tabs
         return tabs
 
@@ -966,18 +968,11 @@ class MainWindow(QMainWindow):
         """
         outer, w, layout = self._scrollable_tab()
 
-        title = QLabel("Test trained model / Count Test only")
-        title.setStyleSheet("font-size: 10pt; font-weight: 700; color: #bfdbfe;")
-        title.setWordWrap(True)
-        layout.addWidget(title)
-
-        help_text = QLabel(
-            "Load your trained LabelVision OBB model, select a test image, then run the model or run a count test."
-        )
-        help_text.setWordWrap(True)
-        layout.addWidget(help_text)
-
         form_box = QGroupBox("Model files")
+        form_box.setToolTip(
+            "Load a trained OBB model and a test image, then run the model or a "
+            "count test. Nothing here changes saved labels: it is a sandbox for "
+            "confirming a model does what the training run said it would.")
         form = QVBoxLayout(form_box)
 
         _saved_test = load_test_settings()
@@ -2624,18 +2619,15 @@ class MainWindow(QMainWindow):
         kv = QVBoxLayout(keep_box)
         kv.setContentsMargins(8, 8, 8, 8)
         kv.setSpacing(4)
-        note = QLabel(
+        keep_box.setToolTip(
             "A frame the model handles badly is the most valuable training image "
             "available. Keeping it puts it straight into this label's dataset, "
             "un-reviewed, ready to label.\n\n"
-            "Keep the image alone when the model got it wrong: a bad box gets "
+            "Keep the frame alone when the model got it wrong: a bad box gets "
             "nudged rather than redrawn, so wrong proposals end up in the "
-            "dataset as slightly-wrong truth. Keep the detections too when it "
-            "was close, and correct them instead of drawing from nothing."
+            "dataset as slightly-wrong truth. Keep the boxes too when it was "
+            "close, and correct them instead of drawing from nothing."
         )
-        note.setWordWrap(True)
-        note.setStyleSheet("color: #9aa4b2;")
-        kv.addWidget(note)
 
         self.live_keep_btn = QPushButton("Keep Frame")
         self.live_keep_btn.setToolTip(
@@ -3356,7 +3348,9 @@ class MainWindow(QMainWindow):
         self.assist_model_combo = QComboBox()
         self.assist_model_combo.setEditable(True)
         for name, note in KNOWN_MODELS:
-            self.assist_model_combo.addItem(f"{name}   {note}", name)
+            self.assist_model_combo.addItem(name, name)
+            self.assist_model_combo.setItemData(
+                self.assist_model_combo.count() - 1, note, Qt.ToolTipRole)
         current = self._assist_model_name()
         index = self.assist_model_combo.findData(current)
         if index >= 0:
@@ -4154,8 +4148,13 @@ class MainWindow(QMainWindow):
         control_layout.setContentsMargins(8, 8, 8, 8)
         control_layout.setHorizontalSpacing(6)
         control_layout.setVerticalSpacing(4)
-        control_buttons = [self.test_cam_btn, self.open_cam_btn, self.close_cam_btn,
-                           cap_raw, cap_adj, cap_ref]
+        # Grouped by what they do, not by the order they were written: running
+        # the camera, then taking a frame, then the two odd ones out. Filling a
+        # two-column grid in declaration order put Stop next to Raw and split
+        # both pairs across rows.
+        control_buttons = [self.open_cam_btn, self.close_cam_btn,
+                           cap_raw, cap_adj,
+                           cap_ref, self.test_cam_btn]
         for i, btn in enumerate(control_buttons):
             btn.setProperty("compactCaptureButton", True)
             btn.setMinimumHeight(24)
@@ -4242,8 +4241,16 @@ class MainWindow(QMainWindow):
         image_button_row2.addWidget(import_images_btn)
         image_button_row2.addWidget(import_bg_btn)
 
+        adjust_box, adjust_body = self._disclosure(
+            "Preview adjustments",
+            "Brightness, contrast, gamma, sharpening and CLAHE, applied to the "
+            "live preview and to captures taken with Adjusted. Non-destructive: "
+            "nothing already on disk is touched.")
+        adjust_body.addWidget(self._adjust_panel())
+
         layout.addWidget(cam_box)
         layout.addWidget(control_box)
+        layout.addWidget(adjust_box)
         layout.addWidget(review_box)
         layout.addWidget(list_header)
         layout.addWidget(self.image_list, 1)
@@ -4258,8 +4265,17 @@ class MainWindow(QMainWindow):
         s.valueChanged.connect(cb)
         return s
 
-    def _adjust_tab(self) -> QWidget:
-        outer, w, layout = self._scrollable_tab()
+    def _adjust_panel(self) -> QWidget:
+        """Preview adjustments, for folding into the Capture tab.
+
+        Its own tab once, which is a whole seventh of the tab bar spent on
+        seven sliders nobody moves twice. They adjust the camera preview, so
+        they belong with the camera.
+        """
+        w = QWidget()
+        layout = QVBoxLayout(w)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
         box = QGroupBox("Non-destructive Preview")
         form = QFormLayout(box)
         self.brightness_slider = self._slider(-100, 100, 0, self._adjustment_changed)
@@ -4284,8 +4300,7 @@ class MainWindow(QMainWindow):
         reset.clicked.connect(self.reset_adjustments)
         layout.addWidget(box)
         layout.addWidget(reset)
-        layout.addStretch()
-        return outer
+        return w
 
 
     def _right_panel(self) -> QWidget:
@@ -4417,14 +4432,11 @@ class MainWindow(QMainWindow):
         cv = QVBoxLayout(class_box)
         cv.setContentsMargins(8, 8, 8, 8)
         cv.setSpacing(4)
-        class_note = QLabel(
+        class_box.setToolTip(
             "The classes the model is trained on: one per label, plus the "
             "battery face. This list is the label library -- add a label to add "
             "a class. Every new one needs a retrain before it is detected."
         )
-        class_note.setWordWrap(True)
-        class_note.setStyleSheet("color: #9aa4b2;")
-        cv.addWidget(class_note)
         self.class_list_widget = QListWidget()
         self.class_list_widget.setMaximumHeight(120)
         self.class_list_widget.setToolTip(
@@ -4498,14 +4510,14 @@ class MainWindow(QMainWindow):
         export_btn_row.addWidget(exp_all)
         checks_row = QHBoxLayout()
         checks_row.setSpacing(6)
-        scale_btn = QPushButton("Check Label Scale")
+        scale_btn = QPushButton("Label Scale")
         scale_btn.clicked.connect(self.show_label_scale_report)
         scale_btn.setToolTip(
             "Measure how many pixels wide your labels actually are, and what "
             "follows: which export to use, what detector imgsz they need, and "
             "whether cropping would help or hurt them. (Ctrl+Shift+S)\n\n"
             "Reads the boxes you have drawn -- no guessing at frame sizes.")
-        variance_btn = QPushButton("Check Variable Regions")
+        variance_btn = QPushButton("Variable Regions")
         variance_btn.clicked.connect(self.check_variable_regions)
         variance_btn.setToolTip(
             "Measure how much each label's date codes and serials really differ "
@@ -4912,13 +4924,12 @@ class MainWindow(QMainWindow):
             QTabBar::tab {
                 background: #111827;
                 color: #cbd5e1;
-                padding: 6px 8px;
-                margin-right: 3px;
+                padding: 6px 7px;
+                margin-right: 2px;
                 border: 1px solid #334155;
                 border-bottom: 0;
                 border-top-left-radius: 8px;
                 border-top-right-radius: 8px;
-                min-width: 70px;
             }
             QTabBar::tab:selected { background: #1e293b; color: white; }
             QSlider::groove:horizontal { height: 6px; background: #334155; border-radius: 3px; }

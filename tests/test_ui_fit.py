@@ -25,8 +25,8 @@ os.environ.setdefault("LABELVISION_DATA_DIR",
 import pytest
 
 try:
-    from PySide6.QtWidgets import (QApplication, QCheckBox, QPushButton,
-                                   QScrollArea)
+    from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox,
+                                   QPushButton, QScrollArea)
     HAVE_QT = True
 except Exception as exc:  # pragma: no cover - depends on the environment
     HAVE_QT = False
@@ -60,34 +60,50 @@ def _laid_out(index: int):
     return win.tabs.widget(index)
 
 
-def _labelled(page):
-    for kind in (QPushButton, QCheckBox):
-        for widget in page.findChildren(kind):
-            if widget.text() and widget.isVisible():
+# What each kind of control spends on decoration before any text is drawn.
+_PADDING = {QCheckBox: 30, QComboBox: 40, QPushButton: 24}
+
+
+def _shown_text(widget) -> str:
+    return (widget.currentText() if isinstance(widget, QComboBox)
+            else widget.text())
+
+
+def _labelled(root):
+    for kind in _PADDING:
+        for widget in root.findChildren(kind):
+            if _shown_text(widget) and widget.isVisible():
                 yield widget
 
 
 def _needs(widget) -> int:
     """Pixels the widget's own text wants, including its decoration."""
-    # A checkbox spends room on its indicator before any text is drawn.
-    padding = 30 if isinstance(widget, QCheckBox) else 24
-    return widget.fontMetrics().horizontalAdvance(widget.text()) + padding
+    padding = next(p for k, p in _PADDING.items() if isinstance(widget, k))
+    return widget.fontMetrics().horizontalAdvance(_shown_text(widget)) + padding
 
 
-def test_no_control_in_the_left_pane_has_its_label_cut_off():
+def _clipped(root) -> list[str]:
+    return [f"{_shown_text(w)!r} wants {_needs(w)}px, has {w.width()}px"
+            for w in _labelled(root)
+            if w.width() and _needs(w) > w.width() + 1]
+
+
+def test_no_control_has_its_label_cut_off():
     """Qt elides rather than wrapping or shrinking, so a label one word too
     long is silently truncated -- "Capture Reference" rendered as "Capture
-    Referenc". Every one of these was found this way rather than by looking."""
+    Referenc", and a combo showing the middle of a sentence because the model
+    name and its note would not both fit. Every one of these was found by
+    measuring rather than by looking."""
     win = _window()
     clipped = []
     for index in range(win.tabs.count()):
         page = _laid_out(index)
-        for widget in _labelled(page):
-            if widget.width() and _needs(widget) > widget.width() + 1:
-                clipped.append(
-                    f"{win.tabs.tabText(index)}: {widget.text()!r} "
-                    f"wants {_needs(widget)}px, has {widget.width()}px")
-    assert not clipped, "clipped in the left pane:\n  " + "\n  ".join(clipped)
+        clipped += [f"{win.tabs.tabText(index)}: {x}" for x in _clipped(page)]
+    # The annotating pane too: it is on screen whichever tab is open, so a
+    # clipped button there is clipped all day.
+    clipped += [f"right pane: {x}" for x in _clipped(win)
+                if not any(x in c for c in clipped)]
+    assert not clipped, "clipped:\n  " + "\n  ".join(clipped)
 
 
 def test_every_tab_fits_the_pane_it_lives_in():
@@ -109,6 +125,20 @@ def test_every_tab_fits_the_pane_it_lives_in():
         if need > cap:
             too_wide.append(f"{win.tabs.tabText(index)}: needs {need}px of {cap}px")
     assert not too_wide, "wider than the pane:\n  " + "\n  ".join(too_wide)
+
+
+def test_the_tab_bar_shows_every_tab_at_once():
+    """A tab bar that does not fit grows arrows and elides -- "Contrast" drawn
+    as "trast" between two scroll buttons, which is how a tab gets lost.
+
+    Seven tabs never fit at any label length. Contrast folded into Capture,
+    where those sliders belong: they adjust the camera preview."""
+    win = _window()
+    bar = win.tabs.tabBar()
+    assert bar.sizeHint().width() <= win.tabs.width(), (
+        f"the tab bar wants {bar.sizeHint().width()}px of "
+        f"{win.tabs.width()}px -- it will scroll")
+    assert bar.count() <= 6, "another tab means another thing that does not fit"
 
 
 def test_the_annotation_pane_can_move_between_images_without_saving():
