@@ -5105,7 +5105,32 @@ class MainWindow(QMainWindow):
         format_grid.addWidget(fps_edit, 1, 1)
         format_grid.addWidget(QLabel("Preview"), 1, 2)
         format_grid.addWidget(preview_combo, 1, 3)
-        format_grid.setColumnStretch(4, 1)
+
+        # Asked of the camera rather than remembered. A Basler has no list of
+        # resolutions to enumerate -- Width and Height are AOI controls with a
+        # range and a step -- so this reports the grid and offers the sizes on
+        # it that are worth having. Typing one off the step gets it silently
+        # rounded, which is the failure this replaces.
+        sizes_combo = QComboBox()
+        sizes_combo.setEnabled(False)
+        sizes_combo.addItem("Detect to fill this", None)
+        detect_btn = QPushButton("Detect")
+        detect_btn.setFixedWidth(70)
+        detect_btn.setToolTip(
+            "Ask the camera what sizes it accepts.\n\n"
+            "Needs the camera open, and reports the real limits rather than a "
+            "table: minimum, maximum and the step it rounds to.\n\n"
+            "On a Basler these are AOI controls, so a smaller size is a "
+            "SMALLER VIEW rather than a scaled-down picture of the same scene "
+            "-- the list says what fraction of the sensor each one is.")
+        detect_btn.clicked.connect(
+            lambda: self._fill_camera_sizes(sizes_combo, width_edit, height_edit))
+        sizes_combo.activated.connect(
+            lambda _i: self._apply_camera_size(sizes_combo, width_edit, height_edit))
+        format_grid.addWidget(QLabel("Sizes"), 2, 0)
+        format_grid.addWidget(sizes_combo, 2, 1, 1, 3)
+        format_grid.addWidget(detect_btn, 2, 4)
+        format_grid.setColumnStretch(5, 1)
 
         form.addRow("Backend", backend_combo)
         form.addRow("Source", source_edit)
@@ -5829,6 +5854,49 @@ class MainWindow(QMainWindow):
         for path in paths:
             if path:
                 capture_session.record(self.label_id, path, session)
+
+    def _fill_camera_sizes(self, combo, width_edit, height_edit) -> None:
+        """Put what the camera says it accepts into the picker."""
+        from label_detections.core import camera_modes
+
+        limits = {}
+        try:
+            limits = self.camera.frame_limits()
+        except Exception:
+            limits = {}
+        combo.clear()
+        if not limits:
+            combo.addItem("Nothing to ask -- open a Basler first", None)
+            combo.setEnabled(False)
+            QMessageBox.information(
+                self, "Camera sizes",
+                "No size limits to read.\n\n"
+                "This asks the camera itself, which only a Basler answers, and "
+                "only while it is open. For any other backend the sizes are "
+                "whatever the driver accepts -- type one and the status line "
+                "reports what actually came back.")
+            return
+
+        width, height = limits["width"], limits["height"]
+        full = (width[1], height[1])
+        combo.setEnabled(True)
+        for size in camera_modes.offered(width, height):
+            combo.addItem(camera_modes.describe(size, full), size)
+        combo.setToolTip(camera_modes.limits_note(width, height))
+        self.status.showMessage(camera_modes.limits_note(width, height), 12000)
+        # Select whatever is already typed, when it is one of these.
+        current = (self._int_line_value(width_edit, 0),
+                   self._int_line_value(height_edit, 0))
+        index = combo.findData(current)
+        if index >= 0:
+            combo.setCurrentIndex(index)
+
+    def _apply_camera_size(self, combo, width_edit, height_edit) -> None:
+        size = combo.currentData()
+        if not size:
+            return
+        width_edit.setText(str(int(size[0])))
+        height_edit.setText(str(int(size[1])))
 
     def _camera_is_live(self) -> bool:
         try:

@@ -383,6 +383,39 @@ class CameraSource:
         except Exception:
             return False
 
+    def frame_limits(self) -> dict:
+        """What sizes this camera will accept: ``{"width": (min, max, inc), ...}``.
+
+        Basler only, and straight off the camera rather than from a table
+        somebody typed. A Basler has no list of resolutions to enumerate --
+        Width and Height are AOI controls with a range and a step, and any
+        value on that grid is valid -- so this reports the grid and lets
+        ``core.camera_modes`` decide what is worth offering from it.
+
+        Empty when there is nothing to ask: no camera open, not a Basler, or a
+        model whose nodes are not readable. The caller then leaves the fields
+        alone, which is what they did before this existed.
+        """
+        if self.cap is None or pylon is None or not self._is_basler():
+            return {}
+        limits = {}
+        for axis, node in (("width", "Width"), ("height", "Height")):
+            high = self._basler_node_limit(node, "GetMax", 0)
+            if high <= 0:
+                return {}
+            limits[axis] = (self._basler_node_limit(node, "GetMin", 0), high,
+                            max(1, self._basler_node_limit(node, "GetInc", 1)))
+        return limits
+
+    def _is_basler(self) -> bool:
+        """A Basler handle, rather than an OpenCV VideoCapture.
+
+        By what the object can do, not by what backend was asked for: a request
+        for Basler that fell back to OpenCV must not then be asked for Basler
+        nodes, and the fallback is not always announced.
+        """
+        return self.cap is not None and hasattr(self.cap, "Width")
+
     def _set_basler_aoi(self, width: int | None, height: int | None) -> str:
         """Set Basler AOI deterministically.
 
