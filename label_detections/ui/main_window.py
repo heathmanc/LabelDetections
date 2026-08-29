@@ -1157,7 +1157,8 @@ class MainWindow(QMainWindow):
         params_box, params_body = self._disclosure(
             "Advanced - detector",
             "Device, image size, batch, epochs and augmentation. Every one of "
-            "these has a working default; Fill From Label Scale sets the one "
+            "these has a working default; Set Image Sizes From Label Scale "
+            "sets the one "
             "that matters most, the image size, from the boxes actually "
             "collected.")
         grid_host = QWidget()
@@ -1300,7 +1301,8 @@ class MainWindow(QMainWindow):
             "Advanced - classifier",
             "Image size here must match the crop size the two-stage export "
             "chose -- a classifier fed a size it did not train at loses "
-            "accuracy with nothing to show for it. Fill From Label Scale "
+            "accuracy with nothing to show for it. Set Image Sizes From "
+            "Label Scale "
             "reads it off the export that produced the crops.")
         cls_host = QWidget()
         cls_grid = QGridLayout(cls_host)
@@ -1365,13 +1367,23 @@ class MainWindow(QMainWindow):
         cls_grid.setColumnStretch(1, 1); cls_grid.setColumnStretch(3, 1)
         cls_body.addWidget(cls_host)
 
-        fill_btn = QPushButton("Fill Both From Label Scale")
+        # "Fill Both" said neither what was filled nor what "both" was. It sets
+        # image sizes -- three of them -- from the same measurement the Label
+        # Scale report is built on, which is what the name should say.
+        fill_btn = QPushButton("Set Image Sizes From Label Scale")
         fill_btn.setToolTip(
-            "Measure the collected boxes and set both image sizes and both data "
-            "paths from what they say -- detector imgsz, and the classifier's "
-            "crop size read from the export that produced it.\n\n"
-            "Beats typing them: these two numbers are the ones that quietly "
-            "make a pipeline underperform when they are guessed.")
+            "Measure the boxes actually collected and set the image sizes from "
+            "what they say:\n\n"
+            "  - the detector's, sized only to FIND a label\n"
+            "  - the classifier's, read from the crops the export wrote\n"
+            "  - the one Test and Live Detect run at, so a model is never run "
+            "at a size it did not train on\n\n"
+            "It fills the two dataset paths to match, from whichever export is "
+            "actually on disk.\n\n"
+            "Beats typing them: these are the numbers that quietly make a "
+            "pipeline underperform when they are guessed, and the last one is "
+            "the single most common reason a good model appears to find "
+            "nothing.")
         fill_btn.clicked.connect(self.fill_training_from_scale)
         layout.addWidget(fill_btn)
 
@@ -1507,7 +1519,7 @@ class MainWindow(QMainWindow):
         }
 
     def fill_training_from_scale(self) -> None:
-        """Put the measured numbers into both stages, and into inference.
+        """Set every image size from the measured boxes, and the paths to match.
 
         Which pipeline is filled follows the export that actually exists, so
         the fields describe the dataset on disk rather than an architecture
@@ -1527,7 +1539,7 @@ class MainWindow(QMainWindow):
         scales = scale_report.measure(entries)
         if not scales:
             QMessageBox.information(
-                self, "Fill From Label Scale",
+                self, "Set Image Sizes",
                 "No boxes measured yet -- draw and save some labels first.")
             return
 
@@ -1580,7 +1592,7 @@ class MainWindow(QMainWindow):
             infer_imgsz = need
         else:
             QMessageBox.information(
-                self, "Fill From Label Scale",
+                self, "Set Image Sizes",
                 "No export found yet. Run Export All (single-stage) or Export "
                 "Two-Stage first -- the fields are filled to match whichever "
                 "dataset is actually on disk.")
@@ -1596,7 +1608,7 @@ class MainWindow(QMainWindow):
                     f"single most common reason a good model appears to find "
                     f"nothing.")
 
-        QMessageBox.information(self, "Filled from label scale", "\n\n".join(notes))
+        QMessageBox.information(self, "Image sizes set", "\n\n".join(notes))
         self.status.showMessage("Training and inference sizes set from the measured boxes", 8000)
 
     def start_classifier_training(self) -> None:

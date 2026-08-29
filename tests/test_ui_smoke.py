@@ -501,7 +501,7 @@ def test_the_train_tab_covers_both_stages():
 
     win = _window()
     buttons = {b.text() for b in win.findChildren(QPushButton)}
-    for label in ("Fill Both From Label Scale", "Export Dataset Details"):
+    for label in ("Set Image Sizes From Label Scale", "Export Dataset Details"):
         assert label in buttons, f"missing: {label}"
     # The three start buttons by attribute: their labels lost the word "Train"
     # to fit the pane, and the row they sit under carries it instead.
