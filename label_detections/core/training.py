@@ -10,6 +10,8 @@ The generated command targets the Ultralytics ``yolo`` CLI, e.g.:
 """
 from __future__ import annotations
 
+import re
+
 from pathlib import Path
 
 VALID_TASKS = ("obb", "detect", "segment", "pose", "classify")
@@ -414,6 +416,108 @@ def format_duration(seconds: float) -> str:
     if m:
         return f"{m}m {s}s"
     return f"{s}s"
+
+
+# --- following a run while it is running ------------------------------------
+#
+# The yolo CLI says everything worth knowing and says it in a scrolling wall.
+# What somebody watching a run actually wants is four things: how far through
+# it is, how long that has taken, roughly how long is left, and whether it is
+# still getting better. All four are in the output already; none of them are
+# legible in it.
+
+# The epoch counter Ultralytics prints at the START of its progress line, both
+# for detection and for classification:
+#
+#     1/100      2.35G      1.234      0.987      1.456     12     640: 100%|...
+#
+# Anchored to the line start on purpose. The same line carries a batch counter
+# ("5/5") further along, and a pattern that matched anywhere would follow that
+# instead -- reporting epoch 5 of 5 on every epoch of a hundred.
+_EPOCH_RE = re.compile(r"^\s*(\d+)\s*/\s*(\d+)\s")
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def parse_epoch(text: str) -> tuple[int, int] | None:
+    """``(done, total)`` off the most recent epoch line, or None.
+
+    Takes a chunk rather than a line: stdout arrives in whatever sizes the pipe
+    hands over, and the last epoch line in a chunk is the current one.
+    """
+    found = None
+    for line in str(text or "").splitlines():
+        match = _EPOCH_RE.match(_ANSI_RE.sub("", line))
+        if match:
+            done, total = int(match.group(1)), int(match.group(2))
+            if total > 0 and done <= total:
+                found = (done, total)
+    return found
+
+
+def eta_seconds(done: int, total: int, elapsed: float) -> float:
+    """How much longer, from the rate so far. 0.0 when it cannot be told.
+
+    Straight-line, and deliberately not smarter. The first epoch of a run
+    carries warm-up, caching and a validation pass that the rest do not, so any
+    estimate made from it is wrong; the honest fix is that it settles within a
+    few epochs rather than a model of what Ultralytics is doing.
+    """
+    done, total = int(done), int(total)
+    if done <= 0 or total <= 0 or done >= total or elapsed <= 0:
+        return 0.0
+    return (float(elapsed) / done) * (total - done)
+
+
+def progress_text(done: int, total: int, elapsed: float) -> str:
+    """One line: how far in, how long that took, how much is left."""
+    parts = []
+    if total > 0:
+        parts.append(f"Epoch {max(0, int(done))} of {int(total)}")
+    elif done > 0:
+        parts.append(f"Epoch {int(done)}")
+    if elapsed > 0:
+        parts.append(f"{format_duration(elapsed)} elapsed")
+    left = eta_seconds(done, total, elapsed)
+    if left > 0:
+        parts.append(f"about {format_duration(left)} left")
+    return "  \u00b7  ".join(parts) if parts else "Starting..."
+
+
+# Which metric to lead with, best first. Matches how summarize_results ranks
+# epochs, so the name and the epoch number describe the same thing.
+HEADLINE_METRICS = ("mAP50-95", "accuracy_top1", "mAP50", "accuracy_top5",
+                    "precision", "recall")
+
+
+def stall_note(rows: list[dict], patience: int = 0) -> str:
+    """Whether it is still improving, and when it will give up if not.
+
+    The number that decides whether to keep waiting. A run whose best epoch was
+    forty ago is finished in every sense that matters, and watching a loss
+    curve twitch tells you that far later than this does.
+    """
+    summary = summarize_results(rows)
+    if not summary["rows"]:
+        return ""
+    best = summary["best"]
+    if not best:
+        return ""
+    # The metric the ranking used, not whichever happens to come first in the
+    # dict. summarize_results picks the best EPOCH by mAP50-95, so naming
+    # mAP50 beside that epoch number reports one metric's value at another
+    # metric's argmax -- two right numbers that do not belong together.
+    name, value = next(((k, best[k]) for k in HEADLINE_METRICS if k in best),
+                       next(iter(best.items())))
+    line = f"Best {name} {value:.4f} at epoch {summary['best_epoch']}"
+    since = int(summary["epochs"]) - int(summary["best_epoch"])
+    if since <= 0:
+        return line + " -- the latest epoch, still improving"
+    line += f", {since} epoch(s) ago"
+    if patience and since >= int(patience):
+        return line + f" -- at the {int(patience)}-epoch patience, so it stops here"
+    if patience:
+        return line + f" -- stops at {int(patience)} without an improvement"
+    return line
 
 
 # --- what a classifier's headline metrics do not measure --------------------

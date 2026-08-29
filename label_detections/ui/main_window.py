@@ -100,6 +100,7 @@ from label_detections.core import dataset_health
 from label_detections.core import storage as storage_mod
 from label_detections.core import reference as reference_logic
 from label_detections.ui import novelty as novelty_ui
+from label_detections.ui.training_monitor import TrainingMonitor
 from label_detections.core import code_reader
 from label_detections.core import text_reader
 from label_detections.core import class_stats
@@ -1417,18 +1418,25 @@ class MainWindow(QMainWindow):
         layout.addWidget(params_box)
         layout.addWidget(cls_box)
 
-        self.train_log = QTextEdit()
-        self.train_log.setReadOnly(True)
-        self.train_log.setMinimumHeight(140)
-        self.train_log.setPlaceholderText("Training output appears here.")
-        layout.addWidget(self.train_log)
+        # The log and the curves used to sit here, in a pane narrow enough that
+        # a single yolo progress line wrapped three times and the chart was
+        # decorative. They live in the training monitor now -- a window with
+        # room for them, which also carries the four numbers that were only
+        # ever implicit in the output. Both widgets are still built here so
+        # every caller that appends a line has something real to append to.
+        self._training_monitor = TrainingMonitor(TrainingMetricsChart(), self)
+        self._training_monitor.set_use_handler(self._use_trained_model)
+        self._training_monitor.stop_btn.clicked.connect(self.stop_training)
+        self.train_log = self._training_monitor.log
+        self.train_metrics_chart = self._training_monitor.chart
 
-        chart_box = QGroupBox("Live training curves")
-        chart_layout = QVBoxLayout(chart_box)
-        chart_layout.setContentsMargins(8, 8, 8, 8)
-        self.train_metrics_chart = TrainingMetricsChart()
-        chart_layout.addWidget(self.train_metrics_chart)
-        layout.addWidget(chart_box)
+        watch_btn = QPushButton("Show Training Window")
+        watch_btn.setToolTip(
+            "Progress, elapsed and remaining time, the best epoch so far, the "
+            "curves and the raw output. Opens by itself when a run starts; "
+            "this is for getting it back after it has been closed.")
+        watch_btn.clicked.connect(self._training_monitor.show_run)
+        layout.addWidget(watch_btn)
 
         # Polls the run's results.csv while training so the chart updates per epoch.
         self._results_csv_path: Path | None = None
@@ -1741,6 +1749,10 @@ class MainWindow(QMainWindow):
 
         if fresh:
             self._begin_fresh_run()
+        self._training_monitor.begin(
+            stage, str(params.get("model", "")), str(params.get("data", "")))
+        self._training_patience = int(params.get("patience", 0) or 0)
+        self._training_monitor.show_run()
         self.train_log.append(f"--- {stage} ---")
         self.train_log.append("$ " + " ".join(cmd) + "\n")
         for b in (self.train_start_btn, self.train_cls_btn, self.train_both_btn):
@@ -1831,9 +1843,8 @@ class MainWindow(QMainWindow):
             return
         rows = training_logic.parse_results_csv(text)
         if rows:
-            epochs = training_logic.metric_series(rows, "epoch")
-            series = training_logic.chart_series(rows)
-            self.train_metrics_chart.set_data(epochs, series)
+            self._training_monitor.set_metrics(
+                rows, getattr(self, "_training_patience", 0))
 
     def _on_train_stdout(self) -> None:
         if self._train_process is None:
@@ -1841,9 +1852,10 @@ class MainWindow(QMainWindow):
         data = bytes(self._train_process.readAllStandardOutput()).decode("utf-8", errors="replace")
         if not data:
             return
-        self.train_log.moveCursor(QTextCursor.End)
-        self.train_log.insertPlainText(data)
-        self.train_log.moveCursor(QTextCursor.End)
+        # The monitor takes the epoch counter off the same chunk it logs.
+        self._training_monitor.append_output(data)
+        self._training_monitor.set_progress(
+            time.time() - getattr(self, "_train_start_time", time.time()))
         self._scan_for_save_dir(data)
 
     # Ultralytics announces its output directory twice: "Logging results to
@@ -1904,6 +1916,20 @@ class MainWindow(QMainWindow):
         self.train_stop_btn.setEnabled(False)
         self._train_process = None
 
+        stage_name = getattr(self, "_train_stage", "detector")
+        if exit_code == 0 and not stopped:
+            headline = f"Finished training the {stage_name}"
+        elif stopped:
+            headline = f"Stopped the {stage_name} run"
+        else:
+            headline = f"The {stage_name} run failed (exit code {exit_code})"
+        self._training_monitor.finish(
+            headline,
+            f"{training_logic.format_duration(elapsed)} in total."
+            + ("" if exit_code == 0 and not stopped
+               else "  Open Output below for what it printed."),
+            weights)
+
         # Train Both: advance to the classifier, but only if the detector
         # actually succeeded. Chaining a classifier onto a failed or cancelled
         # detector run just burns an hour producing the second half of a
@@ -1927,6 +1953,34 @@ class MainWindow(QMainWindow):
                 "was not started.")
 
         self._show_training_summary(exit_code, stopped, elapsed, csv_path, run_dir, weights)
+
+    def _use_trained_model(self, weights: str) -> None:
+        """Put a finished run's weights where the rest of the app reads them.
+
+        The step that was missing at the end of every run: the weights land
+        somewhere under runs/ with a name Ultralytics chose, and using them
+        meant copying a path out of a log. Test Models is the right field
+        because Live Detect reads its detector from the same one.
+        """
+        target = "detector"
+        if getattr(self, "_train_stage", "") == "classifier":
+            if hasattr(self, "live_classifier_edit"):
+                self.live_classifier_edit.setText(weights)
+                target = "stage 2 classifier"
+        elif hasattr(self, "test_model_edit"):
+            self.test_model_edit.setText(weights)
+        self._save_test_settings()
+        # A model already in memory is the previous one; drop it so the next
+        # run of anything picks these weights up.
+        self._test_model = None
+        self._test_model_path = ""
+        self._refresh_live_detector_label()
+        # No dialog. The button says what it does, the field it fills is on
+        # screen and visibly changes, and a modal to dismiss after a click that
+        # did exactly what it promised is one more thing to close.
+        self.status.showMessage(
+            f"{target} is now {Path(weights).name} -- Test Models runs it on a "
+            f"saved image, Live Detect on the camera.", 10000)
 
     def _read_stage_result(self, stage, exit_code, stopped, elapsed,
                            csv_path, run_dir, weights) -> dict:
