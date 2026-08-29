@@ -222,16 +222,27 @@ def test_using_the_model_puts_it_where_the_rest_of_the_app_reads_it(tmp_path):
     weights = tmp_path / "best.pt"
     weights.write_bytes(b"not really weights")
 
-    win._train_stage = "detector"
     win._test_model = object()
-    win._use_trained_model(str(weights))
+    win._use_trained_model([(str(weights), "detector")])
     assert win.test_model_edit.text() == str(weights)
     # And the model already in memory is the previous one.
     assert win._test_model is None
 
-    win._train_stage = "classifier"
-    win._use_trained_model(str(weights))
+    win._use_trained_model([(str(weights), "classifier")])
     assert win.live_classifier_edit.text() == str(weights)
+
+
+def test_both_stages_go_in_together_in_one_click(tmp_path):
+    """A two-stage pipeline is not usable as one half of itself, so applying
+    both is one decision -- and it was two clicks and a tab change."""
+    win = _window()
+    det, cls = tmp_path / "det.pt", tmp_path / "cls.pt"
+    det.write_bytes(b"x")
+    cls.write_bytes(b"x")
+
+    win._use_trained_model([(str(det), "detector"), (str(cls), "classifier")])
+    assert win.test_model_edit.text() == str(det)
+    assert win.live_classifier_edit.text() == str(cls)
 
 
 def test_stopping_is_wired_to_the_window_that_started_it():
@@ -330,13 +341,12 @@ def test_use_this_model_offers_the_open_tabs_weights(tmp_path):
     monitor.finish("Finished", "done", cls)
 
     taken = []
-    monitor.set_use_handler(lambda w, stage: taken.append((w, stage)))
+    monitor.set_use_handler(taken.append)
     try:
-        monitor.tabs.setCurrentWidget(_panel(monitor, "detector"))
+        # Both finished, so one click takes both and the label says so.
+        assert monitor.use_btn.text() == "Use Both Models"
         monitor.use_btn.click()
-        monitor.tabs.setCurrentWidget(_panel(monitor, "classifier"))
-        monitor.use_btn.click()
-        assert taken == [(str(det), "detector"), (str(cls), "classifier")]
+        assert taken == [[(str(det), "detector"), (str(cls), "classifier")]]
     finally:
         monitor.set_use_handler(_window()._use_trained_model)
 
@@ -350,6 +360,7 @@ def test_the_button_follows_the_tab_rather_than_the_run(tmp_path):
     assert monitor.use_btn.isEnabled()
 
     monitor.begin("classifier", "c.pt", "crops", fresh=False)
+    assert monitor.use_btn.text() == "Use This Model", "only one has finished"
     assert not monitor.use_btn.isEnabled(), "the classifier has produced nothing"
     monitor.tabs.setCurrentWidget(_panel(monitor, "detector"))
     assert monitor.use_btn.isEnabled()
@@ -362,3 +373,34 @@ def _is_descendant(widget: QWidget, ancestor: QWidget) -> bool:
             return True
         node = node.parentWidget()
     return False
+
+
+def test_a_failed_run_opens_its_own_output():
+    """The one case where the output IS the answer: a run that dies before its
+    first epoch has no progress, no curves and no metrics to look at."""
+    monitor = _monitor()
+    assert not _panel(monitor).log_box.isChecked()
+
+    monitor.finish("The detector run failed (exit code 1)", "3s in total.",
+                   None, failed=True)
+    assert _panel(monitor).log_box.isChecked()
+    # isHidden, not isVisible: the window itself is not shown in a test, and
+    # isVisible() is false for every descendant of a hidden window.
+    assert not _panel(monitor).log.isHidden()
+
+
+def test_a_run_that_worked_leaves_the_output_folded():
+    monitor = _monitor()
+    monitor.finish("Finished", "2m in total.", None, failed=False)
+    assert not _panel(monitor).log_box.isChecked()
+
+
+def test_the_output_says_it_can_be_opened():
+    """A checkable group box with no affordance is an empty rectangle with a
+    word on it -- which is what it looked like next to the Train tab's
+    disclosures, all of which carry an arrow."""
+    monitor = _monitor()
+    panel = _panel(monitor)
+    assert panel.log_box.title().startswith("▸")
+    panel.log_box.setChecked(True)
+    assert panel.log_box.title().startswith("▾")

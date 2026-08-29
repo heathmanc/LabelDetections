@@ -1928,12 +1928,12 @@ class MainWindow(QMainWindow):
             headline = f"Stopped the {stage_name} run"
         else:
             headline = f"The {stage_name} run failed (exit code {exit_code})"
+        failed = bool(exit_code != 0 and not stopped)
         self._training_monitor.finish(
             headline,
             f"{training_logic.format_duration(elapsed)} in total."
-            + ("" if exit_code == 0 and not stopped
-               else "  Open Output below for what it printed."),
-            weights)
+            + ("  The output is open below." if failed else ""),
+            weights, failed=failed)
 
         # Train Both: advance to the classifier, but only if the detector
         # actually succeeded. Chaining a classifier onto a failed or cancelled
@@ -1960,21 +1960,31 @@ class MainWindow(QMainWindow):
 
         self._show_training_summary(exit_code, stopped, elapsed, csv_path, run_dir, weights)
 
-    def _use_trained_model(self, weights: str, stage: str = "") -> None:
-        """Put a finished run's weights where the rest of the app reads them.
+    def _use_trained_model(self, pairs) -> None:
+        """Put finished runs' weights where the rest of the app reads them.
 
         The step that was missing at the end of every run: the weights land
         somewhere under runs/ with a name Ultralytics chose, and using them
-        meant copying a path out of a log. Test Models is the right field
-        because Live Detect reads its detector from the same one.
+        meant copying a path out of a log. Test Models is the right field for a
+        detector because Live Detect reads its detector from the same one.
+
+        Takes a list because a two-stage pipeline is not usable as one half of
+        itself: when both stages have finished, applying them is one decision
+        and should be one click.
         """
-        target = "detector"
-        if (stage or getattr(self, "_train_stage", "")) == "classifier":
-            if hasattr(self, "live_classifier_edit"):
-                self.live_classifier_edit.setText(weights)
-                target = "stage 2 classifier"
-        elif hasattr(self, "test_model_edit"):
-            self.test_model_edit.setText(weights)
+        taken = []
+        for weights, stage in pairs or []:
+            if stage == "classifier":
+                if hasattr(self, "live_classifier_edit"):
+                    self.live_classifier_edit.setText(weights)
+                    taken.append("stage 2 classifier")
+            elif hasattr(self, "test_model_edit"):
+                self.test_model_edit.setText(weights)
+                taken.append("detector")
+        if not taken:
+            return
+        target = " and ".join(taken)
+        weights = pairs[-1][0]
         self._save_test_settings()
         # A model already in memory is the previous one; drop it so the next
         # run of anything picks these weights up.
@@ -1985,8 +1995,8 @@ class MainWindow(QMainWindow):
         # screen and visibly changes, and a modal to dismiss after a click that
         # did exactly what it promised is one more thing to close.
         self.status.showMessage(
-            f"{target} is now {Path(weights).name} -- Test Models runs it on a "
-            f"saved image, Live Detect on the camera.", 10000)
+            f"Now using this run's weights as the {target}. Test Models runs "
+            f"the detector on a saved image, Live Detect on the camera.", 10000)
 
     def _read_stage_result(self, stage, exit_code, stopped, elapsed,
                            csv_path, run_dir, weights) -> dict:

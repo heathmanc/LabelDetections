@@ -41,6 +41,9 @@ from ..core import training as training_logic
 class StagePanel(QWidget):
     """One training run's own progress, curves and output."""
 
+    OUTPUT_CLOSED = "\u25b8  Output"
+    OUTPUT_OPEN = "\u25be  Output"
+
     def __init__(self, chart: QWidget, parent=None) -> None:
         super().__init__(parent)
         self._total_epochs = 0
@@ -89,18 +92,28 @@ class StagePanel(QWidget):
         self.log.setReadOnly(True)
         self.log.setMinimumHeight(120)
         self.log.setPlaceholderText("Training output appears here.")
-        self.log_box = QGroupBox("Output")
+        self.log_box = QGroupBox(self.OUTPUT_CLOSED)
         self.log_box.setCheckable(True)
         self.log_box.setChecked(False)
         self.log_box.setToolTip(
-            "Everything the yolo command printed. Folded away because it is a "
-            "wall, and opened when a run fails to start -- which is the one "
-            "thing only this can explain.")
+            "Everything the yolo command printed, exactly as it printed it.\n\n"
+            "Folded away because the four lines above are that wall's useful "
+            "content, and opened by itself when a run fails -- a run that dies "
+            "before its first epoch produces no progress, no curves and no "
+            "metrics, and this is the only thing that says why.\n\n"
+            "Also where to look for what Ultralytics reports once and never "
+            "again: the dataset it actually scanned, the device it chose, and "
+            "the directory it is writing to.")
         log_layout = QVBoxLayout(self.log_box)
         log_layout.setContentsMargins(8, 4, 8, 8)
         log_layout.addWidget(self.log)
         self.log.setVisible(False)
         self.log_box.toggled.connect(self.log.setVisible)
+        # The same arrow the Train tab's Advanced sections use. Without it a
+        # closed group box is just an empty rectangle with a word on it.
+        self.log_box.toggled.connect(
+            lambda open_: self.log_box.setTitle(
+                self.OUTPUT_OPEN if open_ else self.OUTPUT_CLOSED))
         layout.addWidget(self.log_box)
 
     # --- while it runs -----------------------------------------------------
@@ -152,7 +165,12 @@ class StagePanel(QWidget):
         if done and self._total_epochs:
             self.bar.setValue(min(int(done), self._total_epochs))
 
-    def finish(self, headline: str, detail: str, weights: Path | None) -> None:
+    def finish(self, headline: str, detail: str, weights: Path | None,
+               failed: bool = False) -> None:
+        if failed:
+            # The one case where the output IS the answer: a run that dies
+            # before its first epoch has no progress, no curves and no metrics.
+            self.log_box.setChecked(True)
         self.what_label.setText(headline)
         self.progress_label.setText(detail)
         if self._total_epochs:
@@ -207,10 +225,13 @@ class TrainingMonitor(QDialog):
         self.use_btn = QPushButton("Use This Model")
         self.use_btn.setEnabled(False)
         self.use_btn.setToolTip(
-            "Put the weights the OPEN tab's run produced into the field the "
-            "rest of the application reads -- Test Models for a detector, "
-            "which is also where Live Detect gets its detector, and the stage "
-            "2 field for a classifier.\n\n"
+            "Put a finished run's weights into the field the rest of the "
+            "application reads -- Test Models for a detector, which is also "
+            "where Live Detect gets its detector, and the stage 2 field for a "
+            "classifier.\n\n"
+            "With both stages finished it takes both at once: a two-stage "
+            "pipeline is not usable as one half of itself. With one, it takes "
+            "the open tab's.\n\n"
             "It is best.pt, not last.pt: the epoch that validated best rather "
             "than the one that happened to be last.")
         self.use_btn.clicked.connect(self._use_clicked)
@@ -294,23 +315,48 @@ class TrainingMonitor(QDialog):
 
     # --- finishing ---------------------------------------------------------
 
-    def finish(self, headline: str, detail: str, weights: Path | None) -> None:
+    def finish(self, headline: str, detail: str, weights: Path | None,
+               failed: bool = False) -> None:
         self.stop_btn.setEnabled(False)
         panel = self.current
         if panel is not None:
-            panel.finish(headline, detail, weights)
+            panel.finish(headline, detail, weights, failed)
         self._refresh_use_button()
 
+    def finished_stages(self) -> list[tuple[str, Path]]:
+        """Every stage that produced weights, in the order they were run."""
+        return [(name, panel.weights) for name, panel in self._panels.items()
+                if panel.weights is not None]
+
     def _refresh_use_button(self) -> None:
+        """One button, two meanings, and the text says which.
+
+        With both stages finished it takes both -- a two-stage pipeline is not
+        usable as one half, so making somebody visit each tab to apply them
+        separately is two clicks to express one decision. Until then it is the
+        open tab's, because that is the only one there is.
+        """
+        done = self.finished_stages()
+        if len(done) > 1:
+            self.use_btn.setText("Use Both Models")
+            self.use_btn.setEnabled(True)
+            return
+        self.use_btn.setText("Use This Model")
         panel = self.panel()
         self.use_btn.setEnabled(panel is not None and panel.weights is not None)
 
     def _use_clicked(self) -> None:
+        if self._on_use is None:
+            return
+        done = self.finished_stages()
+        if len(done) > 1:
+            self._on_use([(str(path), name) for name, path in done])
+            return
         panel = self.panel()
-        if panel is None or panel.weights is None or self._on_use is None:
+        if panel is None or panel.weights is None:
             return
         stage = next((name for name, p in self._panels.items() if p is panel), "")
-        self._on_use(str(panel.weights), stage)
+        self._on_use([(str(panel.weights), stage)])
 
     def set_use_handler(self, handler) -> None:
         self._on_use = handler
