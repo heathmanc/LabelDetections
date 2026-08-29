@@ -3332,7 +3332,12 @@ class MainWindow(QMainWindow):
             self.assist_model_combo.addItem(name, name)
             self.assist_model_combo.setItemData(
                 self.assist_model_combo.count() - 1, note, Qt.ToolTipRole)
-        current = self._assist_model_name()
+        # The SAVED name, not _assist_model_name(): that one reads the combo
+        # when there is one, and by this line there is -- freshly built, sitting
+        # on item 0. So it answered "mobile_sam.pt" however many times somebody
+        # had chosen otherwise, and the choice looked like it was not being
+        # written when it was being written and then ignored.
+        current = self._saved_assist_model()
         index = self.assist_model_combo.findData(current)
         if index >= 0:
             self.assist_model_combo.setCurrentIndex(index)
@@ -3410,6 +3415,15 @@ class MainWindow(QMainWindow):
         self._save_test_settings()
         return True
 
+    def _saved_assist_model(self) -> str:
+        """What was chosen last time, or the default. Never asks the combo."""
+        from .segment_assist import DEFAULT_MODEL
+        try:
+            saved = str((load_test_settings() or {}).get("assist_model", "") or "")
+        except Exception:
+            saved = ""
+        return saved or DEFAULT_MODEL
+
     def _assist_model_name(self) -> str:
         from .segment_assist import DEFAULT_MODEL
         combo = getattr(self, "assist_model_combo", None)
@@ -3473,10 +3487,18 @@ class MainWindow(QMainWindow):
         # A checkpoint that is not on disk downloads on first use, and a wait
         # cursor over "Outlining..." while 40 MB arrives reads as a hang.
         first = not getattr(self._assistant, "is_loaded", lambda: True)()
-        self.status.showMessage(
-            f"Loading {self._assist_model_name()} -- downloads once on first "
-            "use, then this is instant." if first else "Outlining...",
-            20000 if first else 4000)
+        if first:
+            # With the size. The default is 1.2 GB now, and a first click that
+            # sits there for minutes with no number attached reads as a hang.
+            from .segment_assist import note_for
+            name = self._assist_model_name()
+            size = note_for(name).split(" · ")[0]
+            message = (f"Loading {name}"
+                       + (f" ({size})" if size else "")
+                       + " -- downloads once on first use, then this is instant.")
+        else:
+            message = "Outlining..."
+        self.status.showMessage(message, 20000 if first else 4000)
         QApplication.setOverrideCursor(Qt.WaitCursor)
         QApplication.processEvents()
         try:

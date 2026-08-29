@@ -20,22 +20,45 @@ from pathlib import Path
 
 from ..core import segment_assist as geometry
 
-DEFAULT_MODEL = "mobile_sam.pt"
+# The outline this produces is not a convenience -- it becomes the label's
+# coordinate system. Every read-region is stored as a fraction of it, so a
+# corner two per cent out moves every region on every image by two per cent,
+# invisibly. That is the whole reason the list below is ordered the way it is.
+#
+# Which also settles the speed argument: this runs at a desk, never on the
+# line. A big model that takes a second and lands the corners beats a small one
+# that takes a tenth and needs all four dragged afterwards, because dragging
+# the corners is the work the button exists to avoid.
+DEFAULT_MODEL = "sam_l.pt"
 
 # What the picker offers. Not what it allows -- a path to a local checkpoint is
-# typed in -- so this is the list worth suggesting, cheapest first. The notes
-# are sizes because that is the only number an operator can act on before
-# trying one.
+# typed in -- so this is the list worth SUGGESTING, best first. It used to be
+# cheapest first with the sizes as the note, which optimised for the one thing
+# that does not matter here and led with the model that is worst at corners.
+#
+# The ordering is by lineage and by one operator's finding that only the large
+# original SAM outlined these labels acceptably. It is not a benchmark, and a
+# label stock that behaves differently is worth a couple of minutes with the
+# smaller ones.
+#
+# FastSAM is gone from the suggestions -- its own note called it the roughest,
+# which is disqualifying for a coordinate system. ``model_class_for`` still
+# loads one from a typed path, because the list is a suggestion.
 KNOWN_MODELS = (
-    ("mobile_sam.pt", "~40 MB · fastest, the default"),
-    ("sam2.1_t.pt", "~160 MB · SAM 2.1 tiny"),
-    ("sam2.1_s.pt", "~185 MB · SAM 2.1 small"),
+    ("sam_l.pt", "~1.2 GB · original SAM large -- sharpest corners, the default"),
+    ("sam_b.pt", "~360 MB · original SAM base -- if large will not fit"),
     ("sam2.1_b.pt", "~325 MB · SAM 2.1 base"),
-    ("sam_b.pt", "~360 MB · original SAM base"),
-    ("sam_l.pt", "~1.2 GB · original SAM large"),
-    ("FastSAM-s.pt", "~24 MB · YOLO-based, roughest"),
-    ("FastSAM-x.pt", "~140 MB · YOLO-based"),
+    ("sam2.1_s.pt", "~185 MB · SAM 2.1 small"),
+    ("mobile_sam.pt", "~40 MB · distilled -- fastest, loosest corners"),
 )
+
+
+def note_for(model_path: str) -> str:
+    """The suggestion note for a model, or "" for a typed path."""
+    for name, note in KNOWN_MODELS:
+        if name == str(model_path):
+            return note
+    return ""
 
 
 def model_class_for(model_path: str) -> str:

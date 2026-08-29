@@ -1065,12 +1065,12 @@ def test_the_outline_model_can_be_changed_from_the_labeling_panel():
     win = _window()
     assert win._assist_model_name() == DEFAULT_MODEL
 
-    index = win.assist_model_combo.findData("sam2.1_t.pt")
-    assert index >= 0, "the picker should offer SAM 2.1 tiny"
+    index = win.assist_model_combo.findData("mobile_sam.pt")
+    assert index >= 0, "the picker should still offer the small fast one"
     win._assistant = object()                     # something is loaded
     win.assist_model_combo.setCurrentIndex(index)
 
-    assert win._assist_model_name() == "sam2.1_t.pt"
+    assert win._assist_model_name() == "mobile_sam.pt"
     # The loaded model is dropped, or the next click would use the old one.
     assert win._assistant is None
     win.assist_model_combo.setCurrentIndex(
@@ -1433,3 +1433,31 @@ def test_a_label_that_gains_a_reference_opens_normally():
     _define(win, "wf_gate_fixed")          # writes real artwork
     win.set_active_label("wf_gate_fixed")
     assert win.label_id == "wf_gate_fixed"
+
+
+def test_the_outline_model_survives_a_restart():
+    """It was saved and then ignored. _build_assist_model_combo asked
+    _assist_model_name() which way to open, and that reads the combo when there
+    is one -- by that line there is, freshly built and sitting on item 0. So the
+    answer was always the first entry, and choosing anything else looked like a
+    setting that would not stick."""
+    from label_detections.core.storage import load_test_settings, save_test_settings
+    from label_detections.ui.main_window import MainWindow
+    from label_detections.ui.segment_assist import DEFAULT_MODEL
+
+    before = dict(load_test_settings() or {})
+    other = next(name for name, _note in
+                 __import__("label_detections.ui.segment_assist",
+                            fromlist=["KNOWN_MODELS"]).KNOWN_MODELS
+                 if name != DEFAULT_MODEL)
+    try:
+        save_test_settings({**before, "assist_model": other})
+        fresh = MainWindow()          # a "restart": a window built from disk
+        try:
+            assert fresh._saved_assist_model() == other
+            assert fresh._assist_model_name() == other
+            assert fresh.assist_model_combo.currentText() == other
+        finally:
+            fresh.close()
+    finally:
+        save_test_settings(before)
