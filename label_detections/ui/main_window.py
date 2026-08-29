@@ -873,6 +873,30 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(10, 10, 10, 10)
         return outer, inner, layout
 
+    def _disclosure(self, title: str, tooltip: str = "") -> tuple[QGroupBox, QVBoxLayout]:
+        """A group box that starts closed, with its body hidden rather than greyed.
+
+        Qt's own checkable group box disables its children, which leaves the
+        whole block on screen looking broken. Hiding the body is what makes a
+        disclosure a disclosure: the settings are one click away when they are
+        wanted and cost no height when they are not -- which is the difference
+        between a tab you can read and a tab that is every knob at once.
+        """
+        box = QGroupBox(title)
+        box.setCheckable(True)
+        box.setChecked(False)
+        if tooltip:
+            box.setToolTip(tooltip)
+        outer = QVBoxLayout(box)
+        outer.setContentsMargins(8, 4, 8, 8)
+        body = QWidget()
+        inner = QVBoxLayout(body)
+        inner.setContentsMargins(0, 0, 0, 0)
+        body.setVisible(False)
+        box.toggled.connect(body.setVisible)
+        outer.addWidget(body)
+        return box, inner
+
     def _scroll_panel(self, widget: QWidget, min_width: int, preferred_width: int) -> QScrollArea:
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -972,7 +996,7 @@ class MainWindow(QMainWindow):
         self.test_image_edit.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         browse_img = QPushButton("Image...")
         browse_img.clicked.connect(self.browse_test_image)
-        use_current = QPushButton("Use Current")
+        use_current = QPushButton("Current")
         use_current.clicked.connect(self.use_current_test_image)
         row = QHBoxLayout(); row.addWidget(self.test_image_edit, 1); row.addWidget(browse_img); row.addWidget(use_current)
         form.addWidget(QLabel("Test image")); form.addLayout(row)
@@ -999,11 +1023,15 @@ class MainWindow(QMainWindow):
             "is the only way to be sure.")
         settings.addRow("Image size", self.test_imgsz_spin)
         settings.addRow("Confidence", self.test_conf_spin)
-        settings.addRow("Device (both stages)", self.test_device_edit)
+        settings.addRow("Device", self.test_device_edit)
         self.test_hide_saved_labels_check = QCheckBox("Hide saved labels while testing")
         self.test_hide_saved_labels_check.setChecked(bool(_ts.get("hide_saved_labels", True)))
         self.test_hide_saved_labels_check.setToolTip("Hides existing/manual labels on the canvas during model testing without deleting them.")
-        settings.addRow("Display", self.test_hide_saved_labels_check)
+        # Spanning both columns rather than sitting in the field column beside a
+        # label. A long checkbox in the narrow half of a form is what set this
+        # tab's minimum width to 397 -- wider than the pane it lives in, so the
+        # whole tab scrolled sideways.
+        settings.addRow(self.test_hide_saved_labels_check)
 
         layout.addWidget(settings_box)
 
@@ -1085,22 +1113,17 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(8)
 
-        title = QLabel("Train a YOLO model")
-        title.setStyleSheet("font-size: 10pt; font-weight: 700; color: #bfdbfe;")
-        layout.addWidget(title)
-
-        help_text = QLabel(
-            "Export a reviewed dataset first, then point Data YAML at its data.yaml. "
-            "Training runs the Ultralytics 'yolo' command in the background."
-        )
-        help_text.setWordWrap(True)
-        layout.addWidget(help_text)
-
         saved = load_training_settings()
         params = training_logic.default_params()
         params.update({k: saved[k] for k in params if k in saved})
 
-        files_box = QGroupBox("Dataset and model")
+        files_box = QGroupBox("Models and data")
+        files_box.setToolTip(
+            "The four things a training run needs. Export a reviewed dataset "
+            "first, then point these at it -- Latest export fills both paths "
+            "from the newest one.\n\n"
+            "Everything else has a working default and lives under Advanced. "
+            "Training runs the Ultralytics 'yolo' command in the background.")
         files = QVBoxLayout(files_box)
 
         self.train_model_edit = QLineEdit(str(params["model"]))
@@ -1117,7 +1140,7 @@ class MainWindow(QMainWindow):
             _b.setText("...")
             _b.setFixedWidth(34)
         r = QHBoxLayout(); r.addWidget(self.train_model_edit, 1); r.addWidget(model_browse)
-        files.addWidget(QLabel("Base model")); files.addLayout(r)
+        files.addWidget(QLabel("Detector model")); files.addLayout(r)
 
         self.train_data_edit = QLineEdit(str(params["data"]))
         self.train_data_edit.setPlaceholderText("data/exports/<name>/data.yaml")
@@ -1128,17 +1151,22 @@ class MainWindow(QMainWindow):
         data_latest.clicked.connect(self.use_latest_export_for_training)
         # Buttons on their own row: a long path plus two buttons on one line
         # forced the group wider than the left pane's maximum width.
-        files.addWidget(QLabel("Data YAML"))
+        files.addWidget(QLabel("Detector dataset (data.yaml)"))
         files.addWidget(self.train_data_edit)
         r = QHBoxLayout()
         for b in (data_browse, data_latest):
             b.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             r.addWidget(b)
         files.addLayout(r)
-        layout.addWidget(files_box)
 
-        params_box = QGroupBox("Stage 1 - detector (finds the labels)")
-        grid = QGridLayout(params_box)
+        params_box, params_body = self._disclosure(
+            "Advanced - detector",
+            "Device, image size, batch, epochs and augmentation. Every one of "
+            "these has a working default; Fill From Label Scale sets the one "
+            "that matters most, the image size, from the boxes actually "
+            "collected.")
+        grid_host = QWidget()
+        grid = QGridLayout(grid_host)
         grid.setHorizontalSpacing(8)
         grid.setVerticalSpacing(4)
 
@@ -1270,22 +1298,19 @@ class MainWindow(QMainWindow):
         self.train_resume_check.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
 
         grid.setColumnStretch(1, 1); grid.setColumnStretch(3, 1)
-        layout.addWidget(params_box)
+        params_body.addWidget(grid_host)
 
         # --- stage 2 ------------------------------------------------------
-        cls_box = QGroupBox("Stage 2 - classifier (names the crop)")
-        cls_grid = QGridLayout(cls_box)
+        cls_box, cls_body = self._disclosure(
+            "Advanced - classifier",
+            "Image size here must match the crop size the two-stage export "
+            "chose -- a classifier fed a size it did not train at loses "
+            "accuracy with nothing to show for it. Fill From Label Scale "
+            "reads it off the export that produced the crops.")
+        cls_host = QWidget()
+        cls_grid = QGridLayout(cls_host)
         cls_grid.setHorizontalSpacing(8)
         cls_grid.setVerticalSpacing(4)
-        cls_note = QLabel(
-            "Trains on the crop folders from Export Two-Stage. Image size here "
-            "must match the crop size that export chose -- a classifier fed a "
-            "size it did not train at loses accuracy with nothing to show for it."
-        )
-        cls_note.setWordWrap(True)
-        cls_note.setStyleSheet("color: #9aa4b2;")
-        cls_grid.addWidget(cls_note, 0, 0, 1, 4)
-
         self.cls_model_edit = QLineEdit(str(saved.get("cls_model", "yolo11s-cls.pt")))
         self.cls_data_edit = QLineEdit(str(saved.get("cls_data", "")))
         self.cls_data_edit.setPlaceholderText("data/exports/two_stage_classify")
@@ -1313,11 +1338,18 @@ class MainWindow(QMainWindow):
             "that separate two labels.\n\n"
             "Raise it only if the classifier is memorising crops.")
 
-        cls_grid.addWidget(_lbl("Base model"), 1, 0)
-        cls_grid.addWidget(self.cls_model_edit, 1, 1, 1, 3)
-        cls_grid.addWidget(_lbl("Crops folder"), 2, 0)
-        cls_grid.addWidget(self.cls_data_edit, 2, 1, 1, 2)
-        cls_grid.addWidget(cls_data_browse, 2, 3)
+        # Model and crops live in "Models and data" with the detector's pair:
+        # they are what a run needs, and burying them under Advanced next to
+        # the erasing probability was most of the "everything at once".
+        files.addWidget(QLabel("Classifier model"))
+        files.addWidget(self.cls_model_edit)
+        files.addWidget(QLabel("Classifier crops folder"))
+        _cls_row = QHBoxLayout()
+        _cls_row.addWidget(self.cls_data_edit, 1)
+        _cls_row.addWidget(cls_data_browse)
+        files.addLayout(_cls_row)
+        layout.addWidget(files_box)
+
         cls_grid.addWidget(_lbl("Image size"), 3, 0); cls_grid.addWidget(self.cls_imgsz_spin, 3, 1)
         cls_grid.addWidget(_lbl("Epochs"), 3, 2); cls_grid.addWidget(self.cls_epochs_spin, 3, 3)
         cls_grid.addWidget(_lbl("Batch"), 4, 0); cls_grid.addWidget(self.cls_batch_spin, 4, 1)
@@ -1336,7 +1368,7 @@ class MainWindow(QMainWindow):
             _w.setMinimumWidth(72)
             _w.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         cls_grid.setColumnStretch(1, 1); cls_grid.setColumnStretch(3, 1)
-        layout.addWidget(cls_box)
+        cls_body.addWidget(cls_host)
 
         fill_btn = QPushButton("Fill Both From Label Scale")
         fill_btn.setToolTip(
@@ -1348,12 +1380,13 @@ class MainWindow(QMainWindow):
         fill_btn.clicked.connect(self.fill_training_from_scale)
         layout.addWidget(fill_btn)
 
+        layout.addWidget(QLabel("Train"))
         btn_row = QHBoxLayout()
-        self.train_start_btn = QPushButton("Train Detector")
+        self.train_start_btn = QPushButton("Detector")
         self.train_start_btn.clicked.connect(self.start_training)
-        self.train_cls_btn = QPushButton("Train Classifier")
+        self.train_cls_btn = QPushButton("Classifier")
         self.train_cls_btn.clicked.connect(self.start_classifier_training)
-        self.train_both_btn = QPushButton("Train Both")
+        self.train_both_btn = QPushButton("Both")
         self.train_both_btn.setToolTip(
             "Detector, then classifier, one after the other. Sequential rather "
             "than parallel: two runs sharing a GPU are slower than either alone "
@@ -1362,11 +1395,20 @@ class MainWindow(QMainWindow):
         self.train_stop_btn = QPushButton("Stop")
         self.train_stop_btn.setEnabled(False)
         self.train_stop_btn.clicked.connect(self.stop_training)
-        for b in (self.train_start_btn, self.train_cls_btn, self.train_both_btn):
+        for b in (self.train_start_btn, self.train_cls_btn):
             b.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             btn_row.addWidget(b, 1)
-        btn_row.addWidget(self.train_stop_btn)
+        second_row = QHBoxLayout()
+        for b in (self.train_both_btn, self.train_stop_btn):
+            b.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            second_row.addWidget(b, 1)
         layout.addLayout(btn_row)
+        layout.addLayout(second_row)
+
+        # Closed by default, and below the buttons: a run that needs none of
+        # this should not have to scroll past it to reach Train.
+        layout.addWidget(params_box)
+        layout.addWidget(cls_box)
 
         self.train_log = QTextEdit()
         self.train_log.setReadOnly(True)
@@ -2319,7 +2361,7 @@ class MainWindow(QMainWindow):
         cv_.setContentsMargins(8, 8, 8, 8)
         cv_.setSpacing(4)
 
-        self.live_start_btn = QPushButton("Start Live Detect")
+        self.live_start_btn = QPushButton("Start")
         self.live_start_btn.setToolTip(
             "Opens the camera if it is not already running, loads the model off "
             "the GUI thread, and overlays detections on the live view.")
@@ -2361,7 +2403,7 @@ class MainWindow(QMainWindow):
         cls_browse.clicked.connect(self._browse_live_classifier)
         cls_row.addWidget(self.live_classifier_edit, 1)
         cls_row.addWidget(cls_browse)
-        self.novelty_btn = QPushButton("Novelty profile")
+        self.novelty_btn = QPushButton("Novelty")
         self.novelty_btn.clicked.connect(self._build_novelty_profile)
         self.novelty_btn.setToolTip(
             "Teach the classifier to say 'unknown'.\n\n"
@@ -2595,13 +2637,13 @@ class MainWindow(QMainWindow):
         note.setStyleSheet("color: #9aa4b2;")
         kv.addWidget(note)
 
-        self.live_keep_btn = QPushButton("Keep Image Only")
+        self.live_keep_btn = QPushButton("Keep Frame")
         self.live_keep_btn.setToolTip(
             "Save the frame currently on screen into this label's dataset, with "
             "no annotation at all. Label it from scratch. (Ctrl+K)")
         self.live_keep_btn.clicked.connect(self.keep_live_frame)
 
-        self.live_keep_json_btn = QPushButton("Keep Image + Detections")
+        self.live_keep_json_btn = QPushButton("Keep + Boxes")
         self.live_keep_json_btn.setToolTip(
             "Save the frame together with a sidecar holding the boxes the model "
             "just found, so review is correction rather than drawing.\n\n"
@@ -4075,7 +4117,7 @@ class MainWindow(QMainWindow):
         cam_layout.addWidget(self._camera_settings_hidden)
         self._on_camera_backend_changed(self.backend_combo.currentText())
 
-        camera_settings_btn = QPushButton("Camera...")
+        camera_settings_btn = QPushButton("Camera")
         camera_settings_btn.setToolTip("Open the camera settings dialog.")
         camera_settings_btn.clicked.connect(self.open_camera_settings_dialog)
         camera_settings_btn.setProperty("compactCaptureButton", True)
@@ -4094,11 +4136,13 @@ class MainWindow(QMainWindow):
         self.open_cam_btn.clicked.connect(self.open_camera)
         self.close_cam_btn = QPushButton("Stop")
         self.close_cam_btn.clicked.connect(self.close_camera)
-        cap_raw = QPushButton("Capture Raw")
+        cap_raw = QPushButton("Raw")
+        cap_raw.setToolTip("Capture the unadjusted frame, straight off the sensor.")
         cap_raw.clicked.connect(lambda: self.capture_frame(save_adjusted=False))
-        cap_adj = QPushButton("Capture Adjusted")
+        cap_adj = QPushButton("Adjusted")
+        cap_adj.setToolTip("Capture the adjusted frame -- what the live view is showing, brightness and contrast applied.")
         cap_adj.clicked.connect(lambda: self.capture_frame(save_adjusted=True))
-        cap_ref = QPushButton("Capture Reference")
+        cap_ref = QPushButton("Reference...")
         cap_ref.setToolTip(
             "Capture a frame to define this label's read-regions from. It is saved "
             "into the dataset like any other capture -- then draw the label's box "
@@ -4133,7 +4177,8 @@ class MainWindow(QMainWindow):
         self.show_unreviewed_only_check = QCheckBox("Show only needs review")
         self.show_unreviewed_only_check.setToolTip("Show only images with imported/saved JSON labels that have not been marked reviewed.")
         self.show_unreviewed_only_check.stateChanged.connect(self._refresh_images)
-        find_unreviewed = QPushButton("Find Unreviewed")
+        find_unreviewed = QPushButton("Find Next")
+        find_unreviewed.setToolTip("Jump to the next image that has labels but has not been reviewed.")
         find_unreviewed.clicked.connect(self.find_next_unreviewed_image)
         mark_reviewed = QPushButton("Mark Reviewed")
         mark_reviewed.setToolTip("Mark the current image reviewed.")
@@ -4141,7 +4186,7 @@ class MainWindow(QMainWindow):
         force_reviewed = QPushButton("Force Review")
         force_reviewed.setToolTip("Use this only when you intentionally want a mismatch image exported, such as a missing-bung/fail example.")
         force_reviewed.clicked.connect(self.force_mark_current_reviewed)
-        mark_background = QPushButton("Mark Background")
+        mark_background = QPushButton("Background")
         mark_background.setToolTip(
             "Mark the current image as containing no objects at all -- an empty\n"
             "conveyor or fixture. It exports as an empty label file, which is how\n"
@@ -4169,10 +4214,10 @@ class MainWindow(QMainWindow):
         load_selected.clicked.connect(self._load_selected_image)
         delete_selected = QPushButton("Delete Image")
         delete_selected.clicked.connect(self.delete_selected_image)
-        import_images_btn = QPushButton("Import Images...")
+        import_images_btn = QPushButton("Images...")
         import_images_btn.setToolTip("Copy existing image files into this recipe. You can optionally specify a separate folder containing matching LabelVision label JSON files.")
         import_images_btn.clicked.connect(self.import_images_to_recipe)
-        import_bg_btn = QPushButton("Import Backgrounds...")
+        import_bg_btn = QPushButton("Backgrounds...")
         import_bg_btn.setToolTip(
             "Copy in images that contain no objects at all -- empty conveyor, bare\n"
             "fixture. Each one is marked background on import and exports as an\n"

@@ -121,9 +121,12 @@ def test_menu_actions_have_callable_slots():
 def test_key_buttons_exist_and_are_wired():
     win = _window()
     labels = {b.text() for b in win.findChildren(QPushButton)}
-    for expected in ("Train Detector", "Run Model", "Auto-label",
-                     "Change Folder...", "Dataset Health"):
+    for expected in ("Run Model", "Auto-label", "Change Folder...",
+                     "Dataset Health"):
         assert expected in labels, f"{expected!r} button missing"
+    # By attribute, not by label: what these say is cosmetic and constrained
+    # by the pane's width (see test_ui_fit), what they are wired to is not.
+    assert win.train_start_btn.text()
 
 
 def test_theme_stylesheet_applied():
@@ -351,7 +354,7 @@ def test_new_action_handlers_exist_and_are_wired():
         assert callable(getattr(win, name, None)), f"MainWindow.{name} is missing"
 
     labels = {b.text() for b in win.findChildren(QPushButton)}
-    for text in ("Mark Background", "Import Backgrounds..."):
+    for text in ("Background", "Backgrounds..."):
         assert text in labels, f"no {text!r} button was built"
 
 
@@ -491,9 +494,12 @@ def test_the_train_tab_covers_both_stages():
 
     win = _window()
     buttons = {b.text() for b in win.findChildren(QPushButton)}
-    for label in ("Train Detector", "Train Classifier", "Train Both",
-                  "Fill Both From Label Scale", "Export Dataset Details"):
+    for label in ("Fill Both From Label Scale", "Export Dataset Details"):
         assert label in buttons, f"missing: {label}"
+    # The three start buttons by attribute: their labels lost the word "Train"
+    # to fit the pane, and the row they sit under carries it instead.
+    for button in (win.train_start_btn, win.train_cls_btn, win.train_both_btn):
+        assert button.text() and button.isEnabled()
 
     det = win._gather_train_params()
     cls = win._gather_classifier_params()
