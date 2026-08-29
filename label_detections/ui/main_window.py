@@ -4497,26 +4497,6 @@ class MainWindow(QMainWindow):
         checks_row.addWidget(scale_btn)
         checks_row.addWidget(variance_btn)
         ev.addLayout(checks_row)
-        planned_row = QHBoxLayout()
-        planned_lbl = QLabel("Planned library size")
-        self.planned_labels_spin = QSpinBox()
-        self.planned_labels_spin.setRange(0, 100000)
-        self.planned_labels_spin.setValue(
-            int((load_test_settings() or {}).get("planned_labels", 0)))
-        self.planned_labels_spin.valueChanged.connect(
-            lambda _v: self._save_test_settings())
-        self.planned_labels_spin.setSpecialValueText("current")
-        self.planned_labels_spin.setToolTip(
-            "Roughly how many labels this library will eventually hold.\n\n"
-            "Single-stage versus two-stage turns on this more than on any "
-            "pixel count: past about 20 labels, retraining the detector for "
-            "every new one starts to dominate everything else.\n\n"
-            "Without it the advice can only reason about the labels you have "
-            "today, which is how you end up building for two and migrating at "
-            "two hundred.")
-        planned_row.addWidget(planned_lbl)
-        planned_row.addWidget(self.planned_labels_spin, 1)
-        ev.addLayout(planned_row)
         details_btn = QPushButton("Export Dataset Details")
         details_btn.clicked.connect(self.export_dataset_details)
         details_btn.setToolTip(
@@ -5976,7 +5956,6 @@ class MainWindow(QMainWindow):
             return
         try:
             save_test_settings({
-                "planned_labels": self._planned_labels(),
                 "model": self.test_model_edit.text().strip(),
                 "image": self.test_image_edit.text().strip(),
                 "imgsz": int(self.test_imgsz_spin.value()),
@@ -8259,8 +8238,6 @@ class MainWindow(QMainWindow):
             "export-ready images": ready,
             "detector classes": ", ".join(self.library.detector_classes()),
         }
-        if self._planned_labels():
-            extra["planned library size"] = self._planned_labels()
         if orphans:
             # Named, not counted. "3 datasets on disk" against two labels sent
             # someone looking for a third label that no longer exists.
@@ -8271,8 +8248,7 @@ class MainWindow(QMainWindow):
                      + ", ".join(orphans))
         if self.details_full_check.isChecked():
             text += "\n\n" + "=" * 70 + "\n\n" + scale_report.dataset_details(
-                scales, self.library, imgsz=imgsz, extra=extra,
-                planned_labels=self._planned_labels())
+                scales, self.library, imgsz=imgsz, extra=extra)
 
         EXPORT_DIR.mkdir(parents=True, exist_ok=True)
         out = EXPORT_DIR / "dataset_details.txt"
@@ -8292,10 +8268,6 @@ class MainWindow(QMainWindow):
         else:
             self.status.showMessage(f"Dataset details written to {out}", 8000)
 
-    def _planned_labels(self) -> int:
-        return (int(self.planned_labels_spin.value())
-                if hasattr(self, "planned_labels_spin") else 0)
-
     def show_label_scale_report(self) -> None:
         """Measure how big labels actually are, and say what follows from it.
 
@@ -8313,8 +8285,7 @@ class MainWindow(QMainWindow):
         text = scale_report.two_stage_settings(scales, self.library, imgsz=imgsz)
         if self.details_full_check.isChecked():
             text += ("\n\n" + "-" * 70 + "\n\n"
-                     + scale_report.advise(scales, self.library, imgsz=imgsz,
-                                           planned_labels=self._planned_labels())
+                     + scale_report.advise(scales, self.library, imgsz=imgsz)
                      + "\n\n" + scale_report.full_report(
                          scales, self.library, imgsz=imgsz))
 

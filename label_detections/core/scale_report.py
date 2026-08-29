@@ -414,16 +414,26 @@ IMPRACTICAL_IMGSZ = 2048
 # crops can come from the detector itself rather than from anyone drawing
 # boxes. That difference compounds with library size; resolution does not.
 MANY_LABELS = 20
+# Kept for the provenance dump: it is the count past which per-label detector
+# retraining dominates, which is why the pipeline is two-stage at all. Nothing
+# decides anything with it any more -- that decision is made.
 
 
 def advise(scales: dict[str, LabelScale], library=None,
-           imgsz: int = DEFAULT_IMGSZ, planned_labels: int = 0) -> str:
-    """The recommendation, from the measurements rather than from taste.
+           imgsz: int = DEFAULT_IMGSZ) -> str:
+    """The two numbers a two-stage pipeline needs, from the measurements.
 
-    Presents a fork where one genuinely exists. Raising the detector's input
-    and cropping are both real answers to an under-resolved label, with
-    different costs, and picking one silently hides a decision that belongs to
-    whoever runs the line.
+    It used to argue single-stage against two-stage first and size the winner
+    second, and needed a "planned library size" typed in to break the tie --
+    because where a library is HEADING decides that question and no measurement
+    can see it. The architecture is settled here: a generic detector that finds
+    label-shaped things, and a classifier that names the crop. So the report
+    stopped recommending and started sizing.
+
+    Which leaves two numbers that genuinely follow from the pixels: the input
+    at which the detector can still FIND the smallest label, and the crop at
+    which the classifier can still tell them apart. Both go straight into the
+    Train tab.
     """
     if not scales:
         return "Nothing measured yet -- draw and save some boxes first."
@@ -432,7 +442,6 @@ def advise(scales: dict[str, LabelScale], library=None,
     smallest = min(scales.values(), key=lambda s: s.median_px)
     frame = smallest.frame_sides[0] if smallest.frame_sides else 0.0
     at_now = smallest.detector_px(imgsz, "median")
-    crop = recommend_crop(scales, imgsz)
     weak = under_resolved(scales, imgsz)
     # Two-stage sizes its own two numbers rather than inheriting whatever the
     # detector happens to be set to. Its detector answers a different and much
@@ -460,106 +469,45 @@ def advise(scales: dict[str, LabelScale], library=None,
         f"frame/label, so halving it halves them. See PROVENANCE for the "
         f"sensitivity, and the confusion matrix to settle it.",
         "",
+        f"Detector: imgsz {loc}, trained to LOCALISE only -- one generic "
+        f"`label` class. {LOCALISE_FLOOR_PX} px of the smallest label is all it "
+        f"needs to find one, and finding a label is easy where identifying one "
+        f"is not.",
+        f"Classifier: crops of the FULL-RESOLUTION frame at "
+        f"{two_stage_crop} px. The crop resizes every label to the same size, "
+        f"so this clears the identity floor whatever a label measures natively.",
+        "",
     ]
 
-    if not weak:
+    if weak:
         lines += [
-            f"Every label clears the floor at imgsz {imgsz}. Single-stage: one "
-            f"detector, one class per label, one pass, reporting the id the "
-            f"recipe is written in.",
-            "A crop stage would hand the classifier less than the detector "
-            "already has, so it would cost accuracy rather than add it.",
-        ]
-    elif need > IMPRACTICAL_IMGSZ:
-        lines += [
-            f"Under-resolved at this input: {', '.join(weak)}.",
-            f"One detector doing identity too would need imgsz {need}, which is "
-            f"slow and memory-hungry enough not to be worth it.",
-            "",
-            f"So: detector at imgsz {loc} trained to LOCALISE only (one "
-            f"generic `label` class -- {LOCALISE_FLOOR_PX} px of the smallest "
-            f"label is all it needs), then identity from a full-resolution "
-            f"crop at {two_stage_crop} px. Finding a label is easy; "
-            f"identifying one is not.",
+            f"Under-resolved at this input: {', '.join(weak)} -- at imgsz "
+            f"{imgsz} those reach the detector below the identity floor. That "
+            f"is what the crop is for; it is not a problem to fix by raising "
+            f"the detector's input.",
+            f"One detector doing identity too would have needed imgsz {need}, "
+            f"which is the cost being avoided here.",
         ]
     else:
-        count = len(library.all()) if library is not None else len(scales)
-        # Where the library is HEADING decides this, not where it is today.
-        # Two labels now and two hundred later is a two-stage problem, and
-        # advising for the two has someone build the wrong thing and migrate
-        # it at the worst possible moment.
-        horizon = max(count, int(planned_labels or 0))
         lines += [
-            f"Under-resolved at this input: {', '.join(weak)}. Two ways to fix "
-            f"it, and they are a real choice:",
-            "",
-            f"A) Single-stage at imgsz {need}. One model, one pass, no second "
-            f"thing to keep in step. Costs roughly "
-            f"{(need / max(imgsz, 1)) ** 2:.1f}x the inference time of {imgsz} "
-            f"and more memory to train.",
-            "",
-            f"B) Two-stage. Detector at imgsz {loc} -- sized only to FIND a "
-            f"label ({LOCALISE_FLOOR_PX} px of the smallest one), which is all "
-            f"it has to do. Classifier at {two_stage_crop} px on crops of the "
-            f"full-resolution frame. Two models to train and keep matched.",
-            "",
+            f"Every label already clears the identity floor at imgsz {imgsz}, "
+            f"so the crop is not rescuing resolution here -- the detector is "
+            f"generic because a new label then costs crops and a classifier "
+            f"retrain rather than boxes and a detector retrain. That cost "
+            f"compounds with every label added; resolution does not.",
         ]
-        if horizon >= MANY_LABELS:
-            heading = (f"heading for {horizon}" if horizon > count
-                       else f"at {horizon} labels")
-            lines += [
-                f"B, {heading} -- and the reason is onboarding, not pixels.",
-                f"Under A, label {horizon + 1} means drawing boxes on its "
-                f"images, retraining a detector that now carries {horizon + 1} "
-                f"classes, and re-checking the other {horizon} did not "
-                f"regress. Under B the detector never changes: it already "
-                f"finds label-shaped things it has never seen, so a new label "
-                f"is crops plus a classifier retrain -- and the crops come "
-                f"from the detector itself instead of from anyone drawing "
-                f"boxes.",
-                "That cost compounds with every label added. Resolution does "
-                "not.",
-                "Classifiers also carry hundreds of classes far more happily "
-                "than a detection head, which is splitting its capacity "
-                "between where and which at every anchor.",
-            ]
-        else:
-            lines += [
-                f"At {count} label(s), A is the simpler place to start. B earns "
-                f"its complexity past about {MANY_LABELS} labels, where "
-                f"retraining the detector for each new one starts to dominate, "
-                f"or sooner if A confuses two labels.",
-                f"If the library is headed well past {MANY_LABELS}, set Planned "
-                f"library size and this will recommend B now -- building it at "
-                f"{count} labels is far cheaper than migrating to it at two "
-                f"hundred.",
-            ]
 
-    lines.append("")
-    fine: list[str] = []
-    if library is not None:
-        for label_id in sorted(scales):
-            label = library.get(label_id)
-            if label is None:
-                continue
-            fine += [f"{label_id}:{c.role}" for c in getattr(label, "codes", []) or []
-                     if len(getattr(c, "region", []) or []) >= 4]
-            fine += [f"{label_id}:{t.name}" for t in getattr(label, "text_fields", []) or []
-                     if len(getattr(t, "region", []) or []) >= 4]
-    if fine:
+    if smallest.median_px < ADEQUATE_PX:
         lines += [
-            "Check the crop resolves your finest deciding region: "
-            + ", ".join(fine[:6]) + (" ..." if len(fine) > 6 else ""),
-            "Whatever separates two labels has to survive into whichever stage "
-            "makes the call. The per-region numbers below say whether it does.",
+            "",
+            f"Worth knowing: {smallest.label_id} is only "
+            f"{smallest.median_px:.0f} px in the frame itself, below the "
+            f"{ADEQUATE_PX:.0f} px floor. The crop will scale it up to "
+            f"{two_stage_crop} px, which cannot add detail that was never "
+            f"captured -- if that label gets confused, the answer is a longer "
+            f"lens or a closer camera, not a bigger crop.",
         ]
-    else:
-        lines += [
-            "No read-regions defined. Draw one over whatever distinguishes any "
-            "two similar labels (Define Regions) -- it is the only way this "
-            "report can tell you whether the difference survives, and with two "
-            "labels that look nothing alike it may simply not matter yet.",
-        ]
+
     return "\n".join(lines)
 
 
@@ -567,7 +515,7 @@ def advise(scales: dict[str, LabelScale], library=None,
 
 def dataset_details(scales: dict[str, LabelScale], library=None,
                     imgsz: int = DEFAULT_IMGSZ, crop: int | None = None,
-                    extra: dict | None = None, planned_labels: int = 0) -> str:
+                    extra: dict | None = None) -> str:
     """Everything measurable about the collected data, as plain text.
 
     Written to be pasted somewhere and read by someone who does not have the
@@ -641,7 +589,7 @@ def dataset_details(scales: dict[str, LabelScale], library=None,
 
     out.append("WHAT THE TOOL CONCLUDES")
     out.append("")
-    out.append(advise(scales, library, imgsz, planned_labels))
+    out.append(advise(scales, library, imgsz))
     out.append("")
     out.append("WORKING")
     out.append("")

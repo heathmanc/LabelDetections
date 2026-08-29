@@ -540,16 +540,20 @@ def test_a_big_frame_pushes_the_advice_to_localise_then_crop():
     assert str(need) in text, "must state the requirement it is declining to meet"
 
 
-def test_a_modest_frame_keeps_the_single_detector_advice():
-    """The same code must not always say two-stage: where one detector can
-    reach the identity floor, that is the simpler answer."""
+def test_a_frame_that_already_resolves_is_told_the_crop_is_not_rescuing_it():
+    """Two-stage is the architecture either way, but the reason differs. Where
+    one detector could already identify, the crop is not fixing resolution --
+    the detector is generic so that a new label costs crops and a classifier
+    retrain instead of boxes and a detector retrain. Saying otherwise would
+    have someone chase a pixel problem they do not have."""
     from label_detections.core import scale_report as sr
 
     scales = {n: sr.LabelScale(n, [w] * 4, [1920.0] * 4)
               for n, w in (("big", 900), ("small", 400))}
     text = sr.advise(scales, None, imgsz=1280)
-    assert "one class per label" in text
-    assert "LOCALISE only" not in text
+    assert "LOCALISE only" in text, "the architecture is settled"
+    assert "not rescuing resolution" in text
+    assert "compounds with every label added" in text
 
 
 def test_the_report_cannot_recommend_two_things_at_once():
@@ -618,29 +622,41 @@ def test_a_healthy_dataset_is_not_nagged():
     assert sr.data_health(scales, None) == []
 
 
-def test_a_large_library_is_advised_toward_the_generic_detector():
-    """At hundreds of labels the deciding cost is onboarding, not pixels: one
-    class per label means a full detector retrain for every new SKU."""
+def test_the_advice_does_not_change_with_the_size_of_the_library():
+    """It used to argue single-stage against two-stage, and the argument turned
+    on how many labels the library would eventually hold -- a number no
+    measurement can see, so it had to be typed in. The architecture is settled;
+    the same two numbers come out at two labels and at three hundred."""
     from label_detections.core import scale_report as sr
     from label_detections.core.labels import LabelDef, LabelLibrary
 
-    lib = LabelLibrary([LabelDef(label_id=f"lbl{i}") for i in range(300)])
     scales = {"a": sr.LabelScale("a", [872.0] * 81, [5496.0] * 81)}
-    text = sr.advise(scales, lib, imgsz=1024)
-    assert "B, at 300 labels" in text
-    assert "onboarding, not pixels" in text
+    small = LabelLibrary([LabelDef(label_id="a"), LabelDef(label_id="b")])
+    # "a" is in both, or data_health reports it orphaned from one of them and
+    # the difference would be about the library rows rather than the advice.
+    large = LabelLibrary([LabelDef(label_id="a")]
+                         + [LabelDef(label_id=f"lbl{i}") for i in range(299)])
+
+    assert sr.advise(scales, small, imgsz=1024) == sr.advise(scales, large, imgsz=1024)
+    for gone in ("A is the simpler place to start", "Planned library size",
+                 "A) Single-stage"):
+        assert gone not in sr.advise(scales, small, imgsz=1024)
 
 
-def test_a_small_library_is_still_advised_toward_the_simpler_option():
-    """The same code must not always say B -- at two labels the second model
-    is complexity bought for nothing."""
+def test_a_label_too_small_in_the_frame_is_not_fixed_by_a_bigger_crop():
+    """The crop scales a label up to a fixed size, which is why it clears the
+    identity floor whatever the label measures natively -- but scaling cannot
+    add detail nobody captured. That is a lens problem, and saying so is the
+    difference between one afternoon and several."""
     from label_detections.core import scale_report as sr
-    from label_detections.core.labels import LabelDef, LabelLibrary
 
-    lib = LabelLibrary([LabelDef(label_id="a"), LabelDef(label_id="b")])
-    scales = {"a": sr.LabelScale("a", [872.0] * 81, [5496.0] * 81)}
-    text = sr.advise(scales, lib, imgsz=1024)
-    assert "A is the simpler place to start" in text
+    tiny = {"a": sr.LabelScale("a", [120.0] * 20, [4000.0] * 20)}
+    text = sr.advise(tiny, None, imgsz=1024)
+    assert "cannot add detail" in text
+    assert "longer lens or a closer camera" in text
+
+    roomy = {"a": sr.LabelScale("a", [1200.0] * 20, [4000.0] * 20)}
+    assert "cannot add detail" not in sr.advise(roomy, None, imgsz=1024)
 
 
 def test_two_stage_sizes_its_detector_for_finding_not_identifying():
@@ -671,7 +687,7 @@ def test_the_two_stage_crop_is_sized_for_identity_not_against_the_detector():
     assert crop % sr.STRIDE == 0
 
 
-def test_the_advice_quotes_concrete_numbers_for_both_options():
+def test_the_advice_quotes_the_two_numbers_that_go_into_the_train_tab():
     from label_detections.core import scale_report as sr
     from label_detections.core.labels import LabelDef, LabelLibrary
 
@@ -679,28 +695,11 @@ def test_the_advice_quotes_concrete_numbers_for_both_options():
     scales = {"a": sr.LabelScale("a", [872.0] * 81, [5496.0] * 81),
               "b": sr.LabelScale("b", [3820.0] * 15, [5496.0] * 15)}
     text = sr.advise(scales, lib, imgsz=448)
-    assert str(sr.min_imgsz_for_identity(scales)) in text        # option A
-    assert str(sr.min_imgsz_for_localisation(scales)) in text    # option B detector
-    assert str(sr.crop_for_identity(scales)) in text             # option B classifier
+    assert str(sr.min_imgsz_for_localisation(scales)) in text    # detector imgsz
+    assert str(sr.crop_for_identity(scales)) in text             # classifier crop
+    # And the cost being avoided, so the crop is not mistaken for a default.
+    assert str(sr.min_imgsz_for_identity(scales)) in text
     assert "detector stays at" not in text, "echoed the setting instead of advising"
-
-
-def test_the_advice_follows_where_the_library_is_heading():
-    """Two labels now and two hundred later is a two-stage problem. Advising
-    for the two builds the wrong thing and migrates it at the worst moment."""
-    from label_detections.core import scale_report as sr
-    from label_detections.core.labels import LabelDef, LabelLibrary
-
-    lib = LabelLibrary([LabelDef(label_id="a"), LabelDef(label_id="b")])
-    scales = {"a": sr.LabelScale("a", [872.0] * 81, [5496.0] * 81)}
-
-    today = sr.advise(scales, lib, imgsz=448)
-    assert "A is the simpler place to start" in today
-    assert "Planned library size" in today, "must say how to change the answer"
-
-    headed = sr.advise(scales, lib, imgsz=448, planned_labels=300)
-    assert "B, heading for 300" in headed
-    assert "A is the simpler place to start" not in headed
 
 
 def test_the_report_says_which_numbers_are_measured_and_which_are_assumed():
