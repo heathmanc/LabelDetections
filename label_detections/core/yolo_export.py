@@ -27,6 +27,7 @@ import shutil
 from pathlib import Path
 
 from . import augment as augment_logic
+from . import capture_session
 from . import dataset as dataset_logic
 from . import labels as labels_mod
 from .review import annotation_reviewed as _annotation_reviewed
@@ -162,6 +163,10 @@ def collect_entries(label_id: str, reviewed_only: bool = True) -> list[dataset_l
     if not image_dir.is_dir() or not sidecar_dir.is_dir():
         return []
 
+    # Which captures were taken together. Read here rather than written into
+    # each sidecar: an image is captured long before it is annotated, and the
+    # sidecar does not exist at the moment the session is known.
+    sessions = capture_session.load(label_id)
     entries: list[dataset_logic.Entry] = []
     for sidecar in sorted(sidecar_dir.glob("*.json")):
         try:
@@ -184,8 +189,28 @@ def collect_entries(label_id: str, reviewed_only: bool = True) -> list[dataset_l
 
         if not data.get("boxes") and not _is_background(data):
             continue
-        entries.append(dataset_logic.entry_from_annotation(label_id, str(image), data))
+        entry = dataset_logic.entry_from_annotation(label_id, str(image), data)
+        if not entry.session:
+            # The sidecar wins where it has one -- a frame kept from Live
+            # Detect already carries its own -- and this fills in every frame
+            # taken with the Capture button, which carries none.
+            entry.session = capture_session.session_for(sessions, image)
+        entries.append(entry)
     return entries
+
+
+def _grouping_summary(entries) -> str:
+    """One line about capture grouping across every label in this export."""
+    by_label: dict[str, list] = {}
+    for entry in entries:
+        by_label.setdefault(str(entry.label_id), []).append(entry)
+    lines = []
+    for label_id, group in sorted(by_label.items()):
+        sessions = {Path(e.image).name: e.session for e in group if e.session}
+        note = capture_session.group_summary(sessions, len(group))
+        if note:
+            lines.append(f"  {label_id}: {note}")
+    return "capture grouping:\n" + "\n".join(lines) if lines else ""
 
 
 def _write_label_file(out: Path, split: str, stem: str, data: dict,
@@ -320,7 +345,13 @@ def write_dataset(out: Path, entries: list[dataset_logic.Entry], *, task: str = 
     # The split report ships with the dataset on purpose: a reviewer needs to
     # see that no capture group straddles train and val before trusting a
     # validation number.
-    (out / "split_report.txt").write_text(report.text() + "\n", encoding="utf-8")
+    # How well the dataset is grouped, beside the split it produced. A reader
+    # cannot judge "12 groups" without knowing whether that is 12 batteries or
+    # 12 frames of one.
+    grouped = _grouping_summary(entries)
+    (out / "split_report.txt").write_text(
+        report.text() + (f"\n\n{grouped}" if grouped else "") + "\n",
+        encoding="utf-8")
 
     # The variable-region check ships with the dataset: a region that is the
     # same picture in every image is worth knowing about before training rather

@@ -404,3 +404,60 @@ def test_the_output_says_it_can_be_opened():
     assert panel.log_box.title().startswith("▸")
     panel.log_box.setChecked(True)
     assert panel.log_box.title().startswith("▾")
+
+
+# --- GPU memory and the confusion matrix -------------------------------------
+
+def test_gpu_memory_is_read_off_the_epoch_line():
+    """An out-of-memory at epoch 40 costs forty epochs, and it is visible
+    climbing long before it happens."""
+    assert tr.parse_gpu_gb(EPOCH_LINE) == pytest.approx(2.35)
+    assert tr.parse_gpu_gb("\x1b[34m      2/50\x1b[0m   11.7G   1.0") == pytest.approx(11.7)
+
+
+def test_a_cpu_run_reports_no_memory_rather_than_a_wrong_number():
+    assert tr.parse_gpu_gb("      2/50      0G      1.0") == 0.0
+    assert tr.parse_gpu_gb("Ultralytics starting") == 0.0
+
+
+def test_the_progress_line_carries_the_memory_when_there_is_any():
+    monitor = _monitor()
+    monitor.append_output(EPOCH_LINE)
+    monitor.set_progress(600)
+    assert "2.35 GB on the GPU" in _panel(monitor).progress_label.text()
+
+
+def test_a_run_with_no_memory_reported_says_nothing_about_it():
+    monitor = _monitor()
+    monitor.append_output("      2/50      0G      1.0")
+    monitor.set_progress(600)
+    assert "GPU" not in _panel(monitor).progress_label.text()
+
+
+def test_the_confusion_matrix_is_shown_when_the_run_wrote_one(tmp_path):
+    """The one question a headline metric cannot answer: not how often it was
+    right, but WHICH pair it gets wrong."""
+    from PySide6.QtGui import QImage
+
+    monitor = _monitor()
+    assert not _panel(monitor).matrix_box.isVisible()
+
+    QImage(40, 30, QImage.Format_RGB32).save(
+        str(tmp_path / "confusion_matrix_normalized.png"))
+    assert _panel(monitor).show_confusion_matrix(tmp_path)
+    assert not _panel(monitor).matrix_label.pixmap().isNull()
+
+
+def test_a_run_with_no_matrix_shows_no_empty_box(tmp_path):
+    monitor = _monitor()
+    assert not _panel(monitor).show_confusion_matrix(tmp_path)
+    assert not _panel(monitor).matrix_box.isVisible()
+    assert not _panel(monitor).show_confusion_matrix(None)
+
+
+def test_the_normalised_matrix_is_preferred():
+    """Classes here have very different image counts while a dataset is being
+    collected, and the raw counts read as though the big class is the model."""
+    from label_detections.ui.training_monitor import StagePanel
+
+    assert StagePanel.MATRIX_NAMES[0] == "confusion_matrix_normalized.png"

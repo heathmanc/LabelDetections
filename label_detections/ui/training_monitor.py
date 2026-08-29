@@ -30,10 +30,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtGui import QTextCursor
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QPixmap, QTextCursor
 from PySide6.QtWidgets import (QDialog, QGroupBox, QHBoxLayout, QLabel,
-                               QProgressBar, QPushButton, QTabWidget, QTextEdit,
-                               QVBoxLayout, QWidget)
+                               QProgressBar, QPushButton, QScrollArea,
+                               QTabWidget, QTextEdit, QVBoxLayout, QWidget)
 
 from ..core import training as training_logic
 
@@ -47,6 +48,7 @@ class StagePanel(QWidget):
     def __init__(self, chart: QWidget, parent=None) -> None:
         super().__init__(parent)
         self._total_epochs = 0
+        self._gpu_gb = 0.0
         self.weights: Path | None = None
 
         layout = QVBoxLayout(self)
@@ -88,6 +90,25 @@ class StagePanel(QWidget):
         chart_layout.addWidget(self.chart)
         layout.addWidget(chart_box, 1)
 
+        self.matrix_box = QGroupBox("Confusion matrix")
+        self.matrix_box.setToolTip(
+            "Which labels the model mistook for which, written by Ultralytics "
+            "at the end of the run.\n\n"
+            "The one question a headline metric cannot answer. mAP or top-1 "
+            "says how often it was right; this says WHICH pair it gets wrong, "
+            "which is what decides the next label to photograph more of and "
+            "what belongs in a label's confusable_with.")
+        matrix_layout = QVBoxLayout(self.matrix_box)
+        matrix_layout.setContentsMargins(8, 8, 8, 8)
+        self.matrix_label = QLabel("")
+        self.matrix_label.setAlignment(Qt.AlignCenter)
+        matrix_scroll = QScrollArea()
+        matrix_scroll.setWidgetResizable(True)
+        matrix_scroll.setWidget(self.matrix_label)
+        matrix_layout.addWidget(matrix_scroll)
+        self.matrix_box.setVisible(False)
+        layout.addWidget(self.matrix_box, 1)
+
         self.log = QTextEdit()
         self.log.setReadOnly(True)
         self.log.setMinimumHeight(120)
@@ -121,6 +142,9 @@ class StagePanel(QWidget):
     def begin(self, stage: str, model: str, data: str) -> None:
         self.weights = None
         self._total_epochs = 0
+        self._gpu_gb = 0.0
+        self.matrix_label.setText("")
+        self.matrix_box.setVisible(False)
         self.what_label.setText(f"Training the {stage}")
         self.detail_label.setText(f"{model}\n{data}" if data else str(model))
         self.bar.setRange(0, 0)
@@ -140,6 +164,9 @@ class StagePanel(QWidget):
         found = training_logic.parse_epoch(text)
         if found:
             self.set_epoch(*found)
+        gpu = training_logic.parse_gpu_gb(text)
+        if gpu:
+            self._gpu_gb = gpu
 
     def set_epoch(self, done: int, total: int) -> None:
         if total and total != self._total_epochs:
@@ -150,8 +177,13 @@ class StagePanel(QWidget):
             self.bar.setValue(int(done))
 
     def set_progress(self, elapsed: float) -> None:
-        self.progress_label.setText(training_logic.progress_text(
-            self.bar.value(), self._total_epochs, elapsed))
+        line = training_logic.progress_text(
+            self.bar.value(), self._total_epochs, elapsed)
+        if self._gpu_gb:
+            # An out-of-memory at epoch 40 costs forty epochs, and it is
+            # visible climbing long before it happens.
+            line += f"  \u00b7  {self._gpu_gb:.2f} GB on the GPU"
+        self.progress_label.setText(line)
 
     def set_metrics(self, rows: list[dict], patience: int = 0) -> None:
         if hasattr(self.chart, "set_data"):
@@ -165,8 +197,28 @@ class StagePanel(QWidget):
         if done and self._total_epochs:
             self.bar.setValue(min(int(done), self._total_epochs))
 
+    # Ultralytics writes both; the normalised one reads better on a dataset
+    # whose classes have very different image counts, which is every dataset
+    # here while it is being collected.
+    MATRIX_NAMES = ("confusion_matrix_normalized.png", "confusion_matrix.png")
+
+    def show_confusion_matrix(self, run_dir: Path | None) -> bool:
+        """Show the matrix the finished run wrote, if it wrote one."""
+        for name in self.MATRIX_NAMES:
+            path = Path(run_dir) / name if run_dir else None
+            if path is None or not path.is_file():
+                continue
+            pixmap = QPixmap(str(path))
+            if pixmap.isNull():
+                continue
+            self.matrix_label.setPixmap(pixmap)
+            self.matrix_box.setTitle(f"Confusion matrix -- {name}")
+            self.matrix_box.setVisible(True)
+            return True
+        return False
+
     def finish(self, headline: str, detail: str, weights: Path | None,
-               failed: bool = False) -> None:
+               failed: bool = False, run_dir: Path | None = None) -> None:
         if failed:
             # The one case where the output IS the answer: a run that dies
             # before its first epoch has no progress, no curves and no metrics.
@@ -178,6 +230,7 @@ class StagePanel(QWidget):
         else:
             self.bar.setRange(0, 1)
             self.bar.setValue(1)
+        self.show_confusion_matrix(run_dir)
         self.weights = weights if (weights and Path(weights).is_file()) else None
         if self.weights is None and weights:
             # Said rather than left as a disabled button nobody can explain.
@@ -316,11 +369,11 @@ class TrainingMonitor(QDialog):
     # --- finishing ---------------------------------------------------------
 
     def finish(self, headline: str, detail: str, weights: Path | None,
-               failed: bool = False) -> None:
+               failed: bool = False, run_dir: Path | None = None) -> None:
         self.stop_btn.setEnabled(False)
         panel = self.current
         if panel is not None:
-            panel.finish(headline, detail, weights, failed)
+            panel.finish(headline, detail, weights, failed, run_dir)
         self._refresh_use_button()
 
     def finished_stages(self) -> list[tuple[str, Path]]:

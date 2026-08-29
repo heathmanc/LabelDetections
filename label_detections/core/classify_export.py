@@ -114,7 +114,11 @@ def _write_crops(out: Path, entries: list[dataset_logic.Entry], split: str,
         if frame is None:
             continue
         for index, (label_id, quad) in enumerate(crop_targets(entry.annotation)):
-            patch = rectify_quad(frame, expand_quad(quad, margin))
+            # landscape: the same label flat and standing up otherwise
+            # flattens to a 300x90 and a 90x300, and the classifier learns it
+            # twice out of a dataset that did not have enough for once. Taken
+            # the same way at runtime. See geometry.landscape_quad.
+            patch = rectify_quad(frame, expand_quad(quad, margin), landscape=True)
             if patch is None or patch.size == 0:
                 continue
             folder = out / split / safe_token(label_id)
@@ -311,7 +315,8 @@ def write_region_dataset(out: Path, entries, library, *, size: int = DEFAULT_CRO
                 continue
             for i, (label_id, region_name, quad) in enumerate(
                     region_crop_targets(entry.annotation, library)):
-                patch = rectify_quad(frame, expand_quad(quad, margin))
+                patch = rectify_quad(frame, expand_quad(quad, margin),
+                                     landscape=True)
                 if patch is None or patch.size == 0:
                     continue
                 native = max(patch.shape[:2])

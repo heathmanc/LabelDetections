@@ -175,3 +175,56 @@ def test_a_flat_detection_is_unaffected_either_way():
     with_aspect = ann.place_label_regions(_box(FLAT), _label())
     without = ann.place_label_regions(_box(FLAT), _label(aspect=0.0))
     assert with_aspect == without
+
+
+# --- crops the classifier sees -----------------------------------------------
+
+def test_a_crop_is_flattened_the_same_way_whichever_pose_it_was_shot_in():
+    """The same label lying flat and standing up otherwise flattens to a 300x90
+    and a 90x300 -- one picture turned a quarter, and two pictures to anything
+    learning from them. It had to learn the label twice, out of a dataset that
+    did not have enough for once."""
+    cv2 = __import__("pytest").importorskip("cv2")
+    np = __import__("pytest").importorskip("numpy")
+    from label_detections.core.imageio import rectify_quad
+
+    lying = np.zeros((900, 900, 3), np.uint8)
+    lying[100:190, 100:400] = 255
+    standing = np.zeros((900, 900, 3), np.uint8)
+    standing[100:400, 100:190] = 255
+    flat_quad = [[100., 100.], [400., 100.], [400., 190.], [100., 190.]]
+    tall_quad = [[100., 100.], [190., 100.], [190., 400.], [100., 400.]]
+
+    assert rectify_quad(lying, flat_quad).shape[:2] == (90, 300)
+    assert rectify_quad(standing, tall_quad).shape[:2] == (300, 90), "the old way"
+
+    assert rectify_quad(lying, flat_quad, landscape=True).shape[:2] == (90, 300)
+    assert rectify_quad(standing, tall_quad, landscape=True).shape[:2] == (90, 300)
+
+
+def test_turning_a_crop_flat_says_nothing_about_which_way_up_it_is():
+    """It claims only that the long side runs across, which is true of a label
+    however it was presented. The half-turn stays with whatever reads it."""
+    assert geo.landscape_quad(STANDING) == geo.flip_quad(
+        geo.flip_quad(geo.landscape_quad(STANDING)))
+    assert round(geo.quad_aspect(geo.landscape_quad(STANDING)), 2) == \
+        round(geo.quad_aspect(geo.landscape_quad(FLAT)), 2)
+
+
+def test_a_square_crop_is_left_alone():
+    square = [[0.0, 0.0], [400.0, 0.0], [400.0, 400.0], [0.0, 400.0]]
+    assert geo.landscape_quad(square) == geo.order_quad(square)
+
+
+def test_training_and_runtime_crops_are_taken_the_same_way():
+    """They must agree or the classifier is handed a pose it was never shown --
+    which is worse than the problem this fixes, because it is invisible."""
+    import inspect
+
+    from label_detections.core import classify_export
+    from label_detections.ui import live_detect as live_ui
+
+    for source in (inspect.getsource(classify_export._write_crops),
+                   inspect.getsource(classify_export.write_region_dataset),
+                   inspect.getsource(live_ui.InferenceWorker._identify)):
+        assert "landscape=True" in source

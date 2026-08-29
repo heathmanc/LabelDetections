@@ -19,7 +19,7 @@ from typing import Any
 import cv2
 import numpy as np
 
-from .geometry import order_quad
+from .geometry import landscape_quad, order_quad
 
 from .storage import (
     IMAGE_SUFFIXES, dataset_folder, image_label_json_path, safe_token,
@@ -29,9 +29,16 @@ from .storage import (
 IMPORT_IMAGE_EXTS = IMAGE_SUFFIXES + (".webp",)
 
 
+def _settled(quad, orient: bool, landscape: bool):
+    """The corner order to flatten from: as given, ordered, or turned flat."""
+    if landscape:
+        return landscape_quad(quad)
+    return order_quad(quad) if orient else quad
+
+
 def rectify_quad(image_bgr: np.ndarray, quad: list[list[float]],
                  out_width: int = 0, max_side: int = 0,
-                 orient: bool = True) -> np.ndarray | None:
+                 orient: bool = True, landscape: bool = False) -> np.ndarray | None:
     """Flatten a drawn label out of a captured frame.
 
     The operator has already drawn the label's four corners on a real capture.
@@ -57,11 +64,17 @@ def rectify_quad(image_bgr: np.ndarray, quad: list[list[float]],
     are the ones that were coming out mirrored, or with the short edge across
     the top. Pass ``orient=False`` only when the caller's slot order is itself
     the thing being tested.
+
+    ``landscape`` goes one step further and turns the quad so its long edge is
+    the width. For a crop a classifier will see: the same label lying flat and
+    standing up otherwise flattens to a 300x90 and a 90x300, which is one
+    picture turned a quarter and two pictures to anything learning from them.
+    See ``geometry.landscape_quad``.
     """
     if image_bgr is None or len(quad) < 4:
         return None
     points = [[float(x), float(y)] for x, y in
-              (order_quad(quad[:4]) if orient else quad[:4])]
+              (_settled(quad[:4], orient, landscape))]
 
     def edge(a, b):
         return float(np.hypot(points[b][0] - points[a][0], points[b][1] - points[a][1]))

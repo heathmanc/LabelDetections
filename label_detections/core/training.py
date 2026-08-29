@@ -454,6 +454,32 @@ def parse_epoch(text: str) -> tuple[int, int] | None:
     return found
 
 
+# The field after the epoch counter, in gigabytes:
+#
+#     34/100      2.35G      1.234 ...
+#
+# Worth following for one reason: an out-of-memory at epoch 40 costs forty
+# epochs, and it is visible climbing long before it happens.
+_GPU_RE = re.compile(r"^\s*\d+\s*/\s*\d+\s+([\d.]+)\s*G\b")
+
+
+def parse_gpu_gb(text: str) -> float:
+    """GPU memory off the most recent epoch line, in GB. 0.0 when absent.
+
+    A CPU run prints "0G" here, and some builds print nothing at all, so this
+    reporting nothing is normal rather than a fault.
+    """
+    found = 0.0
+    for line in str(text or "").splitlines():
+        match = _GPU_RE.match(_ANSI_RE.sub("", line))
+        if match:
+            try:
+                found = float(match.group(1))
+            except ValueError:
+                continue
+    return found
+
+
 def eta_seconds(done: int, total: int, elapsed: float) -> float:
     """How much longer, from the rate so far. 0.0 when it cannot be told.
 

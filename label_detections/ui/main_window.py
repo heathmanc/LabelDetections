@@ -98,6 +98,7 @@ from label_detections.core import training as training_logic
 from label_detections.core import evaluation as evaluation_logic
 from label_detections.core import dataset_health
 from label_detections.core import storage as storage_mod
+from label_detections.core import capture_session
 from label_detections.core import reference as reference_logic
 from label_detections.ui import novelty as novelty_ui
 from label_detections.ui.training_monitor import TrainingMonitor
@@ -1921,7 +1922,11 @@ class MainWindow(QMainWindow):
         self.train_stop_btn.setEnabled(False)
         self._train_process = None
 
-        stage_name = getattr(self, "_train_stage", "detector")
+        if (stage_name_ok := getattr(self, "_train_stage", "")) == "classifier" \
+                and exit_code == 0 and not stopped and weights \
+                and Path(weights).is_file():
+            self._offer_novelty_rebuild(str(weights))
+        stage_name = stage_name_ok or "detector"
         if exit_code == 0 and not stopped:
             headline = f"Finished training the {stage_name}"
         elif stopped:
@@ -1933,7 +1938,7 @@ class MainWindow(QMainWindow):
             headline,
             f"{training_logic.format_duration(elapsed)} in total."
             + ("  The output is open below." if failed else ""),
-            weights, failed=failed)
+            weights, failed=failed, run_dir=run_dir)
 
         # Train Both: advance to the classifier, but only if the detector
         # actually succeeded. Chaining a classifier onto a failed or cancelled
@@ -3240,6 +3245,7 @@ class MainWindow(QMainWindow):
         raw_path, _adjusted = save_capture(self.label_id, frame, None, save_raw=True)
         if raw_path is None:
             return
+        self._record_capture_group(raw_path)
         if items:
             height, width = (int(frame.shape[0]), int(frame.shape[1])) \
                 if getattr(frame, "shape", None) else (0, 0)
@@ -4237,6 +4243,18 @@ class MainWindow(QMainWindow):
         cap_adj = QPushButton("Adjusted")
         cap_adj.setToolTip("Capture the adjusted frame -- what the live view is showing, brightness and contrast applied.")
         cap_adj.clicked.connect(lambda: self.capture_frame(save_adjusted=True))
+        new_group = QPushButton("New Group")
+        new_group.setToolTip(
+            "Say that the next captures are of a DIFFERENT battery.\n\n"
+            "The train/val split never separates a capture group, which is "
+            "what keeps a validation number honest: two frames of one battery "
+            "a second apart are very nearly the same image, and putting one on "
+            "each side tests the model on something it memorised.\n\n"
+            "Nothing in software knows when the battery changed, so this is "
+            "the only place that information exists. A new group also starts "
+            "whenever the camera is opened -- pressing this is for swapping "
+            "the part without stopping the preview.")
+        new_group.clicked.connect(self.start_capture_group)
         cap_ref = QPushButton("Reference...")
         cap_ref.setToolTip(
             "Capture a frame to define this label's read-regions from. It is saved "
@@ -4255,7 +4273,8 @@ class MainWindow(QMainWindow):
         # both pairs across rows.
         control_buttons = [self.open_cam_btn, self.close_cam_btn,
                            cap_raw, cap_adj,
-                           cap_ref, self.test_cam_btn]
+                           new_group, cap_ref,
+                           self.test_cam_btn]
         for i, btn in enumerate(control_buttons):
             btn.setProperty("compactCaptureButton", True)
             btn.setMinimumHeight(24)
@@ -5472,7 +5491,26 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, title, result.message)
         self.status.showMessage(result.message, 8000)
 
+    def start_capture_group(self, announce: bool = True) -> str:
+        """Begin a new capture group: the next frames are a different battery.
+
+        The train/val split never separates a group, and nothing in software
+        knows when the part was changed -- so this is the only place that fact
+        exists. Called automatically when the camera opens, and by hand for a
+        swap that does not stop the preview.
+        """
+        self._capture_session = capture_session.new_id()
+        if announce:
+            self.status.showMessage(
+                "New capture group -- the next captures are treated as a "
+                "different battery, and will not be split across train and "
+                "val.", 6000)
+        return self._capture_session
+
     def open_camera(self) -> None:
+        # Opening the camera starts a group: whatever comes next is a new
+        # sitting, and the frames from the last one are already recorded.
+        self.start_capture_group(announce=False)
         # Keep the recipe object in sync with the capture fields, but do not
         # persist anything here. Adjustments are live camera controls and
         # the status bar, which hid camera-open failures and made the Open
@@ -5748,6 +5786,9 @@ class MainWindow(QMainWindow):
             self.label_id, self.last_raw, adjusted, save_raw=not save_adjusted
         )
         path = adj_path if adj_path else raw_path
+        # Both variants, when both were written: they are the same battery in
+        # the same pose, so separating them would be the worst possible split.
+        self._record_capture_group(raw_path, adj_path)
         self._last_capture_path = path
         self._session_captures = getattr(self, "_session_captures", 0) + 1
         self._dataset_index_dirty = True
@@ -5769,6 +5810,15 @@ class MainWindow(QMainWindow):
             f"Captured {kind}: {path.name} — {self._session_captures} this session, "
             f"{total} in {self.label_id}", 6000
         )
+
+    def _record_capture_group(self, *paths) -> None:
+        """Note which group these captures belong to, if one is running."""
+        session = getattr(self, "_capture_session", "")
+        if not session or not self.label_id:
+            return
+        for path in paths:
+            if path:
+                capture_session.record(self.label_id, path, session)
 
     def _camera_is_live(self) -> bool:
         try:
@@ -5859,6 +5909,7 @@ class MainWindow(QMainWindow):
             raw, _adjusted = imageio.save_capture(self.label_id, frame)
         except Exception:
             return ""
+        self._record_capture_group(raw)
         return str(raw) if raw else ""
 
     def _reference_annotation(self, label, result: dict, source: str) -> bool:
@@ -8199,6 +8250,36 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self, "Save crops",
             "Saved:\n" + "\n".join(str(p) for p in written))
+
+    def _ask_rebuild_novelty(self, weights: str) -> bool:
+        """Its own method so a test can answer it. See _ask_replace_reference."""
+        box = QMessageBox(self)
+        box.setWindowTitle("Novelty profile")
+        box.setIcon(QMessageBox.Question)
+        box.setText(
+            "Rebuild the novelty profile for these weights now?\n\n"
+            "A profile describes where each label sits in ONE model's feature "
+            "space, and that space has just moved. The old one is not used "
+            "against new weights -- it would refuse the wrong crops -- so "
+            "until it is rebuilt, nothing is being refused at all.")
+        yes = box.addButton("Rebuild it", QMessageBox.AcceptRole)
+        box.addButton("Later", QMessageBox.RejectRole)
+        box.setDefaultButton(yes)
+        box.exec()
+        return box.clickedButton() is yes
+
+    def _offer_novelty_rebuild(self, weights: str) -> None:
+        """A classifier just finished, so its profile is now out of date.
+
+        Asked rather than done: it reads every crop in the export and takes
+        about as long as a validation pass, which is not something to start
+        without saying so. Asked rather than left in a tooltip, because the
+        cost of forgetting is a check that looks on and is not.
+        """
+        self.live_classifier_edit.setText(weights)
+        self._save_test_settings()
+        if self._ask_rebuild_novelty(weights):
+            self._build_novelty_profile()
 
     def _build_novelty_profile(self) -> None:
         """Measure where each enrolled label sits, so the rest can be refused."""

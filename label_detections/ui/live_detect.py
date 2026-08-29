@@ -671,6 +671,16 @@ class InferenceWorker(QObject):
         """
         from ..core import novelty as nv
 
+        # Refused rather than used. A profile measured through older weights
+        # describes a feature space that has moved: it would refuse the wrong
+        # crops and accept the wrong ones, and a refusal that means nothing
+        # still reads as a refusal.
+        stale = nv.stale_note(self._classifier_path)
+        if stale:
+            self._novelty = None
+            self._novelty_note = stale
+            return
+
         self._novelty = nv.Profile.load(nv.profile_path(self._classifier_path))
         if self._novelty is None or not len(self._novelty):
             self._novelty = None
@@ -1029,8 +1039,11 @@ class InferenceWorker(QObject):
         crops = []
         cap = max(1, int(self._crop_px) * 2)
         for quad in self._detection_quads(results):
+            # landscape=True, exactly as classify_export takes the training
+            # crops. These two must agree or the classifier is handed a pose it
+            # was never shown.
             patch = rectify_quad(frame, expand_quad(quad, self._margin),
-                                 max_side=cap)
+                                 max_side=cap, landscape=True)
             if patch is None or patch.size == 0:
                 crops.append(None)
                 continue

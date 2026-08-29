@@ -345,6 +345,32 @@ def homography_from_unit(quad: Quad, orient: bool = True) -> Matrix | None:
                                   order_quad(quad) if orient else list(quad))
 
 
+# Any clearly-landscape target. align_quad only cares which side of 1 the two
+# aspects fall on, so the exact number is arbitrary -- it just has to be far
+# enough from square to clear the SQUARE_TOL guard.
+LANDSCAPE = 100.0
+
+
+def landscape_quad(quad: Quad) -> Quad:
+    """Corners ordered so the quad's LONG edge is its width.
+
+    For flattening a crop the classifier will see. The same label photographed
+    flat and standing up produces a 300x90 crop and a 90x300 one -- the same
+    picture turned a quarter, which a classifier has no way to know is the same
+    picture. It learns the label twice, out of a dataset that did not have
+    enough for once.
+
+    Turning every crop the same way costs nothing and it is not a guess about
+    which way up the label is: it says only that the long side runs across,
+    which is true of a label however it was presented. The half-turn ambiguity
+    is untouched and stays where it belongs, with whatever reads the label.
+
+    Applied identically when crops are exported for training and when they are
+    taken at runtime, so nothing sees a shape it did not train on.
+    """
+    return align_quad(quad, LANDSCAPE)
+
+
 def oriented(quad: Quad, flipped: bool = False, aspect: float = 0.0) -> Quad:
     """A quad in the label's own reading order: ordered, aligned, maybe turned.
 

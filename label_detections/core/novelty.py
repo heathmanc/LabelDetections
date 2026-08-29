@@ -83,6 +83,35 @@ def profile_path(weights: str | Path) -> Path:
     return weights.with_suffix(weights.suffix + PROFILE_SUFFIX)
 
 
+def is_stale(weights: str | Path) -> bool:
+    """Was this profile measured through older weights than the ones on disk?
+
+    A profile describes where each class sits in ONE model's feature space, and
+    that space moves every time the model is retrained. Loading yesterday's
+    profile against today's weights does not fail -- it silently refuses the
+    wrong crops and accepts the wrong ones, which is worse than not running at
+    all, because a refusal that means nothing still reads as a refusal.
+
+    Rebuilding it is a button, and the instruction to press it lived in a
+    tooltip. This is the check that does not depend on anyone having read it.
+    """
+    weights = Path(weights)
+    profile = profile_path(weights)
+    try:
+        return profile.stat().st_mtime < weights.stat().st_mtime
+    except OSError:
+        return False
+
+
+def stale_note(weights: str | Path) -> str:
+    """One line for the readout when the profile no longer fits the weights."""
+    if not is_stale(weights):
+        return ""
+    return ("novelty profile is older than these weights -- it was measured "
+            "through a different feature space, so it is not being used. "
+            "Rebuild it with Novelty on the Detect tab.")
+
+
 def unit(vec) -> np.ndarray:
     """L2-normalised, and safe on a zero vector."""
     arr = np.asarray(vec, dtype=np.float64).ravel()
