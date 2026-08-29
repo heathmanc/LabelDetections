@@ -2726,8 +2726,16 @@ class MainWindow(QMainWindow):
         self.live_stop_btn.setEnabled(True)
         self.live_status_label.setText("Loading the model...")
         self.status.showMessage("Live detect: loading model", 4000)
+        # Taken down by _on_live_loaded or _on_live_failed. This is the one
+        # load that runs off the GUI thread, so its marquee actually moves.
+        self._show_loading(
+            "Loading the detector",
+            "And the stage 2 classifier, if one is set. First run of a model "
+            "also builds its CUDA kernels, which is slower than the rest.")
 
     def stop_live_detect(self) -> None:
+        # Stopped before it finished loading: nothing else would take this down.
+        self._hide_loading()
         thread = getattr(self, "_live_thread", None)
         worker = getattr(self, "_live_worker", None)
         if worker is not None:
@@ -2780,12 +2788,14 @@ class MainWindow(QMainWindow):
         return getattr(self, "_live_thread", None) is not None
 
     def _on_live_loaded(self, message: str) -> None:
+        self._hide_loading()
         self._live_loaded = True
         self._live_busy = False
         self._live_device_line = message
         self.live_status_label.setText(f"{message}\nWatching the live view.")
 
     def _on_live_failed(self, message: str) -> None:
+        self._hide_loading()
         self._live_busy = False
         self.live_status_label.setText(f"Inference problem: {message}")
 
@@ -3125,6 +3135,7 @@ class MainWindow(QMainWindow):
         clean shutdown.
         """
         try:
+            self._hide_loading()
             if self._live_running():
                 self.stop_live_detect()
             if self._camera_is_live():
@@ -3499,6 +3510,11 @@ class MainWindow(QMainWindow):
         else:
             message = "Outlining..."
         self.status.showMessage(message, 20000 if first else 4000)
+        if first:
+            self._show_loading(
+                f"Loading {self._assist_model_name()}"
+                + (f"  ({size})" if size else ""),
+                "Downloads once on first use, then outlining is immediate.")
         QApplication.setOverrideCursor(Qt.WaitCursor)
         QApplication.processEvents()
         try:
@@ -3506,10 +3522,12 @@ class MainWindow(QMainWindow):
                 frame, x, y, int(segment_assist.DEFAULT_ASSIST_PX))
         except AssistUnavailable as exc:
             QApplication.restoreOverrideCursor()
+            self._hide_loading()
             self.set_outline_assist(False)
             QMessageBox.warning(self, "Click to Outline", str(exc))
             return
         finally:
+            self._hide_loading()
             if QApplication.overrideCursor() is not None:
                 QApplication.restoreOverrideCursor()
 
@@ -6077,7 +6095,11 @@ class MainWindow(QMainWindow):
                 "pip install ultralytics\n\n"
                 f"Original error: {e}"
             )
-        model = YOLO(str(p))
+        self._show_loading(f"Loading {model_name}", p.name)
+        try:
+            model = YOLO(str(p))
+        finally:
+            self._hide_loading()
         self._test_model = model
         self._test_model_path = str(p)
         return model
@@ -8348,6 +8370,58 @@ class MainWindow(QMainWindow):
             f"  yolo classify train data={classify_dir} model=yolo11s-cls.pt imgsz={crop_px}"
         )
         self.status.showMessage(f"Exported two-stage datasets to {classify_dir.parent}", 8000)
+
+    def _show_loading(self, what: str, detail: str = "") -> None:
+        """Put a busy dialog up while a model loads. Idempotent.
+
+        A model load is the longest thing this application does with the least
+        to show for it: no progress to report, no partial result, and on a
+        first click a download of up to 1.2 GB. All it had was a line in the
+        status bar at the bottom of the window, which is where a message goes
+        when it does not matter.
+
+        Indeterminate on purpose. Neither Ultralytics nor torch hands back a
+        byte count, and a bar that moved without knowing anything would be a
+        lie told to look reassuring.
+
+        Honest about one thing: where the load blocks the GUI thread -- the
+        outline model and the test model both do -- the marquee stops animating
+        while it runs. The dialog stays up and readable, which is the part that
+        matters; a frozen window with nothing on it is what this replaces.
+        """
+        from PySide6.QtWidgets import QProgressDialog
+
+        self._hide_loading()
+        text = f"{what}\n\n{detail}" if detail else what
+        dialog = QProgressDialog(text, "", 0, 0, self)
+        dialog.setWindowTitle("Loading")
+        # No cancel: a torch load and an in-flight download cannot be stopped
+        # part way and left in a state anything downstream would understand.
+        dialog.setCancelButton(None)
+        dialog.setWindowModality(Qt.WindowModal)
+        dialog.setMinimumDuration(0)
+        dialog.setAutoClose(False)
+        dialog.setAutoReset(False)
+        dialog.setMinimumWidth(460)
+        self._loading_dialog = dialog
+        # show(), never exec(): exec() runs its own event loop, and a modal
+        # loop around a blocking load is how a window stops answering the
+        # system entirely.
+        dialog.show()
+        QApplication.processEvents()
+        QApplication.processEvents()
+
+    def _hide_loading(self) -> None:
+        """Take the busy dialog down. Safe when there is nothing up."""
+        dialog = getattr(self, "_loading_dialog", None)
+        self._loading_dialog = None
+        if dialog is not None:
+            try:
+                dialog.close()
+                dialog.deleteLater()
+            except Exception:
+                pass
+            QApplication.processEvents()
 
     def _run_with_progress(self, title: str, work):
         """Run a blocking export behind a progress dialog.
