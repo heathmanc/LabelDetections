@@ -90,3 +90,114 @@ def limits_note(width: tuple[int, int, int], height: tuple[int, int, int]) -> st
     return (f"Camera accepts {w_min}-{w_max} wide by {h_min}-{h_max} "
             f"high{steps}. Anything on that grid works; the list is what is "
             f"worth choosing.")
+
+
+# --- exposure ---------------------------------------------------------------
+#
+# Exposure has no grid and no natural set of modes, so the picker cannot be
+# built the way the size one is. What it has instead is an anchor: the value
+# auto exposure settles on for the light actually in the room.
+#
+# That is the whole workflow on a fixed rig. Let auto find it, read what it
+# found, then freeze it -- because auto exposure on a production line is a
+# variation nobody asked for. A battery that happens to follow a shiny one gets
+# exposed differently from one that follows a matt one, and stage 2 is then
+# being asked to learn a lighting difference that carries no information about
+# which label it is.
+
+# A bracket around whatever auto chose, for finding the edge of usable. Wide
+# enough to see a difference, narrow enough that every step is still a picture.
+BRACKET = (0.5, 0.71, 1.0, 1.41, 2.0)
+
+
+def fps_ceiling(exposure_us: float) -> float:
+    """The most frames a second an exposure this long allows. 0 when unbounded.
+
+    The sensor cannot start the next exposure until this one ends, so a 50 ms
+    exposure caps the camera at 20/s however it is configured -- and a rig
+    asking for 30 fps then quietly runs at 20 with nothing saying why.
+    """
+    exposure_us = float(exposure_us or 0)
+    return (1_000_000.0 / exposure_us) if exposure_us > 0 else 0.0
+
+
+# Above this the exposure is not what limits the frame rate -- the interface,
+# the model or the belt is -- so saying it would be noise on every row.
+RATE_WORTH_SAYING = 200.0
+
+
+def rate_note(exposure_us: float) -> str:
+    """", max 60/s" when the exposure is what caps the rate, else "".
+
+    Formatted rather than rounded to zero: a ten second exposure caps the
+    camera at 0.1/s, and printing "max 0/s" reads as a fault instead of as the
+    perfectly correct consequence of asking for a ten second exposure.
+    """
+    ceiling = fps_ceiling(exposure_us)
+    if not ceiling or ceiling >= RATE_WORTH_SAYING:
+        return ""
+    return f", max {ceiling:.0f}/s" if ceiling >= 1 else f", max {ceiling:.2g}/s"
+
+
+def exposure_choices(low: float, high: float, current: float,
+                     auto: bool = True, bracket=BRACKET) -> list[tuple[str, int]]:
+    """``(label, microseconds)`` rows for the picker, fastest first.
+
+    Built around ``current`` rather than around round numbers, because the
+    number that matters is the one that suits this light, and only the camera
+    knows it. The ends of the range come along so a value can be typed knowing
+    what it will be clamped to.
+
+    ``auto`` only names the anchor row. It is worth naming truthfully: "what
+    auto settled on" is a reading taken from the light in the room, while "what
+    it is set to now" is a number somebody typed earlier, and only the first of
+    those is evidence about anything.
+    """
+    low, high = float(low or 0), float(high or 0)
+    if high <= 0:
+        return []
+    rows: list[tuple[str, int]] = []
+    seen: set[int] = set()
+
+    def add(label: str, value: float) -> None:
+        clamped = int(round(max(low, min(float(value), high))))
+        if clamped in seen:
+            return
+        seen.add(clamped)
+        rows.append((f"{label}  --  {clamped:,} us{rate_note(clamped)}", clamped))
+
+    # Order of adding decides which label a value keeps when two rows land on
+    # the same number, and two collisions are worth getting right. A bracket
+    # step past the end of the range clamps onto it, and calling the camera's
+    # ceiling "2x that" loses the only row that says where the ceiling is. So
+    # the reading goes in first -- it is the point of the whole picker -- then
+    # the ends, then the steps around it, which are the rows that can be spared.
+    if current > 0:
+        add("what auto settled on" if auto else "what it is set to now", current)
+    add("shortest the camera takes", low)
+    add("longest the camera takes", high)
+    if current > 0:
+        for factor in sorted(bracket):
+            if factor != 1.0:
+                add(f"{factor:g}x that", current * factor)
+    rows.sort(key=lambda row: row[1])
+    return rows
+
+
+def exposure_note(limits: dict, wanted_fps: float = 0.0) -> str:
+    """What the camera said about exposure, and what it costs in frame rate."""
+    if not limits:
+        return ""
+    low, high = float(limits.get("min", 0)), float(limits.get("max", 0))
+    current = float(limits.get("current", 0))
+    if high <= 0:
+        return ""
+    parts = [f"Camera takes {low:,.0f} to {high:,.0f} us"]
+    if current > 0:
+        parts.append(("auto is on and has settled at" if limits.get("auto")
+                      else "currently") + f" {current:,.0f} us")
+    ceiling = fps_ceiling(current)
+    if current > 0 and wanted_fps and ceiling and wanted_fps > ceiling:
+        parts.append(f"which caps the camera at {ceiling:.0f}/s -- below the "
+                     f"{wanted_fps:.0f}/s asked for")
+    return "; ".join(parts) + "."

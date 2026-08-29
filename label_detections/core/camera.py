@@ -416,6 +416,36 @@ class CameraSource:
         """
         return self.cap is not None and hasattr(self.cap, "Width")
 
+    # Two spellings of one node. USB and newer firmware call it ExposureTime;
+    # older GigE firmware calls it ExposureTimeAbs, and a rig can have one of
+    # each on the bench.
+    EXPOSURE_NODES = ("ExposureTime", "ExposureTimeAbs")
+
+    def exposure_limits(self) -> dict:
+        """What exposures this camera takes, and what it is doing now.
+
+        ``{"min": us, "max": us, "current": us, "auto": bool}``, or empty when
+        there is nothing to ask -- no camera, not a Basler, or a model whose
+        node is not readable.
+
+        ``current`` is the number worth having. Exposure has no natural set of
+        modes to pick from, so the useful anchor is not a round value but the
+        one auto exposure has just settled on for this light: read it, then
+        freeze it, and every frame after that is exposed identically.
+        """
+        if self.cap is None or pylon is None or not self._is_basler():
+            return {}
+        for node in self.EXPOSURE_NODES:
+            high = float(self._basler_node_limit(node, "GetMax", 0) or 0)
+            if high <= 0:
+                continue
+            current = float(self._get_basler_value(node, 0) or 0)
+            return {"min": float(self._basler_node_limit(node, "GetMin", 0) or 0),
+                    "max": high, "current": current,
+                    "auto": str(self._get_basler_value("ExposureAuto", "Off"))
+                            not in ("Off", "0", "")}
+        return {}
+
     def _set_basler_aoi(self, width: int | None, height: int | None) -> str:
         """Set Basler AOI deterministically.
 

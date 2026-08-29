@@ -5149,10 +5149,47 @@ class MainWindow(QMainWindow):
         exposure_us_edit.setAlignment(Qt.AlignCenter)
         apply_exposure_btn = QPushButton("Apply Exposure")
         apply_exposure_btn.setProperty("compactCaptureButton", True)
+        # Asked of the camera rather than typed blind. Exposure has no grid to
+        # enumerate, so unlike the size picker this cannot list what is valid --
+        # what it can do is read the one number that matters, which is what auto
+        # exposure has settled on for the light actually in the room.
+        #
+        # That reading is the whole workflow on a fixed rig: let auto find it,
+        # take it, then freeze it. Auto exposure left running is a variation
+        # nobody asked for -- a battery following a shiny one gets exposed
+        # differently from one following a matt one -- and stage 2 would be
+        # learning a lighting difference that says nothing about which label it
+        # is. So picking a row here also unticks Auto, because choosing an
+        # exposure IS the act of freezing it.
+        exposure_combo = QComboBox()
+        exposure_combo.setEnabled(False)
+        exposure_combo.addItem("Detect to fill this", None)
+        exposure_detect_btn = QPushButton("Detect")
+        exposure_detect_btn.setFixedWidth(70)
+        exposure_detect_btn.setToolTip(
+            "Ask the camera what it takes, and what auto exposure has just "
+            "settled on for this light.\n\n"
+            "Needs the camera open, and only a Basler answers.\n\n"
+            "The way to use it: leave Auto exposure on, point the camera at a "
+            "battery under the lighting you will run, press Detect, then pick "
+            "the reading. That unticks Auto, so every frame after it is exposed "
+            "identically.\n\n"
+            "The rows either side of it are for finding the edge of usable. A "
+            "long exposure also caps the frame rate, which each row says.")
+        exposure_detect_btn.clicked.connect(
+            lambda: self._fill_camera_exposure(
+                exposure_combo, exposure_us_edit, exposure_auto_check))
+        exposure_combo.activated.connect(
+            lambda _i: self._apply_camera_exposure(
+                exposure_combo, exposure_us_edit, exposure_auto_check))
+
         exposure_layout.addWidget(exposure_auto_check, 0, 0, 1, 2)
         exposure_layout.addWidget(QLabel("Manual us"), 1, 0)
         exposure_layout.addWidget(exposure_us_edit, 1, 1)
-        exposure_layout.addWidget(apply_exposure_btn, 2, 0, 1, 2, Qt.AlignLeft)
+        exposure_layout.addWidget(QLabel("Exposures"), 2, 0)
+        exposure_layout.addWidget(exposure_combo, 2, 1, 1, 2)
+        exposure_layout.addWidget(exposure_detect_btn, 2, 3)
+        exposure_layout.addWidget(apply_exposure_btn, 3, 0, 1, 2, Qt.AlignLeft)
         exposure_layout.setColumnStretch(1, 1)
         layout.addWidget(exposure_box)
 
@@ -5897,6 +5934,63 @@ class MainWindow(QMainWindow):
             return
         width_edit.setText(str(int(size[0])))
         height_edit.setText(str(int(size[1])))
+
+    def _fill_camera_exposure(self, combo, exposure_edit, auto_check) -> None:
+        """Put what the camera takes, and what auto found, into the picker."""
+        from label_detections.core import camera_modes
+
+        try:
+            limits = self.camera.exposure_limits()
+        except Exception:
+            limits = {}
+        combo.clear()
+        if not limits:
+            combo.addItem("Nothing to ask -- open a Basler first", None)
+            combo.setEnabled(False)
+            QMessageBox.information(
+                self, "Camera exposure",
+                "No exposure limits to read.\n\n"
+                "This asks the camera itself, which only a Basler answers, and "
+                "only while it is open. For any other backend, type a value and "
+                "the status line reports what actually came back.")
+            return
+
+        auto = bool(limits.get("auto"))
+        rows = camera_modes.exposure_choices(
+            limits.get("min", 0), limits.get("max", 0),
+            limits.get("current", 0), auto=auto)
+        combo.setEnabled(True)
+        for text, value in rows:
+            combo.addItem(text, value)
+        note = camera_modes.exposure_note(limits, self._int_line_value(self.fps_spin, 0))
+        combo.setToolTip(note)
+        self.status.showMessage(note, 12000)
+        index = combo.findData(self._int_line_value(exposure_edit, 0))
+        if index >= 0:
+            combo.setCurrentIndex(index)
+        elif auto:
+            # Land on the reading rather than on the shortest row: it is the
+            # one worth taking, and the one somebody pressed Detect to see.
+            settled = combo.findData(int(round(float(limits.get("current", 0)))))
+            if settled >= 0:
+                combo.setCurrentIndex(settled)
+
+    def _apply_camera_exposure(self, combo, exposure_edit, auto_check) -> None:
+        """Take a value from the picker, and freeze it.
+
+        Unticking Auto is not a side effect. An exposure chosen while auto
+        exposure is still running is a number the camera is free to overwrite
+        on the next frame -- choosing one IS the act of freezing it.
+        """
+        value = combo.currentData()
+        if not value:
+            return
+        exposure_edit.setText(str(int(value)))
+        if auto_check is not None and auto_check.isChecked():
+            auto_check.setChecked(False)
+            self.status.showMessage(
+                f"Exposure fixed at {int(value):,} us -- auto exposure turned "
+                f"off so every frame is exposed the same.", 8000)
 
     def _camera_is_live(self) -> bool:
         try:
